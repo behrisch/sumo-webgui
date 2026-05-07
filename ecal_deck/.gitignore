@@ -1,0 +1,32 @@
+# Python - generated from proto/sumo.proto via protoc
+proto/sumo_pb2.py
+proto/__pycache__/
+
+# Frontend - generated from proto/sumo.proto via npm run generate
+frontend/src/generated/
+
+# Frontend - dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/package-lock.json
+frontend/*.local
+
+# Logs
+frontend/logs/
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

@@ -1,0 +1,74 @@
+syntax = "proto3";
+package sumo;
+
+message Vehicle {
+  string              id         = 1;
+  double              x          = 2;
+  double              y          = 3;
+  float               speed      = 4;
+  float               angle      = 5;
+  string              type_id    = 6;
+  map<string, double> attributes = 7;
+}
+
+message SimStep {
+  int64            time_ms  = 1;
+  repeated Vehicle vehicles = 2;
+}
+
+message TLSPhase {
+  string id    = 1;
+  string state = 2;
+}
+
+message TLSUpdate {
+  int64             time_ms = 1;
+  repeated TLSPhase lights  = 2;
+}
+
+message NetworkData {
+  string geojson        = 1;
+  bool   geo_referenced = 2;
+}
+
+message EdgeData {
+  string              id         = 1;
+  map<string, double> attributes = 2;
+}
+
+message EdgeDataUpdate {
+  int64             time_ms = 1;
+  repeated EdgeData edges   = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Service: sumo_control
+// ---------------------------------------------------------------------------
+
+message CommandAck {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+message SetDelayRequest  { int32 delay_ms = 1; }
+message PauseRequest     {}
+message ResumeRequest    {}
+message StepRequest      {}
+message GetStateRequest  {}
+message GetStateResponse {
+  int32 delay_ms = 1;
+  bool  paused   = 2;
+}
+
+message GetAttributesRequest  {}
+message GetAttributesResponse {
+  repeated string vehicle_available = 1;
+  repeated string vehicle_enabled   = 2;
+  repeated string edge_available    = 3;
+  repeated string edge_enabled      = 4;
+}
+
+message SetAttributesRequest {
+  repeated string vehicle_attributes = 1;
+  repeated string edge_attributes    = 2;
+}
