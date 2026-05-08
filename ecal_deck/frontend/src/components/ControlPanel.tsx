@@ -32,6 +32,10 @@ interface Props {
   onEdgeColorAttr: (v: string) => void;
   attributeConfig: GetAttributesResponse | null;
   onSetAttributes: (vehicle: string[], edge: string[]) => void;
+  cfgPath: string;
+  onCfgPath: (v: string) => void;
+  onLoad: () => void;
+  onBrowse: () => void;
 }
 
 const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6 };
@@ -124,6 +128,19 @@ export function ControlPanel(p: Props) {
           </select>
         </div>
       )}
+
+      <div style={{ borderTop: '1px solid #444' }} />
+
+      {/* reload */}
+      <div style={row}>
+        <input value={p.cfgPath} onChange={(e) => p.onCfgPath(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && p.onLoad()}
+          placeholder="path/to/sim.sumocfg"
+          style={{ flex: 1, background: '#111', color: '#fff', border: '1px solid #555',
+                   borderRadius: 3, padding: '1px 4px', fontFamily: 'monospace', fontSize: 11 }} />
+        <button onClick={p.onLoad}   style={{ ...btn, fontSize: 11, padding: '1px 6px' }}>Load</button>
+        <button onClick={p.onBrowse} style={{ ...btn, fontSize: 11, padding: '1px 6px' }}>…</button>
+      </div>
 
       {p.attributeConfig && (
         <>

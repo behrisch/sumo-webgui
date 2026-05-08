@@ -26,7 +26,9 @@ SERVICE_NAME = "sumo_control"
 
 # registry: method name → (request proto class, response proto class)
 _SERVICE_REGISTRY = {
-    "set_delay":      (sumo_pb2.SetDelayRequest,      sumo_pb2.CommandAck),
+    "list_dir":       (sumo_pb2.ListDirRequest,         sumo_pb2.ListDirResponse),
+    "load":           (sumo_pb2.LoadRequest,            sumo_pb2.CommandAck),
+    "set_delay":      (sumo_pb2.SetDelayRequest,       sumo_pb2.CommandAck),
     "pause":          (sumo_pb2.PauseRequest,         sumo_pb2.CommandAck),
     "resume":         (sumo_pb2.ResumeRequest,        sumo_pb2.CommandAck),
     "step":           (sumo_pb2.StepRequest,          sumo_pb2.CommandAck),
@@ -154,6 +156,8 @@ async def _handler(websocket) -> None:
                     "id": msg.get("id"),
                     **response,
                 }))
+    except Exception:
+        pass  # client disconnected without close frame (tab close, reload, etc.)
     finally:
         _connected.discard(websocket)
 

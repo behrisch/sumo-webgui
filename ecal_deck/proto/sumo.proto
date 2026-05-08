@@ -72,3 +72,13 @@ message SetAttributesRequest {
   repeated string vehicle_attributes = 1;
   repeated string edge_attributes    = 2;
 }
+
+message LoadRequest { string sumocfg_path = 1; }
+
+message ListDirRequest  { string path = 1; }
+message ListDirResponse {
+  string          path  = 1;
+  repeated string dirs  = 2;
+  repeated string files = 3;
+  string          error = 4;
+}

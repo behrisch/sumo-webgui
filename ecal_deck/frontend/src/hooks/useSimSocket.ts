@@ -8,6 +8,8 @@ export interface SimControlState {
   paused: boolean;
 }
 
+export type CommandResponse = Record<string, unknown> & { ok?: boolean; error?: string };
+
 export interface SimState {
   connected: boolean;
   network: NetworkData | null;
@@ -17,7 +19,7 @@ export interface SimState {
   controlState: SimControlState | null;
   attributeConfig: GetAttributesResponse | null;
   updateAttributeConfig: (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) => void;
-  sendCommand: (service: string, request?: Record<string, unknown>) => void;
+  sendCommand: (service: string, request?: Record<string, unknown>, onResponse?: (r: CommandResponse) => void) => void;
 }
 
 export function useSimSocket(url: string): SimState {
@@ -35,10 +37,14 @@ export function useSimSocket(url: string): SimState {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmounted = useRef(false);
 
-  const sendCommand = (service: string, request: Record<string, unknown> = {}) => {
+  const pendingRef = useRef<Map<string, (r: CommandResponse) => void>>(new Map());
+
+  const sendCommand = (service: string, request: Record<string, unknown> = {}, onResponse?: (r: CommandResponse) => void) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'command', service, request, id: crypto.randomUUID() }));
+    const id = crypto.randomUUID();
+    if (onResponse) pendingRef.current.set(id, onResponse);
+    ws.send(JSON.stringify({ type: 'command', service, request, id }));
   };
 
   useEffect(() => {
@@ -68,6 +74,12 @@ export function useSimSocket(url: string): SimState {
             const d = envelope.data as { delay_ms?: number; paused?: boolean; error?: string };
             if (!d.error && d.delay_ms !== undefined)
               setControlState({ delayMs: d.delay_ms, paused: d.paused ?? false });
+            break;
+          }
+          case 'response': {
+            const r = envelope as { id?: string; data?: unknown } & CommandResponse;
+            const cb = r.id ? pendingRef.current.get(r.id) : undefined;
+            if (cb) { pendingRef.current.delete(r.id!); cb(r); }
             break;
           }
           case 'attributes': {
