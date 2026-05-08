@@ -42,8 +42,6 @@ interface Props {
   onStepConfig: (min: number, max: number, autotune: boolean) => void;
   perf: PerfStats;
   cfgPath: string;
-  onCfgPath: (v: string) => void;
-  onLoad: () => void;
   onBrowse: () => void;
   onReload: () => void;
 }
@@ -61,6 +59,8 @@ export function ControlPanel(p: Props) {
   const t = ((p.simStep?.time_ms ?? 0) / 1000).toFixed(1);
   const n = p.simStep?.vehicles?.length ?? 0;
 
+  const cfgName = p.cfgPath ? p.cfgPath.split('/').pop() : null;
+
   return (
     <div style={{
       position: 'absolute', top: 8, right: 8, padding: '8px 12px',
@@ -68,6 +68,14 @@ export function ControlPanel(p: Props) {
       fontSize: 12, borderRadius: 6, display: 'flex', flexDirection: 'column',
       gap: 6, minWidth: 220, userSelect: 'none',
     }}>
+
+      {/* currently loaded config */}
+      {cfgName && (
+        <div title={p.cfgPath} style={{ opacity: 0.6, fontSize: 11, overflow: 'hidden',
+          textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {cfgName}
+        </div>
+      )}
 
       {/* transport controls */}
       <div style={row}>
@@ -141,19 +149,6 @@ export function ControlPanel(p: Props) {
           </select>
         </div>
       )}
-
-      <div style={{ borderTop: '1px solid #444' }} />
-
-      {/* reload */}
-      <div style={row}>
-        <input value={p.cfgPath} onChange={(e) => p.onCfgPath(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && p.onLoad()}
-          placeholder="path/to/sim.sumocfg"
-          style={{ flex: 1, background: '#111', color: '#fff', border: '1px solid #555',
-                   borderRadius: 3, padding: '1px 4px', fontFamily: 'monospace', fontSize: 11 }} />
-        <button onClick={p.onLoad}   style={{ ...btn, fontSize: 11, padding: '1px 6px' }}>Load</button>
-        <button onClick={p.onBrowse} style={{ ...btn, fontSize: 11, padding: '1px 6px' }}>…</button>
-      </div>
 
       {/* step interval config */}
       <div style={{ borderTop: '1px solid #444' }} />

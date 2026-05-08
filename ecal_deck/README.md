@@ -4,23 +4,98 @@ Real-time SUMO simulation visualizer using deck.gl and MapLibre, communicating v
 
 ## Prerequisites
 
-| Dependency | Version | Notes |
-|------------|---------|-------|
-| SUMO | built from source | `$SUMO_HOME` must point to repo root |
-| Python | 3.12 | via `tests/sumo_test_env/` |
-| eclipse-ecal | any | installed in `tests/sumo_test_env/` |
-| protoc | 3.x | `apt install protobuf-compiler` |
-| Node.js | 18+ | `apt install nodejs` |
-| npm | 9+ | `apt install npm` |
+| Dependency | Version | Linux | macOS | Windows |
+|------------|---------|-------|-------|---------|
+| SUMO | built from source | — | — | — |
+| Python | 3.12 | system / pyenv | `brew install python@3.12` | python.org installer |
+| eclipse-ecal | any | `pip install eclipse-ecal` | `pip install eclipse-ecal` | `pip install eclipse-ecal` |
+| websockets | 16+ | `pip install websockets` | `pip install websockets` | `pip install websockets` |
+| protobuf | 6.x | `pip install protobuf` | `pip install protobuf` | `pip install protobuf` |
+| libsumo | same as SUMO | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* |
+| protoc | 3.x | `apt install protobuf-compiler` | `brew install protobuf` | `winget install Google.Protobuf` |
+| Node.js | 18+ | `apt install nodejs` | `brew install node` | `winget install OpenJS.NodeJS` |
+| npm | 9+ | `apt install npm` | bundled with Node | bundled with Node |
+
+`$SUMO_HOME` must point to the SUMO repo root on all platforms.
+
+`libsumo` is optional but strongly recommended — it runs the simulation in-process (no socket
+overhead) and is significantly faster than the TraCI fallback. If `libsumo` is not available
+the publisher falls back to TraCI automatically. When SUMO is built from source, `libsumo` may
+already be available on the Python path via `$SUMO_HOME/tools`; `pip install libsumo` installs
+a pre-built standalone version.
+
+## Platform notes
+
+### macOS
+
+The setup is nearly identical to Linux. Only two differences:
+
+**`run.sh` uses `ss` (Linux-only).** Replace the readiness check with `lsof`:
+```bash
+# replace this line in run.sh:
+until ss -tlnp 2>/dev/null | grep -q ":$WS_PORT "; do sleep 0.2; done
+# with:
+until lsof -i :$WS_PORT | grep -q LISTEN; do sleep 0.2; done
+```
+
+**Python environment:** `tests/sumo_test_env/` was created on Linux and will not work on macOS.
+Create your own:
+```bash
+python3.12 -m venv ecal_deck/.venv
+source ecal_deck/.venv/bin/activate
+pip install eclipse-ecal websockets protobuf libsumo
+```
+Then update `PYTHON` in `run.sh` to `ecal_deck/.venv/bin/python`.
+
+### Windows
+
+**Activate the Python environment (Command Prompt):**
+```bat
+tests\sumo_test_env\Scripts\activate.bat
+```
+or PowerShell:
+```powershell
+tests\sumo_test_env\Scripts\Activate.ps1
+```
+As with macOS, `tests/sumo_test_env/` is Linux-specific. Create your own:
+```powershell
+python -m venv ecal_deck\.venv
+ecal_deck\.venv\Scripts\Activate.ps1
+pip install eclipse-ecal websockets protobuf libsumo
+```
+
+**Set SUMO_HOME (Command Prompt):**
+```bat
+set SUMO_HOME=%CD%
+```
+PowerShell:
+```powershell
+$env:SUMO_HOME = (Get-Location).Path
+```
+
+**`run.sh` does not run natively on Windows.** Use one of:
+- **Git Bash** — run `./run.sh` from the Git Bash terminal (recommended)
+- **WSL** — run the full workflow inside WSL
+- **Manual** — open three separate terminals and start bridge, publisher, and frontend dev server individually (see [Running](#running) below)
+
+> **Note:** eCAL on macOS and Windows is supported but less tested than Linux.
+> If you encounter issues, check the [Eclipse eCAL documentation](https://eclipse-ecal.github.io/ecal/).
 
 ## One-time setup
 
 All commands are run from the SUMO repo root (`$SUMO_HOME`).
 
 **1. Activate the Python environment and set SUMO_HOME:**
+
+Linux / macOS:
 ```bash
-source tests/sumo_test_env/bin/activate
+source tests/sumo_test_env/bin/activate   # or ecal_deck/.venv/bin/activate on macOS
 export SUMO_HOME=$PWD
+```
+Windows (PowerShell):
+```powershell
+ecal_deck\.venv\Scripts\Activate.ps1
+$env:SUMO_HOME = (Get-Location).Path
 ```
 
 **2. Generate Python protobuf bindings:**
@@ -32,7 +107,7 @@ protoc -I ecal_deck/proto --python_out=ecal_deck/proto ecal_deck/proto/sumo.prot
 ```bash
 cd ecal_deck/frontend
 npm install       # installs deck.gl, MapLibre, React, Vite, ts-proto, …
-npm run generate  # generates src/generated/sumo.ts from proto/sumo.proto
+npm run generate  # generates src/generated/sumo.ts from proto/sumo.proto (via generate.ts + tsx)
 cd ../..
 ```
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import DeckGL from '@deck.gl/react';
 import { OrthographicView } from '@deck.gl/core';
@@ -141,13 +141,30 @@ export default function App() {
 
   const [cfgPath, setCfgPath] = useState('');
   const [showBrowser, setShowBrowser] = useState(false);
+  const loadingToastId = useRef<string | null>(null);
+
   const handleLoad = (path = cfgPath.trim()) => {
     if (!path) return;
     setCfgPath(path);
+    if (loadingToastId.current) toast.dismiss(loadingToastId.current);
+    loadingToastId.current = toast.loading('Loading simulation…') as string;
     sendCommand('load', { sumocfg_path: path }, (resp) => {
-      if (!resp.ok) toast.error(String(resp.error ?? 'Load failed'));
+      if (!resp.ok) {
+        toast.dismiss(loadingToastId.current ?? undefined);
+        loadingToastId.current = null;
+        toast.error(String(resp.error ?? 'Load failed'));
+      }
+      // success: toast stays as loading until network arrives (see useEffect below)
     });
   };
+
+  // dismiss loading toast when network data arrives
+  useEffect(() => {
+    if (network && loadingToastId.current) {
+      toast.success('Simulation loaded', { id: loadingToastId.current });
+      loadingToastId.current = null;
+    }
+  }, [network]);
 
   const handlePause  = () => { sendCommand('pause');  setPaused(true);  };
   const handleResume = () => { sendCommand('resume'); setPaused(false); };
@@ -236,7 +253,7 @@ export default function App() {
       atMinBound={controlState?.step_at_min_bound ?? false}
       atMaxBound={controlState?.step_at_max_bound ?? false}
       onStepConfig={(min, max, tune) => { setIntervalMin(min); setIntervalMax(max); setAutotune(tune); sendStepConfig(min, max, tune); }}
-      cfgPath={cfgPath} onCfgPath={setCfgPath} onLoad={() => handleLoad()} onBrowse={() => setShowBrowser(true)}
+      cfgPath={cfgPath} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
       perf={perf}
     />

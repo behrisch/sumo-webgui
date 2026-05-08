@@ -299,13 +299,12 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
 
-- **Control panel load UX cleanup**: the load row (`[text input][Load][…]`) duplicates the
-  transport-controls `[Load][↺]` buttons and confuses users. Fix:
-  - Move the currently loaded `.sumocfg` path to a read-only display line at the very top of the
-    control panel (above the transport controls)
-  - Remove the text input + `Load` + `…` row entirely from the config section
-  - The transport `[Load]` button (opens `FileBrowser`) and `[↺]` (reload current) already provide
-    all needed functionality; the text input is redundant once the path is shown read-only at top
+- ~~**Loading feedback**~~: implemented — `toast.loading` shown on `load` command, transitions
+  to `toast.success` when network arrives, `toast.error` on failure.
+
+- ~~**Control panel load UX cleanup**~~: implemented — filename shown read-only at top of panel
+  (basename, full path on hover); redundant text input + Load + `…` row removed; transport
+  `[Load]` and `[↺]` buttons remain as the sole controls.
 
 - **README: Windows and macOS setup**: current README assumes Linux. Add platform-specific
   sections for:
