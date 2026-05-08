@@ -36,6 +36,7 @@ interface Props {
   onCfgPath: (v: string) => void;
   onLoad: () => void;
   onBrowse: () => void;
+  onReload: () => void;
 }
 
 const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6 };
@@ -49,7 +50,7 @@ const sel: React.CSSProperties = {
 
 export function ControlPanel(p: Props) {
   const t = ((p.simStep?.time_ms ?? 0) / 1000).toFixed(1);
-  const n = p.simStep?.vehicles.length ?? 0;
+  const n = p.simStep?.vehicles?.length ?? 0;
 
   return (
     <div style={{
@@ -65,6 +66,9 @@ export function ControlPanel(p: Props) {
           ? <button style={btn} onClick={p.onResume}>▶</button>
           : <button style={btn} onClick={p.onPause}>⏸</button>}
         {p.paused && <button style={btn} onClick={p.onStep}>→</button>}
+        <button style={btn} title="Load new simulation" onClick={p.onBrowse}>Load</button>
+        <button style={{ ...btn, opacity: p.cfgPath ? 1 : 0.4 }} title="Reload current simulation"
+          onClick={p.onReload} disabled={!p.cfgPath}>↺</button>
         <span style={{ opacity: p.connected ? 1 : 0.5, flex: 1 }}>
           {p.connected ? `t=${t}s  ${n}v` : '⚠ disconnected'}
         </span>

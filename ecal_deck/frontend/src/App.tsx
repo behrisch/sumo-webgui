@@ -127,6 +127,7 @@ export default function App() {
     if (controlState) {
       setDelayMs(controlState.delayMs);
       setPaused(controlState.paused);
+      if (controlState.sumocfg_path) setCfgPath(controlState.sumocfg_path);
     }
   }, [controlState]);
 
@@ -220,6 +221,7 @@ export default function App() {
       edgeColorAttr={edgeColorAttr} edgeKeys={edgeKeys} onEdgeColorAttr={setEdgeColorAttr}
       attributeConfig={attributeConfig} onSetAttributes={handleAttributes}
       cfgPath={cfgPath} onCfgPath={setCfgPath} onLoad={() => handleLoad()} onBrowse={() => setShowBrowser(true)}
+      onReload={() => handleLoad(cfgPath)}
     />
   );
 

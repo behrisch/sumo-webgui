@@ -6,6 +6,7 @@ const RECONNECT_DELAY_MS = 2000;
 export interface SimControlState {
   delayMs: number;
   paused: boolean;
+  sumocfg_path: string;
 }
 
 export type CommandResponse = Record<string, unknown> & { ok?: boolean; error?: string };
@@ -71,9 +72,9 @@ export function useSimSocket(url: string): SimState {
           case 'tls':       setTlsUpdate(envelope.data as TLSUpdate); break;
           case 'edgedata':  setEdgeDataUpdate(envelope.data as EdgeDataUpdate); break;
           case 'state': {
-            const d = envelope.data as { delay_ms?: number; paused?: boolean; error?: string };
+            const d = envelope.data as { delay_ms?: number; paused?: boolean; sumocfg_path?: string; error?: string };
             if (!d.error && d.delay_ms !== undefined)
-              setControlState({ delayMs: d.delay_ms, paused: d.paused ?? false });
+              setControlState({ delayMs: d.delay_ms, paused: d.paused ?? false, sumocfg_path: d.sumocfg_path ?? '' });
             break;
           }
           case 'response': {

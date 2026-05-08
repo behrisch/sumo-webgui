@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 try:
     import libsumo as traci
+    print("libsumo found.")
 except ImportError:
     print("libsumo not found.")
     import traci
@@ -323,7 +324,9 @@ def main():
         return _ack()
 
     def _on_get_state(_mi, _req):
-        resp = sumo_pb2.GetStateResponse(delay_ms=ctrl["delay_ms"], paused=ctrl["paused"])
+        resp = sumo_pb2.GetStateResponse(
+            delay_ms=ctrl["delay_ms"], paused=ctrl["paused"],
+            sumocfg_path=ctrl["sumocfg_path"])
         return 0, resp.SerializeToString()
 
     def _on_get_attributes(_mi, _req):

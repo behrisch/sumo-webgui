@@ -56,8 +56,9 @@ message ResumeRequest    {}
 message StepRequest      {}
 message GetStateRequest  {}
 message GetStateResponse {
-  int32 delay_ms = 1;
-  bool  paused   = 2;
+  int32  delay_ms     = 1;
+  bool   paused       = 2;
+  string sumocfg_path = 3;
 }
 
 message GetAttributesRequest  {}
