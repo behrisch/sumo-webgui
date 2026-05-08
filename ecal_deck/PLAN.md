@@ -79,6 +79,8 @@ ecal_deck/
 | `get_state`        | GetStateRequest          | GetStateResponse       | delay_ms, paused, sumocfg_path, step_interval_current, step_at_min_bound, step_at_max_bound |
 | `get_attributes`   | GetAttributesRequest     | GetAttributesResponse  | available + enabled attrs      |
 | `set_attributes`   | SetAttributesRequest     | CommandAck             | which attrs to collect; triggers full edgedata snapshot |
+| `get_vehicle_info` | GetVehicleInfoRequest    | GetVehicleInfoResponse | route, lane, all attrs — on demand only                 |
+| `get_edge_info`    | GetEdgeInfoRequest       | GetEdgeInfoResponse    | queue, halting count, vehicle IDs — on demand only      |
 
 All eCAL service requests and responses use protobuf with full `DataTypeInformation` descriptors.
 The bridge translates protobuf <-> JSON at the WebSocket boundary (same pattern as pub/sub topics).
@@ -238,6 +240,90 @@ is the workaround. Tauri native dialogs will resolve this cleanly when desktop p
 - `parseNetwork` guards against null geometry, empty coordinates, `GeometryCollection`,
   non-finite coordinates, and large arrays (uses `for` loop instead of spread for min/max)
 - viewState reset on new network to prevent MapView/OrthographicView type mismatch assertion
+
+---
+
+## Interaction
+
+Clicking on simulation objects gives the user live information and eventually the ability to
+intervene (set speed, reroute, change signal phase). The architecture already supports this:
+deck.gl layers have `pickable: true`, `onClick` is wired into `DeckGL`, and the service
+pattern handles point queries cleanly.
+
+### What can be clicked
+
+| Object | Data available without backend call | Needs new service call |
+|--------|-------------------------------------|----------------------|
+| Vehicle | ID, type, speed, angle, all enabled attributes (from `simStep`) | route, lane, distance to next junction, waiting time if not already collected |
+| Edge | ID, all enabled edge attributes (from `edgeValueMap`) | queue length, number of halting vehicles, incident info |
+| Junction | ID, shape (from network GeoJSON) | queue at each approach, phase details |
+| TLS connection | TLS ID, current phase state (from `tlsUpdate`) | full phase programme, remaining phase time |
+
+### Frontend interaction model
+
+**Click → InfoPanel**
+- `DeckGL` `onClick` callback receives `{object, layer, coordinate}`
+- Dispatches to a `selectedObject` state: `{type: "vehicle"|"edge"|"junction"|"tls", id, data}`
+- `InfoPanel.tsx` (new component): positioned overlay showing the selected object's data
+- Dismiss: click elsewhere or press Escape
+- While an object is selected, its data refreshes each step automatically (it's already in
+  existing state — no polling needed for attributes already being collected)
+
+**Follow camera (vehicles only)**
+- Toggle "Follow" in InfoPanel → `viewState` tracks the vehicle's lon/lat each step
+- Deactivates on manual pan
+
+**Deeper queries (service calls)**
+- InfoPanel shows a "More..." button for data not in existing state
+- Sends `get_vehicle_info(id)` or `get_edge_info(id)` → publisher calls TraCI → returns result
+- Result shown in an expanded section of InfoPanel; refreshes only on demand (not every step)
+
+### New service methods
+
+```protobuf
+message GetVehicleInfoRequest  { string id = 1; }
+message GetVehicleInfoResponse {
+  string         id          = 1;
+  string         type_id     = 2;
+  string         route_id    = 3;
+  string         lane_id     = 4;
+  double         lane_pos    = 5;
+  repeated string route_edges = 6;   // remaining edges on current route
+  map<string, double> attributes = 7; // all available attrs, not just enabled ones
+}
+
+message GetEdgeInfoRequest  { string id = 1; }
+message GetEdgeInfoResponse {
+  string         id               = 1;
+  double         mean_speed       = 2;
+  int32          vehicle_count    = 3;
+  int32          halting_count    = 4;
+  double         occupancy        = 5;
+  double         waiting_time     = 6;
+  repeated string vehicle_ids     = 7;   // IDs of vehicles currently on edge
+}
+```
+
+### Implementation order
+
+1. **`onClick` wiring** in `App.tsx`: add `onClick` to `DeckGL`, identify which layer was
+   clicked and extract object data from existing state
+2. **`InfoPanel.tsx`**: overlay component showing selected object data, refreshed from state
+3. **Vehicle follow camera**: track `viewState` to vehicle position when follow is active
+4. **Proto + service**: add `GetVehicleInfoRequest/Response` and `GetEdgeInfoRequest/Response`;
+   implement `get_vehicle_info` and `get_edge_info` in publisher
+5. **"More..." deep query**: wire InfoPanel's expand button to the service calls
+
+### Design decisions
+
+- InfoPanel is **not** part of the control panel — it floats near the clicked object or in a
+  fixed corner, separate from the simulation controls
+- **No persistent selection state in the backend** — all selection is frontend-only; the
+  publisher doesn't know what the user has selected
+- **Refresh strategy**: attributes already in `simStep`/`edgeValueMap` update automatically
+  each step; data from `get_vehicle_info` / `get_edge_info` is fetched on demand only
+- **TLS interaction**: clicking a TLS connection shows the full phase programme; a future
+  "force phase" command fits naturally into the existing service pattern
 
 ---
 

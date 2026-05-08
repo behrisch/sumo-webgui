@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import DeckGL from '@deck.gl/react';
 import { OrthographicView } from '@deck.gl/core';
@@ -16,6 +16,9 @@ import { buildEdgeDataLayer, buildBinaryEdgeGeom, type BinaryEdgeGeom } from './
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
 import { LogPane } from './components/LogPane';
+import { InfoPanel } from './components/InfoPanel';
+import type { SelectedObject } from './components/InfoPanel';
+import type { PickingInfo } from '@deck.gl/core';
 import type { LayerVisibility } from './components/ControlPanel';
 
 const WS_URL = 'ws://localhost:8765';
@@ -185,6 +188,29 @@ export default function App() {
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
+  const [selectedObject, setSelectedObject] = useState<SelectedObject | null>(null);
+
+  const handleClick = useCallback((info: PickingInfo) => {
+    const layerId = info.layer?.id;
+    if (!layerId || !info.picked) { setSelectedObject(null); return; }
+
+    if (layerId === 'vehicles') {
+      const v = simStep?.vehicles?.[info.index];
+      if (v) setSelectedObject({ type: 'vehicle', id: v.id, index: info.index });
+    } else if (layerId === 'edges' || layerId === 'junctions' || layerId === 'edgedata') {
+      const id = (info.object as { properties?: { id?: string } })?.properties?.id;
+      const type = layerId === 'junctions' ? 'junction' : 'edge';
+      if (id) setSelectedObject({ type, id } as SelectedObject);
+    } else if (layerId === 'tls') {
+      const props = (info.object as { properties?: Record<string, unknown> })?.properties;
+      if (props?.tls) setSelectedObject({
+        type: 'tls', id: props.tls as string, tlIndex: props.tlIndex as number,
+      });
+    } else {
+      setSelectedObject(null);
+    }
+  }, [simStep]);
+
   const [intervalMin, setIntervalMin]   = useState(1);
   const [intervalMax, setIntervalMax]   = useState(10);
   const [autotune, setAutotune]         = useState(true);
@@ -263,13 +289,25 @@ export default function App() {
   const onViewChange = ({ viewState: vs }: { viewState: MapViewState | OrthographicViewState }) =>
     setViewState(vs);
 
+  const infoPanel = selectedObject && (
+    <InfoPanel
+      selected={selectedObject}
+      vehicles={simStep?.vehicles ?? []}
+      edgeValueMap={edgeValueMap}
+      tlsLights={tlsUpdate?.lights ?? []}
+      onClose={() => setSelectedObject(null)}
+    />
+  );
+
   if (parsed.geoReferenced) {
     return (
       <div style={{ width: '100vw', height: '100vh' }}>
-        <DeckGL viewState={activeView as MapViewState} onViewStateChange={onViewChange} controller layers={layers}>
+        <DeckGL viewState={activeView as MapViewState} onViewStateChange={onViewChange}
+          controller layers={layers} onClick={handleClick}>
           {visibility.basemap && <Map mapStyle={BASEMAP_STYLES[basemapStyle]} />}
         </DeckGL>
         {panel}
+        {infoPanel}
         {fileBrowser}
         <LogPane messages={logMessages} />
       </div>
@@ -279,10 +317,11 @@ export default function App() {
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
       <DeckGL views={new OrthographicView({ id: 'ortho' })} viewState={activeView as OrthographicViewState}
-        onViewStateChange={onViewChange} controller layers={layers}>
+        onViewStateChange={onViewChange} controller layers={layers} onClick={handleClick}>
         <div style={{ background: '#1a1a2e', width: '100%', height: '100%' }} />
       </DeckGL>
       {panel}
+      {infoPanel}
       {fileBrowser}
       <LogPane messages={logMessages} />
     </div>
