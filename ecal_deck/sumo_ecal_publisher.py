@@ -97,10 +97,6 @@ def parse_args():
     p.add_argument("--sumo-cfg", default=None,
                    help="Path to .sumocfg file (optional; can also be set at runtime via the GUI)")
     p.add_argument("--step-length", type=float, default=1.0, help="Simulation step length in seconds")
-    p.add_argument("--edgedata-interval", type=int, default=1,
-                   help="Publish EdgeDataUpdate every N steps (default 1)")
-    p.add_argument("--edgedata-occupied-only", action="store_true",
-                   help="Only include edges with at least one vehicle in EdgeDataUpdate")
     p.add_argument("--delay", type=int, default=0, metavar="MS",
                    help="Delay in milliseconds between simulation steps (default 0)")
     return p.parse_args()
@@ -140,11 +136,18 @@ def main():
 
     # --- mutable simulation control state ---
     ctrl = {
-        "delay_ms":           args.delay,
-        "paused":             False,
-        "vehicle_attributes": [],
-        "edge_attributes":    [],
-        "sumocfg_path":       args.sumo_cfg or "",
+        "delay_ms":             args.delay,
+        "paused":               False,
+        "vehicle_attributes":   [],
+        "edge_attributes":      [],
+        "sumocfg_path":         args.sumo_cfg or "",
+        "interval_min":         1,
+        "interval_max":         10,
+        "autotune":             True,
+        "interval_current":     1,
+        "at_min_bound":         False,
+        "at_max_bound":         False,
+        "needs_edgedata_snapshot": False,  # set to True to trigger a full snapshot next step
     }
 
     # per-simulation state (replaced on each load)
@@ -156,11 +159,31 @@ def main():
     _load_lock   = threading.Lock()
 
     # --- step loop (runs in background thread) ---
+    def _publish_edgedata_snapshot(time_ms: int):
+        """Full TraCI snapshot for all edges — infrequent, triggered by set_attributes/load."""
+        edu = sumo_pb2.EdgeDataUpdate()
+        edu.time_ms = time_ms
+        edu.full_snapshot = True
+        for eid in sim["all_edges"]:
+            ed = edu.edges.add()
+            ed.id = eid
+            for attr in ctrl["edge_attributes"]:
+                getter = edge_attr_getters.get(attr)
+                if getter:
+                    try: ed.attributes[attr] = getter(eid)
+                    except Exception: pass
+        pub_edgedata.send(edu.SerializeToString())
+        print("Published edgedata snapshot (%d edges)" % len(sim["all_edges"]))
+
     def _step_loop():
-        step = 0
-        net          = sim["net"]
-        geo_ref      = sim["geo_referenced"]
-        all_edges    = sim["all_edges"]
+        step          = 0
+        steps_since   = 0
+        net           = sim["net"]
+        geo_ref       = sim["geo_referenced"]
+        all_edges     = sim["all_edges"]
+        _t_report     = time.monotonic()
+        # auto-tuner: rolling average of data-collection time (excludes sleep + SUMO compute)
+        _collect_times: list[float] = []
 
         while traci.simulation.getMinExpectedNumber() > 0 and not _step_stop.is_set():
             if ctrl["paused"]:
@@ -170,56 +193,96 @@ def main():
             traci.simulationStep()
             time_ms = round(traci.simulation.getTime() * 1000)
 
-            # simstep
-            ss = sumo_pb2.SimStep()
-            ss.time_ms = time_ms
-            for vid in traci.vehicle.getIDList():
-                x, y = traci.vehicle.getPosition(vid)
-                if geo_ref:
-                    x, y = net.convertXY2LonLat(x, y)
-                v = ss.vehicles.add()
-                v.id = vid; v.x = x; v.y = y
-                v.speed = traci.vehicle.getSpeed(vid)
-                v.angle = traci.vehicle.getAngle(vid)
-                v.type_id = traci.vehicle.getTypeID(vid)
-                for attr in ctrl["vehicle_attributes"]:
-                    getter = vehicle_attr_getters.get(attr)
-                    if getter:
-                        try: v.attributes[attr] = getter(vid)
-                        except Exception: pass
-            pub_simstep.send(ss.SerializeToString())
+            # --- full edgedata snapshot if requested (outside normal interval) ---
+            if ctrl["needs_edgedata_snapshot"] and ctrl["edge_attributes"]:
+                ctrl["needs_edgedata_snapshot"] = False
+                _publish_edgedata_snapshot(time_ms)
 
-            # tls
-            if sim["has_tls"]:
-                tu = sumo_pb2.TLSUpdate()
-                tu.time_ms = time_ms
-                for tls_id in traci.trafficlight.getIDList():
-                    ph = tu.lights.add()
-                    ph.id = tls_id
-                    ph.state = traci.trafficlight.getRedYellowGreenState(tls_id)
-                pub_tls.send(tu.SerializeToString())
+            # --- unified step interval: publish simstep + tls + edgedata together ---
+            interval = ctrl["interval_current"]
+            if step % interval == 0:
+                t_collect = time.monotonic()
 
-            # edgedata
-            if ctrl["edge_attributes"] and step % args.edgedata_interval == 0:
-                edu = sumo_pb2.EdgeDataUpdate()
-                edu.time_ms = time_ms
-                for eid in all_edges:
-                    if args.edgedata_occupied_only:
+                # simstep
+                ss = sumo_pb2.SimStep()
+                ss.time_ms = time_ms
+                for vid in traci.vehicle.getIDList():
+                    x, y = traci.vehicle.getPosition(vid)
+                    if geo_ref:
+                        x, y = net.convertXY2LonLat(x, y)
+                    v = ss.vehicles.add()
+                    v.id = vid; v.x = x; v.y = y
+                    v.speed = traci.vehicle.getSpeed(vid)
+                    v.angle = traci.vehicle.getAngle(vid)
+                    v.type_id = traci.vehicle.getTypeID(vid)
+                    for attr in ctrl["vehicle_attributes"]:
+                        getter = vehicle_attr_getters.get(attr)
+                        if getter:
+                            try: v.attributes[attr] = getter(vid)
+                            except Exception: pass
+                pub_simstep.send(ss.SerializeToString())
+
+                # tls
+                if sim["has_tls"]:
+                    tu = sumo_pb2.TLSUpdate()
+                    tu.time_ms = time_ms
+                    for tls_id in traci.trafficlight.getIDList():
+                        ph = tu.lights.add()
+                        ph.id = tls_id
+                        ph.state = traci.trafficlight.getRedYellowGreenState(tls_id)
+                    pub_tls.send(tu.SerializeToString())
+
+                # edgedata delta: occupied edges only
+                if ctrl["edge_attributes"]:
+                    edu = sumo_pb2.EdgeDataUpdate()
+                    edu.time_ms = time_ms
+                    edu.full_snapshot = False
+                    for eid in all_edges:
                         if traci.edge.getLastStepVehicleNumber(eid) == 0:
                             continue
-                    ed = edu.edges.add()
-                    ed.id = eid
-                    for attr in ctrl["edge_attributes"]:
-                        getter = edge_attr_getters.get(attr)
-                        if getter:
-                            try: ed.attributes[attr] = getter(eid)
-                            except Exception: pass
-                pub_edgedata.send(edu.SerializeToString())
+                        ed = edu.edges.add()
+                        ed.id = eid
+                        for attr in ctrl["edge_attributes"]:
+                            getter = edge_attr_getters.get(attr)
+                            if getter:
+                                try: ed.attributes[attr] = getter(eid)
+                                except Exception: pass
+                    pub_edgedata.send(edu.SerializeToString())
 
-            step += 1
+                collect_ms = (time.monotonic() - t_collect) * 1000
+                _collect_times.append(collect_ms)
+                if len(_collect_times) > 20:
+                    _collect_times.pop(0)
+
+                # auto-tuner: adjust interval so data collection <= 25% of non-sleep step time
+                if ctrl["autotune"] and len(_collect_times) >= 5:
+                    avg_collect = sum(_collect_times) / len(_collect_times)
+                    step_time_ms = (time.monotonic() - _t_report) * 1000 / max(steps_since, 1) - ctrl["delay_ms"]
+                    target_budget = max(step_time_ms * 0.25, 1.0)
+                    new_interval = max(ctrl["interval_min"],
+                                       min(ctrl["interval_max"],
+                                           int(avg_collect / target_budget) + 1))
+                    ctrl["at_min_bound"] = new_interval == ctrl["interval_min"] and avg_collect > target_budget
+                    ctrl["at_max_bound"] = new_interval == ctrl["interval_max"] and avg_collect > target_budget
+                    ctrl["interval_current"] = new_interval
+
+            step        += 1
+            steps_since += 1
             # sleep(0) is intentional: even with no delay it yields the GIL so the eCAL
             # service callback thread can set ctrl["paused"] before the next iteration
             time.sleep(ctrl["delay_ms"] / 1000.0)
+
+            # print step rate every 5 s to help distinguish backend vs frontend bottleneck
+            now = time.monotonic()
+            if now - _t_report >= 5.0:
+                elapsed = now - _t_report
+                rate = steps_since / elapsed
+                print("Publisher: %.0f steps/s  (%.1f ms/step)  interval=%d%s%s" % (
+                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
+                    " [AT MIN]" if ctrl["at_min_bound"] else "",
+                    " [AT MAX]" if ctrl["at_max_bound"] else ""))
+                steps_since = 0
+                _t_report   = now
 
         try:
             traci.close()
@@ -267,6 +330,11 @@ def main():
 
             # reset per-sim state
             ctrl["paused"] = False
+            ctrl["interval_current"] = ctrl["interval_min"]
+            ctrl["at_min_bound"] = False
+            ctrl["at_max_bound"] = False
+            if ctrl["edge_attributes"]:
+                ctrl["needs_edgedata_snapshot"] = True
 
             _step_thread[0] = threading.Thread(target=_step_loop, daemon=True)
             _step_thread[0].start()
@@ -326,8 +394,26 @@ def main():
     def _on_get_state(_mi, _req):
         resp = sumo_pb2.GetStateResponse(
             delay_ms=ctrl["delay_ms"], paused=ctrl["paused"],
-            sumocfg_path=ctrl["sumocfg_path"])
+            sumocfg_path=ctrl["sumocfg_path"],
+            step_interval_current=ctrl["interval_current"],
+            step_at_min_bound=ctrl["at_min_bound"],
+            step_at_max_bound=ctrl["at_max_bound"])
         return 0, resp.SerializeToString()
+
+    def _on_set_step_config(_mi, req_bytes):
+        try:
+            req = sumo_pb2.SetStepConfigRequest()
+            req.ParseFromString(req_bytes)
+            ctrl["interval_min"] = max(1, req.interval_min)
+            ctrl["interval_max"] = max(ctrl["interval_min"], req.interval_max)
+            ctrl["autotune"]     = req.autotune
+            if not ctrl["autotune"]:
+                ctrl["interval_current"] = ctrl["interval_min"]
+                ctrl["at_min_bound"] = False
+                ctrl["at_max_bound"] = False
+            return _ack()
+        except Exception as e:
+            return _ack(False, str(e))
 
     def _on_get_attributes(_mi, _req):
         resp = sumo_pb2.GetAttributesResponse(
@@ -344,6 +430,8 @@ def main():
             req.ParseFromString(req_bytes)
             ctrl["vehicle_attributes"] = list(req.vehicle_attributes)
             ctrl["edge_attributes"]    = list(req.edge_attributes)
+            if ctrl["edge_attributes"]:
+                ctrl["needs_edgedata_snapshot"] = True
             return _ack()
         except Exception as e:
             return _ack(False, str(e))
@@ -365,9 +453,10 @@ def main():
         ("pause",          sumo_pb2.PauseRequest,        sumo_pb2.CommandAck,            _on_pause),
         ("resume",         sumo_pb2.ResumeRequest,       sumo_pb2.CommandAck,            _on_resume),
         ("step",           sumo_pb2.StepRequest,         sumo_pb2.CommandAck,            _on_step),
-        ("get_state",      sumo_pb2.GetStateRequest,     sumo_pb2.GetStateResponse,      _on_get_state),
-        ("get_attributes", sumo_pb2.GetAttributesRequest, sumo_pb2.GetAttributesResponse, _on_get_attributes),
-        ("set_attributes", sumo_pb2.SetAttributesRequest, sumo_pb2.CommandAck,           _on_set_attributes),
+        ("get_state",        sumo_pb2.GetStateRequest,        sumo_pb2.GetStateResponse,      _on_get_state),
+        ("set_step_config",  sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck,            _on_set_step_config),
+        ("get_attributes",   sumo_pb2.GetAttributesRequest,   sumo_pb2.GetAttributesResponse, _on_get_attributes),
+        ("set_attributes",   sumo_pb2.SetAttributesRequest,   sumo_pb2.CommandAck,            _on_set_attributes),
     ]:
         svc.set_method_callback(_method_info(name, req_cls, resp_cls), cb)
 

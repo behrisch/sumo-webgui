@@ -37,8 +37,9 @@ message EdgeData {
 }
 
 message EdgeDataUpdate {
-  int64             time_ms = 1;
-  repeated EdgeData edges   = 2;
+  int64             time_ms       = 1;
+  repeated EdgeData edges         = 2;
+  bool              full_snapshot = 3;  // true = initial all-edges baseline; false = occupied-only delta
 }
 
 // ---------------------------------------------------------------------------
@@ -56,9 +57,12 @@ message ResumeRequest    {}
 message StepRequest      {}
 message GetStateRequest  {}
 message GetStateResponse {
-  int32  delay_ms     = 1;
-  bool   paused       = 2;
-  string sumocfg_path = 3;
+  int32  delay_ms              = 1;
+  bool   paused                = 2;
+  string sumocfg_path          = 3;
+  int32  step_interval_current = 4;
+  bool   step_at_min_bound     = 5;
+  bool   step_at_max_bound     = 6;
 }
 
 message GetAttributesRequest  {}
@@ -72,6 +76,12 @@ message GetAttributesResponse {
 message SetAttributesRequest {
   repeated string vehicle_attributes = 1;
   repeated string edge_attributes    = 2;
+}
+
+message SetStepConfigRequest {
+  int32 interval_min = 1;  // minimum steps between publishes (default 1)
+  int32 interval_max = 2;  // maximum steps (default 10)
+  bool  autotune     = 3;  // auto-tune within [min, max] to keep collection <= 25% of step time
 }
 
 message LoadRequest { string sumocfg_path = 1; }

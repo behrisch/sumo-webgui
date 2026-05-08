@@ -8,10 +8,11 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection } from 'geojson';
 
 import { useSimSocket } from './hooks/useSimSocket';
+import { usePerfStats } from './hooks/usePerfStats';
 import { buildNetworkLayer } from './layers/NetworkLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { buildTLSLayer } from './layers/TLSLayer';
-import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
+import { buildEdgeDataLayer, buildBinaryEdgeGeom, type BinaryEdgeGeom } from './layers/EdgeDataLayer';
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
 import type { LayerVisibility } from './components/ControlPanel';
@@ -29,6 +30,7 @@ interface ParsedNetwork {
   edgeFeatures: Feature[];
   junctionFeatures: Feature[];
   tlsFeatures: Feature[];
+  edgeBinaryGeom: BinaryEdgeGeom;
   initialViewState: MapViewState | OrthographicViewState;
 }
 
@@ -102,11 +104,13 @@ function parseNetwork(geojson: string, geoReferenced: boolean): ParsedNetwork {
     }
   }
 
-  return { geoReferenced, edgeFeatures, junctionFeatures, tlsFeatures, initialViewState };
+  const edgeBinaryGeom = buildBinaryEdgeGeom(edgeFeatures);
+  return { geoReferenced, edgeFeatures, junctionFeatures, tlsFeatures, edgeBinaryGeom, initialViewState };
 }
 
 export default function App() {
-  const { connected, network, simStep, tlsUpdate, edgeDataUpdate, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
+  const { connected, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
+  const perf = usePerfStats();
 
   const parsed = useMemo(
     () => (network ? parseNetwork(network.geojson, network.geo_referenced) : null),
@@ -128,6 +132,7 @@ export default function App() {
       setDelayMs(controlState.delayMs);
       setPaused(controlState.paused);
       if (controlState.sumocfg_path) setCfgPath(controlState.sumocfg_path);
+      setIntervalMin(controlState.step_interval_current);  // init sliders from actual state
     }
   }, [controlState]);
 
@@ -162,21 +167,27 @@ export default function App() {
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
+  const [intervalMin, setIntervalMin]   = useState(1);
+  const [intervalMax, setIntervalMax]   = useState(10);
+  const [autotune, setAutotune]         = useState(true);
+  const sendStepConfig = (min: number, max: number, tune: boolean) =>
+    sendCommand('set_step_config', { interval_min: min, interval_max: max, autotune: tune });
+
   const layers = useMemo(() => {
     if (!parsed) return [];
     const result = [];
     const [edgeLayer, junctionLayer] = buildNetworkLayer(parsed.edgeFeatures, parsed.junctionFeatures);
     if (visibility.junctions) result.push(junctionLayer);
     if (visibility.edges)     result.push(edgeLayer);
-    if (visibility.edgeData && edgeColorAttr && edgeDataUpdate?.edges.length)
-      result.push(buildEdgeDataLayer(parsed.edgeFeatures, edgeDataUpdate.edges, edgeColorAttr));
+    if (visibility.edgeData && edgeColorAttr && edgeValueMap.size > 0)
+      result.push(buildEdgeDataLayer(parsed.edgeBinaryGeom, parsed.edgeFeatures, edgeValueMap, edgeColorAttr));
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsFeatures, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
       result.push(buildVehicleLayer(simStep?.vehicles ?? [],
         vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr));
     return result;
-  }, [parsed, simStep, tlsUpdate, edgeDataUpdate, visibility, vehicleColorAttr, edgeColorAttr]);
+  }, [parsed, simStep, tlsUpdate, edgeValueVersion, visibility, vehicleColorAttr, edgeColorAttr]);
 
   if (!parsed || !activeView) {
     return (
@@ -220,8 +231,14 @@ export default function App() {
       vehicleColorAttr={vehicleColorAttr} vehicleKeys={vehicleKeys} onVehicleColorAttr={setVehicleColorAttr}
       edgeColorAttr={edgeColorAttr} edgeKeys={edgeKeys} onEdgeColorAttr={setEdgeColorAttr}
       attributeConfig={attributeConfig} onSetAttributes={handleAttributes}
+      intervalMin={intervalMin} intervalMax={intervalMax} autotune={autotune}
+      intervalCurrent={controlState?.step_interval_current ?? 1}
+      atMinBound={controlState?.step_at_min_bound ?? false}
+      atMaxBound={controlState?.step_at_max_bound ?? false}
+      onStepConfig={(min, max, tune) => { setIntervalMin(min); setIntervalMax(max); setAutotune(tune); sendStepConfig(min, max, tune); }}
       cfgPath={cfgPath} onCfgPath={setCfgPath} onLoad={() => handleLoad()} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
+      perf={perf}
     />
   );
 

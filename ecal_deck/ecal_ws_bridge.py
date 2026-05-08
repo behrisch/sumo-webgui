@@ -33,8 +33,9 @@ _SERVICE_REGISTRY = {
     "resume":         (sumo_pb2.ResumeRequest,        sumo_pb2.CommandAck),
     "step":           (sumo_pb2.StepRequest,          sumo_pb2.CommandAck),
     "get_state":      (sumo_pb2.GetStateRequest,      sumo_pb2.GetStateResponse),
-    "get_attributes": (sumo_pb2.GetAttributesRequest, sumo_pb2.GetAttributesResponse),
-    "set_attributes": (sumo_pb2.SetAttributesRequest, sumo_pb2.CommandAck),
+    "get_attributes":   (sumo_pb2.GetAttributesRequest,   sumo_pb2.GetAttributesResponse),
+    "set_attributes":   (sumo_pb2.SetAttributesRequest,   sumo_pb2.CommandAck),
+    "set_step_config":  (sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck),
 }
 
 # ---------------------------------------------------------------------------
@@ -51,9 +52,16 @@ TOPICS = {
 # shared state
 # ---------------------------------------------------------------------------
 _connected: set = set()
-_network_cache: str | None = None   # cached "network" envelope JSON for late joiners
+_network_cache: str | None = None        # cached "network" envelope for late joiners
+_edgedata_snapshot_cache: str | None = None  # cached full edgedata snapshot for late joiners
 _loop: asyncio.AbstractEventLoop | None = None
-_queue: asyncio.Queue | None = None
+
+# High-frequency topics use latest-value semantics: the callback overwrites the
+# pending envelope and the broadcast loop flushes at the display rate (60 fps).
+# This prevents message queue build-up when the publisher runs faster than the
+# browser can render.
+_LATENCY_SENSITIVE = {"simstep", "tls", "edgedata"}
+_pending: dict[str, str] = {}       # type_name -> latest JSON envelope
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +81,20 @@ def _make_callback(topic: str, proto_cls):
 
             if topic == "sumo/network":
                 _network_cache = envelope
+            elif topic == "sumo/edgedata":
+                # cache full snapshots for replay to new clients
+                if payload.get("full_snapshot"):
+                    global _edgedata_snapshot_cache
+                    _edgedata_snapshot_cache = envelope
 
-            if _loop is not None and _queue is not None:
-                _loop.call_soon_threadsafe(_queue.put_nowait, envelope)
+            if _loop is not None:
+                type_name = TOPICS[topic][1]
+                if type_name in _LATENCY_SENSITIVE:
+                    # overwrite — only the latest value matters
+                    _loop.call_soon_threadsafe(_pending.__setitem__, type_name, envelope)
+                else:
+                    # reliable delivery for low-frequency messages
+                    _loop.call_soon_threadsafe(_reliable_send, envelope)
         except Exception as exc:
             # must not let exceptions escape into eCAL's C++ callback dispatcher
             print("Error in callback for %s: %s" % (topic, exc))
@@ -109,16 +128,34 @@ def _call_service(method: str, request_dict: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# asyncio: broadcast loop
+# asyncio: broadcast helpers
 # ---------------------------------------------------------------------------
+async def _send_all(envelope: str) -> None:
+    if _connected:
+        await asyncio.gather(
+            *[ws.send(envelope) for ws in list(_connected)],
+            return_exceptions=True,
+        )
+
+def _reliable_send(envelope: str) -> None:
+    asyncio.ensure_future(_send_all(envelope))
+
 async def _broadcast_loop() -> None:
+    """Flush latest-value pending messages at the display rate (~60 fps).
+
+    All pending types are combined into a single WebSocket frame so the
+    browser handles one onmessage event and React batches all state updates
+    into a single render pass.
+    """
     while True:
-        envelope = await _queue.get()
-        if _connected:
-            await asyncio.gather(
-                *[ws.send(envelope) for ws in list(_connected)],
-                return_exceptions=True,
-            )
+        await asyncio.sleep(1 / 60)
+        if _pending and _connected:
+            # build batch by string concatenation — each value is already a valid
+            # JSON string so we avoid an expensive json.loads + json.dumps round-trip
+            # (critical when edgedata payloads are large)
+            batch = '{"type":"batch","messages":[' + ','.join(_pending.values()) + ']}'
+            _pending.clear()
+            await _send_all(batch)
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +163,11 @@ async def _broadcast_loop() -> None:
 # ---------------------------------------------------------------------------
 async def _handler(websocket) -> None:
     try:
-        # replay cached network to new client so it can render immediately
+        # replay cached network and edgedata full snapshot to new client
         if _network_cache is not None:
             await websocket.send(_network_cache)
+        if _edgedata_snapshot_cache is not None:
+            await websocket.send(_edgedata_snapshot_cache)
 
         # sync simulation control state and attribute config
         loop = asyncio.get_running_loop()
@@ -166,9 +205,8 @@ async def _handler(websocket) -> None:
 # main
 # ---------------------------------------------------------------------------
 async def _run(ws_port: int) -> None:
-    global _loop, _queue, _svc_client
+    global _loop, _svc_client
     _loop = asyncio.get_running_loop()
-    _queue = asyncio.Queue()
 
     ecal_core.initialize("sumo_ecal_bridge")
     _svc_client = ecal_core.ServiceClient(SERVICE_NAME)
