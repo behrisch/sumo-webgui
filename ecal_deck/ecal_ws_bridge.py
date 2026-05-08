@@ -46,6 +46,7 @@ TOPICS = {
     "sumo/simstep":  (sumo_pb2.SimStep,        "simstep"),
     "sumo/tls":      (sumo_pb2.TLSUpdate,      "tls"),
     "sumo/edgedata": (sumo_pb2.EdgeDataUpdate, "edgedata"),
+    "sumo/log":      (sumo_pb2.LogMessage,     "log"),
 }
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ _loop: asyncio.AbstractEventLoop | None = None
 # This prevents message queue build-up when the publisher runs faster than the
 # browser can render.
 _LATENCY_SENSITIVE = {"simstep", "tls", "edgedata"}
+# log messages are low-frequency and must not be dropped
 _pending: dict[str, str] = {}       # type_name -> latest JSON envelope
 
 

@@ -113,6 +113,48 @@ def main():
     pub_simstep  = _make_publisher("sumo/simstep",   "sumo.SimStep")
     pub_tls      = _make_publisher("sumo/tls",       "sumo.TLSUpdate")
     pub_edgedata = _make_publisher("sumo/edgedata",  "sumo.EdgeDataUpdate")
+    pub_log      = _make_publisher("sumo/log",       "sumo.LogMessage")
+
+    def _log(level: str, text: str) -> None:
+        """Publish a log message to sumo/log and print to terminal."""
+        print("[%s] %s" % (level, text))
+        msg = sumo_pb2.LogMessage(
+            time_ms=round(time.monotonic() * 1000),
+            level=level, text=text)
+        pub_log.send(msg.SerializeToString())
+
+    # --- persistent log server — created once, reused across loads/reloads ---
+    # Keeping a fixed port avoids the race between closing the old server and
+    # SUMO connecting to the new one on reload.
+    import socket as _socket
+    _log_srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    _log_srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    _log_srv.bind(('localhost', 0))
+    _log_srv.listen(8)   # generous backlog; server stays open for lifetime of process
+    _log_addr = "localhost:%d" % _log_srv.getsockname()[1]
+
+    def _start_log_reader() -> None:
+        """Accept one SUMO connection and forward lines until SUMO closes it."""
+        def _reader():
+            try:
+                conn, _ = _log_srv.accept()
+                with conn.makefile('r', errors='replace') as f:
+                    for line in f:
+                        text = line.rstrip()
+                        if not text:
+                            continue
+                        level = ("WARNING" if "Warning" in text or "warning" in text else
+                                 "ERROR"   if "Error"   in text or "error"   in text else
+                                 "INFO")
+                        try:
+                            pub_log.send(sumo_pb2.LogMessage(
+                                time_ms=round(time.monotonic() * 1000),
+                                level=level, text=text).SerializeToString())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        threading.Thread(target=_reader, daemon=True).start()
 
     # --- traci attribute getters (static, defined once) ---
     vehicle_attr_getters = {
@@ -173,7 +215,7 @@ def main():
                     try: ed.attributes[attr] = getter(eid)
                     except Exception: pass
         pub_edgedata.send(edu.SerializeToString())
-        print("Published edgedata snapshot (%d edges)" % len(sim["all_edges"]))
+        _log("INFO", "Published edgedata snapshot (%d edges)" % len(sim["all_edges"]))
 
     def _step_loop():
         step          = 0
@@ -277,7 +319,7 @@ def main():
             if now - _t_report >= 5.0:
                 elapsed = now - _t_report
                 rate = steps_since / elapsed
-                print("Publisher: %.0f steps/s  (%.1f ms/step)  interval=%d%s%s" % (
+                _log("INFO", "%.0f steps/s  (%.1f ms/step)  interval=%d%s%s" % (
                     rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
                     " [AT MIN]" if ctrl["at_min_bound"] else "",
                     " [AT MAX]" if ctrl["at_max_bound"] else ""))
@@ -304,9 +346,15 @@ def main():
                 _step_thread[0].join(timeout=10)
                 _step_stop.clear()
 
-            # start SUMO
-            cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length)]
+            # start a fresh reader thread — accepts the next connection on the
+            # persistent log server (same port every load, no race on reconnect)
+            _start_log_reader()
+
+            # start SUMO — log socket uses SUMO's "host:port" file syntax
+            cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
+                   "--message-log", _log_addr, "--error-log", _log_addr]
             traci.start(cmd)
+            _log("INFO", "SUMO started: %s" % sumocfg_path)
 
             net = sumolib.net.readNet(_net_file_from_cfg(sumocfg_path), withInternal=False)
             sim["net"]          = net

@@ -63,6 +63,7 @@ ecal_deck/
 | `sumo/simstep`   | SimStep         | Every `step_interval` steps                             |
 | `sumo/tls`       | TLSUpdate       | Every `step_interval` steps (TLS present)               |
 | `sumo/edgedata`  | EdgeDataUpdate  | Full snapshot on `set_attributes`/load; occupied-only delta every `step_interval` steps |
+| `sumo/log`       | LogMessage      | Every SUMO log line (reliable, not batched)                                             |
 
 ### Service: `sumo_control`
 
@@ -306,15 +307,32 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
   (basename, full path on hover); redundant text input + Load + `…` row removed; transport
   `[Load]` and `[↺]` buttons remain as the sole controls.
 
-- **README: Windows and macOS setup**: current README assumes Linux. Add platform-specific
-  sections for:
-  - **Windows**: ecal installation (native or via WSL); Python venv activation
-    (`tests\sumo_test_env\Scripts\activate.bat`); `set SUMO_HOME=%CD%`; `protoc` via
-    `winget install protobuf` or Chocolatey; Node.js via winget; path separators in commands
-  - **macOS**: `brew install protobuf node`; Python venv activation same as Linux;
-    `export SUMO_HOME=$PWD`; eCAL installation via Homebrew or source build
-  - Mark as "needs verification on target platform" — behaviour of ecal and libsumo on
-    non-Linux systems should be tested before finalising these instructions
+- ~~**README: Windows and macOS setup**~~: implemented — platform notes section added covering
+  venv activation, SUMO_HOME, protoc, Node, libsumo, websockets, and `run.sh` limitations
+  (`ss` → `lsof` on macOS; Git Bash / WSL on Windows). `generate.ts` (via `tsx`) replaces the
+  inline `protoc` shell command to handle `.cmd` plugin extension on Windows. All Python deps
+  (`eclipse-ecal`, `websockets`, `protobuf`, `libsumo`) documented. Needs verification on
+  target platforms.
+
+- ~~**SUMO log capture and frontend message pane**~~: implemented.
+  - **Proto**: `LogMessage { time_ms, level, text }` + `sumo/log` topic
+  - **Publisher**: two TCP servers on ephemeral ports; passed to SUMO as
+    `--message-log localhost:PORT1 --error-log localhost:PORT2`. SUMO's `host:port`
+    OutputDevice syntax works cross-platform. Two reader threads accept one connection each,
+    read lines, classify as INFO/WARNING/ERROR, and call `_log()`. Publisher's own status
+    messages (step rate, network publish, etc.) also routed through `_log()`.
+  - **Bridge**: `sumo/log` in `TOPICS`; delivered via `_reliable_send` (not batched, not dropped).
+  - **Frontend**: `LogPane.tsx` — fixed bottom-left overlay, scrolls to latest, colour-coded by
+    level, capped at 200 lines. `logMessages` accumulated in `useSimSocket` state.
+
+- **SUMO log duplicate investigation**: info messages currently appear twice in the log pane
+  despite deduplication in the frontend. Both `--message-log` and `--error-log` point to the
+  same server address; SUMO may write some messages to both streams or its MsgHandler chain
+  forwards messages through multiple handlers. Current workaround: frontend deduplicates by
+  text content (`recentLogTexts` set, clears after 50 entries). Root cause to verify: run
+  with only `--message-log` or only `--error-log` and check if duplicates persist; inspect
+  SUMO's `MsgHandler` source to understand which streams receive which message types; consider
+  whether this is a SUMO bug.
 
 ### Future
 

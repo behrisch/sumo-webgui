@@ -86,6 +86,12 @@ message SetStepConfigRequest {
 
 message LoadRequest { string sumocfg_path = 1; }
 
+message LogMessage {
+  int64  time_ms = 1;
+  string level   = 2;  // INFO, WARNING, ERROR
+  string text    = 3;
+}
+
 message ListDirRequest  { string path = 1; }
 message ListDirResponse {
   string          path  = 1;

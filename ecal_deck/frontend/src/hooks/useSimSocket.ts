@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { NetworkData, SimStep, TLSUpdate, EdgeDataUpdate, GetAttributesResponse } from '../generated/sumo';
+import type { NetworkData, SimStep, TLSUpdate, EdgeDataUpdate, GetAttributesResponse, LogMessage } from '../generated/sumo';
 
 export type EdgeValueMap = Map<string, Record<string, number>>;
 
@@ -23,6 +23,7 @@ export interface SimState {
   tlsUpdate: TLSUpdate | null;
   edgeValueMap: EdgeValueMap;          // accumulated edge attribute values (base + deltas)
   edgeValueVersion: number;            // increments on each edgedata update to trigger re-render
+  logMessages: LogMessage[];
   controlState: SimControlState | null;
   attributeConfig: GetAttributesResponse | null;
   updateAttributeConfig: (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) => void;
@@ -40,6 +41,8 @@ export function useSimSocket(url: string): SimState {
   // accumulated edge value map: base + deltas merged in-place
   const edgeValueMapRef = useRef<EdgeValueMap>(new Map());
   const [edgeValueVersion, setEdgeValueVersion] = useState(0);
+  const [logMessages, setLogMessages] = useState<LogMessage[]>([]);
+  const recentLogTexts = useRef(new Set<string>());
   const updateAttributeConfig = (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) =>
     setAttributeConfig(updater);
 
@@ -115,9 +118,23 @@ export function useSimSocket(url: string): SimState {
           }
           // low-frequency: set state immediately
           case 'network':
-            edgeValueMapRef.current.clear();  // new network invalidates all edge data
+            edgeValueMapRef.current.clear();
             setNetwork(msg.data as NetworkData);
             break;
+          case 'log': {
+            const m = msg.data as LogMessage;
+            // deduplicate: SUMO writes some lines twice via its message handlers
+            const key = m.text;
+            if (!recentLogTexts.current.has(key)) {
+              recentLogTexts.current.add(key);
+              if (recentLogTexts.current.size > 50) recentLogTexts.current.clear();
+              setLogMessages(prev => {
+                const next = [...prev, m];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+            }
+            break;
+          }
           case 'state': {
             const d = msg.data as { delay_ms?: number; paused?: boolean; sumocfg_path?: string; error?: string;
               step_interval_current?: number; step_at_min_bound?: boolean; step_at_max_bound?: boolean; };
@@ -179,5 +196,5 @@ export function useSimSocket(url: string): SimState {
 
   return { connected, network, simStep, tlsUpdate,
     edgeValueMap: edgeValueMapRef.current, edgeValueVersion,
-    controlState, attributeConfig, updateAttributeConfig, sendCommand };
+    logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand };
 }

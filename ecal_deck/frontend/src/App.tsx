@@ -15,6 +15,7 @@ import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer, buildBinaryEdgeGeom, type BinaryEdgeGeom } from './layers/EdgeDataLayer';
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
+import { LogPane } from './components/LogPane';
 import type { LayerVisibility } from './components/ControlPanel';
 
 const WS_URL = 'ws://localhost:8765';
@@ -109,7 +110,7 @@ function parseNetwork(geojson: string, geoReferenced: boolean): ParsedNetwork {
 }
 
 export default function App() {
-  const { connected, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
+  const { connected, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion, logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const perf = usePerfStats();
 
   const parsed = useMemo(
@@ -270,6 +271,7 @@ export default function App() {
         </DeckGL>
         {panel}
         {fileBrowser}
+        <LogPane messages={logMessages} />
       </div>
     );
   }
@@ -282,6 +284,7 @@ export default function App() {
       </DeckGL>
       {panel}
       {fileBrowser}
+      <LogPane messages={logMessages} />
     </div>
   );
 }
