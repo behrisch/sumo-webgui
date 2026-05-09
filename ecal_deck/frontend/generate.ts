@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,6 +8,8 @@ const ext    = platform() === 'win32' ? '.cmd' : '';
 const plugin = join('node_modules', '.bin', `protoc-gen-ts_proto${ext}`);
 const proto  = join('..', 'proto');
 const out    = join('src', 'generated');
+
+mkdirSync(out, { recursive: true });
 
 const cmd = [
   'protoc',
