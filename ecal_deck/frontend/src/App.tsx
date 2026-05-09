@@ -135,7 +135,7 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
 }
 
 export default function App() {
-  const { connected, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion,
+  const { connected, reconnectAttempt, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion,
           logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const perf = usePerfStats();
 
@@ -309,7 +309,7 @@ export default function App() {
                 onCancel={() => setShowBrowser(false)} />
             )}
           </>
-        ) : 'Connecting to bridge…'}
+        ) : `Connecting to bridge… (attempt ${reconnectAttempt + 1})`}
       </div>
     );
   }

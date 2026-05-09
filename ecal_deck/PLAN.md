@@ -468,6 +468,28 @@ uncached: [traci.start ~30s                              ]
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
 
+- **Person/container following + detailed info**: persons and containers are rendered and
+  pickable but the follow camera and InfoPanel "More info" deep query only work for vehicles.
+  Extend the follow `useEffect` in `App.tsx` to handle `selectedObject.type === 'person'` and
+  `'container'` (look up in `simStep.persons` / `simStep.containers`). Add a follow button in
+  `InfoPanel` for these types. Consider adding a `get_person_info` service method in the
+  publisher and bridge for richer on-demand queries (current lane, stage, waiting time).
+
+- **eCAL time-sync warning**: on startup both publisher and bridge log
+  `error | Could not load eCAL time sync module libecaltime-localtime.so`. This is eCAL trying
+  to load an optional time-synchronisation plugin that is not installed. Suppress by setting
+  `ECAL_TIME_SYNC_MODULE` env var to an empty string or `"none"` before `ecal_core.initialize`
+  (or equivalently add `export ECAL_TIME_SYNC_MODULE=none` to `run.sh`). Verify by checking
+  eCAL's `ecal_time.cpp` for the env-var name used in this installation.
+
+- **Directional vehicle/person shapes**: vehicles and persons are rendered as circles.
+  SUMO-GUI uses small oriented rectangles/arrows. Switch `VehicleLayer` and `PersonLayer` from
+  `ScatterplotLayer` to an `IconLayer` with a triangle/arrow SVG atlas, using `getAngle` for
+  rotation. Alternatively use deck.gl's `SimpleMeshLayer` with a flat triangle mesh and
+  `getOrientation`. `IconLayer` is simpler: define a small SVG arrow as a data-URL in the atlas,
+  set `iconMapping` with the icon dimensions, and use `getAngle: (_, {index}) => angles[index]`
+  where `angles` is a typed array built alongside positions.
+
 - ~~**Loading feedback**~~: implemented — `toast.loading` shown on `load` command, transitions
   to `toast.success` when network arrives, `toast.error` on failure.
 

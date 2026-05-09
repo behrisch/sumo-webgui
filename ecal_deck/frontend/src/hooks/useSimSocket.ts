@@ -3,7 +3,7 @@ import { SimStep, TLSUpdate, EdgeDataUpdate, LogMessage, NetworkGeometry, GetAtt
 
 export type EdgeValueMap = Map<string, Record<string, number>>;
 
-const RECONNECT_DELAY_MS = 2000;
+const RECONNECT_DELAY_MS = 500;
 
 // Binary frame type bytes (must match ecal_ws_bridge.py)
 const TYPE_SIMSTEP  = 1;
@@ -25,6 +25,7 @@ export type CommandResponse = Record<string, unknown> & { ok?: boolean; error?: 
 
 export interface SimState {
   connected: boolean;
+  reconnectAttempt: number;
   network: NetworkGeometry | null;
   simStep: SimStep | null;
   tlsUpdate: TLSUpdate | null;
@@ -39,6 +40,7 @@ export interface SimState {
 
 export function useSimSocket(url: string): SimState {
   const [connected, setConnected]             = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [network, setNetwork]                 = useState<NetworkGeometry | null>(null);
   const [simStep, setSimStep]                 = useState<SimStep | null>(null);
   const [tlsUpdate, setTlsUpdate]             = useState<TLSUpdate | null>(null);
@@ -101,7 +103,7 @@ export function useSimSocket(url: string): SimState {
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => { setConnected(true); setReconnectAttempt(0); };
 
       const dispatchBinary = (buf: ArrayBuffer) => {
         const bytes = new Uint8Array(buf);
@@ -185,8 +187,10 @@ export function useSimSocket(url: string): SimState {
 
       ws.onclose = () => {
         setConnected(false);
-        if (!unmounted.current)
+        if (!unmounted.current) {
+          setReconnectAttempt(n => n + 1);
           reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY_MS);
+        }
       };
 
       ws.onerror = () => ws.close();
@@ -201,7 +205,7 @@ export function useSimSocket(url: string): SimState {
     };
   }, [url]);
 
-  return { connected, network, simStep, tlsUpdate,
+  return { connected, reconnectAttempt, network, simStep, tlsUpdate,
     edgeValueMap: edgeValueMapRef.current, edgeValueVersion,
     logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand };
 }

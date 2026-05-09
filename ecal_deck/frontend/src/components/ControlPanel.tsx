@@ -107,11 +107,13 @@ export function ControlPanel(p: Props) {
       {/* layer toggles */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
         {([
-          ['edges',     'Edges'],
-          ['junctions', 'Junctions'],
-          ['vehicles',  'Vehicles'],
-          ['tls',       'Traffic lights'],
-          ...(p.edgeKeys.length   ? [['edgeData', 'Edge data']] : []),
+          ['edges',      'Edges'],
+          ['junctions',  'Junctions'],
+          ['vehicles',   'Vehicles'],
+          ['persons',    'Persons'],
+          ['containers', 'Containers'],
+          ['tls',        'Traffic lights'],
+          ...(p.edgeKeys.length ? [['edgeData', 'Edge data']] : []),
         ] as [keyof LayerVisibility, string][]).map(([key, label]) => (
           <label key={key} style={{ ...row, cursor: 'pointer' }}>
             <input type="checkbox" checked={p.visibility[key]}
