@@ -27,8 +27,28 @@ message TLSUpdate {
 }
 
 message NetworkData {
-  string geojson        = 1;
   bool   geo_referenced = 2;
+  string cache_path     = 3;
+}
+
+message TlsEntry {
+  string id       = 1;
+  string tls      = 2;
+  int32  tl_index = 3;
+}
+
+message NetworkGeometry {
+  bool            geo_referenced     = 1;
+  bytes           edge_starts        = 2;  // u32[] LE — cumulative vertex index per edge
+  bytes           edge_positions     = 3;  // f64[] LE — [x0,y0,x1,y1,...] all edges
+  bytes           junction_starts    = 4;  // u32[] LE — cumulative vertex index per junction polygon
+  bytes           junction_positions = 9;  // f64[] LE — [x0,y0,...] all junction polygon vertices
+  bytes           tls_positions      = 5;  // f64[] LE — [x1,y1,x2,y2] per TLS bar
+  repeated string edge_ids           = 6;
+  repeated string junction_ids       = 7;
+  repeated TlsEntry tls_entries      = 8;
+  string          proj_parameter     = 10; // proj4 string from <location>, empty if not geo-referenced
+  string          net_offset         = 11; // "x,y" offset from <location>
 }
 
 message EdgeData {

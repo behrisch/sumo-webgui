@@ -2,11 +2,16 @@
 """
 eCAL → WebSocket bridge.
 
-Subscribes to SUMO eCAL topics and forwards them as JSON over WebSocket.
-Accepts incoming command messages and forwards them to the publisher via eCAL ServiceClient.
+Subscribes to SUMO eCAL topics and forwards them as binary WebSocket frames.
+Accepts incoming JSON command messages and forwards them to the publisher via eCAL ServiceClient.
+
+Binary frame layout: [u8 msg_type][protobuf payload bytes]
+  1 = SimStep, 2 = TLSUpdate, 3 = EdgeDataUpdate, 4 = LogMessage, 5 = NetworkGeometry
+
+Commands and responses remain JSON text frames (unchanged).
 
 Usage:
-  python ecal_ws_bridge.py [--ws-port 8765]
+  python ecal_ws_bridge.py [--ws-port 8765] [--no-compress]
 """
 
 import argparse
@@ -40,67 +45,71 @@ _SERVICE_REGISTRY = {
     "get_edge_info":     (sumo_pb2.GetEdgeInfoRequest,     sumo_pb2.GetEdgeInfoResponse),
 }
 
-# ---------------------------------------------------------------------------
-# topic registry: topic name → (proto class, short type name for JSON)
-# ---------------------------------------------------------------------------
+# Binary frame type bytes
+_TYPE_SIMSTEP  = 1
+_TYPE_TLS      = 2
+_TYPE_EDGEDATA = 3
+_TYPE_LOG      = 4
+_TYPE_NETWORK  = 5
+
 TOPICS = {
-    "sumo/network":  (sumo_pb2.NetworkData,    "network"),
-    "sumo/simstep":  (sumo_pb2.SimStep,        "simstep"),
-    "sumo/tls":      (sumo_pb2.TLSUpdate,      "tls"),
-    "sumo/edgedata": (sumo_pb2.EdgeDataUpdate, "edgedata"),
-    "sumo/log":      (sumo_pb2.LogMessage,     "log"),
+    "sumo/simstep":  _TYPE_SIMSTEP,
+    "sumo/tls":      _TYPE_TLS,
+    "sumo/edgedata": _TYPE_EDGEDATA,
+    "sumo/log":      _TYPE_LOG,
+    "sumo/network":  _TYPE_NETWORK,
 }
 
 # ---------------------------------------------------------------------------
 # shared state
 # ---------------------------------------------------------------------------
 _connected: set = set()
-_network_cache: str | None = None        # cached "network" envelope for late joiners
-_edgedata_snapshot_cache: str | None = None  # cached full edgedata snapshot for late joiners
+_network_frame: bytes | None = None           # cached type-5 frame for late joiners
+_edgedata_snapshot_frame: bytes | None = None # cached type-3 full-snapshot frame for late joiners
 _loop: asyncio.AbstractEventLoop | None = None
 
-# High-frequency topics use latest-value semantics: the callback overwrites the
-# pending envelope and the broadcast loop flushes at the display rate (60 fps).
-# This prevents message queue build-up when the publisher runs faster than the
-# browser can render.
-_LATENCY_SENSITIVE = {"simstep", "tls", "edgedata"}
-# log messages are low-frequency and must not be dropped
-_pending: dict[str, str] = {}       # type_name -> latest JSON envelope
+# Latest-value semantics for high-frequency topics: callback overwrites; flush loop sends once.
+# Log messages are low-frequency and must not be dropped.
+_LATEST_VALUE = {_TYPE_SIMSTEP, _TYPE_TLS, _TYPE_EDGEDATA}
+_pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 
 
 # ---------------------------------------------------------------------------
 # eCAL callback (runs in eCAL thread — must not touch asyncio directly)
 # ---------------------------------------------------------------------------
-def _make_callback(topic: str, proto_cls):
-    # nanobind_core callback signature: (publisher_id, data_type_info, data)
+def _make_callback(topic: str, type_byte: int):
     def _cb(publisher_id, data_type_info, data):
-        global _network_cache
+        global _network_frame, _edgedata_snapshot_frame
         try:
-            msg = proto_cls()
-            msg.ParseFromString(data.buffer)
-            payload = MessageToDict(msg,
-                                    preserving_proto_field_name=True,
-                                    always_print_fields_with_no_presence=False)
-            envelope = json.dumps({"type": TOPICS[topic][1], "data": payload})
+            frame = bytes([type_byte]) + bytes(data.buffer)
 
-            if topic == "sumo/network":
-                _network_cache = envelope
-            elif topic == "sumo/edgedata":
-                # cache full snapshots for replay to new clients
-                if payload.get("full_snapshot"):
-                    global _edgedata_snapshot_cache
-                    _edgedata_snapshot_cache = envelope
+            if type_byte == _TYPE_NETWORK:
+                # read cache file path from NetworkData, load the NetworkGeometry bytes
+                nd = sumo_pb2.NetworkData()
+                nd.ParseFromString(bytes(data.buffer))
+                if nd.cache_path:
+                    with open(nd.cache_path, 'rb') as f:
+                        ng_bytes = f.read()
+                    frame = bytes([_TYPE_NETWORK]) + ng_bytes
+                    _network_frame = frame
+                    if _loop is not None:
+                        _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
+                return
+
+            if type_byte == _TYPE_EDGEDATA:
+                # peek at full_snapshot flag without full decode: field 3, varint, value 1
+                # simpler: just parse the small header fields
+                edu = sumo_pb2.EdgeDataUpdate()
+                edu.ParseFromString(bytes(data.buffer))
+                if edu.full_snapshot:
+                    _edgedata_snapshot_frame = frame
 
             if _loop is not None:
-                type_name = TOPICS[topic][1]
-                if type_name in _LATENCY_SENSITIVE:
-                    # overwrite — only the latest value matters
-                    _loop.call_soon_threadsafe(_pending.__setitem__, type_name, envelope)
+                if type_byte in _LATEST_VALUE:
+                    _loop.call_soon_threadsafe(_pending.__setitem__, type_byte, frame)
                 else:
-                    # reliable delivery for low-frequency messages
-                    _loop.call_soon_threadsafe(_reliable_send, envelope)
+                    _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
         except Exception as exc:
-            # must not let exceptions escape into eCAL's C++ callback dispatcher
             print("Error in callback for %s: %s" % (topic, exc))
 
     return _cb
@@ -134,32 +143,27 @@ def _call_service(method: str, request_dict: dict) -> dict:
 # ---------------------------------------------------------------------------
 # asyncio: broadcast helpers
 # ---------------------------------------------------------------------------
-async def _send_all(envelope: str) -> None:
+async def _send_all_bytes(frame: bytes) -> None:
     if _connected:
         await asyncio.gather(
-            *[ws.send(envelope) for ws in list(_connected)],
+            *[ws.send(frame) for ws in list(_connected)],
             return_exceptions=True,
         )
 
-def _reliable_send(envelope: str) -> None:
-    asyncio.ensure_future(_send_all(envelope))
+def _reliable_send_bytes(frame: bytes) -> None:
+    asyncio.ensure_future(_send_all_bytes(frame))
 
-async def _broadcast_loop() -> None:
-    """Flush latest-value pending messages at the display rate (~60 fps).
-
-    All pending types are combined into a single WebSocket frame so the
-    browser handles one onmessage event and React batches all state updates
-    into a single render pass.
-    """
+async def _flush_loop() -> None:
+    """Send latest-value pending frames at ~60 fps."""
     while True:
         await asyncio.sleep(1 / 60)
         if _pending and _connected:
-            # build batch by string concatenation — each value is already a valid
-            # JSON string so we avoid an expensive json.loads + json.dumps round-trip
-            # (critical when edgedata payloads are large)
-            batch = '{"type":"batch","messages":[' + ','.join(_pending.values()) + ']}'
+            frames = list(_pending.values())
             _pending.clear()
-            await _send_all(batch)
+            await asyncio.gather(
+                *[_send_all_bytes(f) for f in frames],
+                return_exceptions=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -167,20 +171,18 @@ async def _broadcast_loop() -> None:
 # ---------------------------------------------------------------------------
 async def _handler(websocket) -> None:
     try:
-        # replay cached network and edgedata full snapshot to new client
-        if _network_cache is not None:
-            await websocket.send(_network_cache)
-        if _edgedata_snapshot_cache is not None:
-            await websocket.send(_edgedata_snapshot_cache)
+        if _network_frame is not None:
+            await websocket.send(_network_frame)
+        if _edgedata_snapshot_frame is not None:
+            await websocket.send(_edgedata_snapshot_frame)
 
-        # sync simulation control state and attribute config
         loop = asyncio.get_running_loop()
         state = await loop.run_in_executor(None, _call_service, "get_state", {})
         await websocket.send(json.dumps({"type": "state", "data": state}))
         attrs = await loop.run_in_executor(None, _call_service, "get_attributes", {})
         await websocket.send(json.dumps({"type": "attributes", "data": attrs}))
     except Exception:
-        return  # client disconnected during handshake
+        return
 
     _connected.add(websocket)
     try:
@@ -200,7 +202,7 @@ async def _handler(websocket) -> None:
                     **response,
                 }))
     except Exception:
-        pass  # client disconnected without close frame (tab close, reload, etc.)
+        pass
     finally:
         _connected.discard(websocket)
 
@@ -208,7 +210,7 @@ async def _handler(websocket) -> None:
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-async def _run(ws_port: int) -> None:
+async def _run(ws_port: int, compress: bool) -> None:
     global _loop, _svc_client
     _loop = asyncio.get_running_loop()
 
@@ -216,24 +218,28 @@ async def _run(ws_port: int) -> None:
     _svc_client = ecal_core.ServiceClient(SERVICE_NAME)
 
     subscribers = []
-    for topic, (proto_cls, _) in TOPICS.items():
+    for topic, type_byte in TOPICS.items():
         sub = ecal_core.Subscriber(topic)
-        sub.set_receive_callback(_make_callback(topic, proto_cls))
-        subscribers.append(sub)   # keep references alive
+        sub.set_receive_callback(_make_callback(topic, type_byte))
+        subscribers.append(sub)
 
-    asyncio.create_task(_broadcast_loop())
+    asyncio.create_task(_flush_loop())
 
-    async with websockets.serve(_handler, "0.0.0.0", ws_port):
-        print("Bridge listening on ws://0.0.0.0:%d" % ws_port)
-        await asyncio.Future()  # run forever
+    compression = 'deflate' if compress else None
+    async with websockets.serve(_handler, "0.0.0.0", ws_port, compression=compression):
+        print("Bridge listening on ws://0.0.0.0:%d (compression=%s)" % (
+            ws_port, 'deflate' if compress else 'off'))
+        await asyncio.Future()
 
 
 def main():
     p = argparse.ArgumentParser(description="eCAL → WebSocket bridge for SUMO")
     p.add_argument("--ws-port", type=int, default=8765)
+    p.add_argument("--no-compress", action="store_true",
+                   help="Disable permessage-deflate WebSocket compression")
     args = p.parse_args()
     try:
-        asyncio.run(_run(args.ws_port))
+        asyncio.run(_run(args.ws_port, compress=not args.no_compress))
     except KeyboardInterrupt:
         pass
     finally:

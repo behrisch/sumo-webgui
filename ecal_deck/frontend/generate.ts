@@ -15,7 +15,7 @@ const cmd = [
   'protoc',
   `--plugin=${plugin}`,
   `--ts_proto_out=${out}`,
-  '--ts_proto_opt=onlyTypes=true',
+  '--ts_proto_opt=onlyTypes=false',
   '--ts_proto_opt=snakeToCamel=false',
   `-I ${proto}`,
   join(proto, 'sumo.proto'),

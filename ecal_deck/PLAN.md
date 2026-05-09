@@ -374,8 +374,191 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 | Priority | Optimization | Where | Expected gain |
 |----------|-------------|-------|---------------|
 | High | **Investigate 35ms frontend baseline** — frame time 35ms persists without edge data (publisher at 180 steps/s); likely `JSON.parse` of large simstep batch, deck.gl GPU upload, or React overhead; needs flame chart profiling | Firefox DevTools | Identifies next target |
-| Medium | **Protobuf binary transport (Phase B)** — send `simstep` and `edgedata` as raw protobuf bytes; bridge skips `MessageToDict`; frontend uses ts-proto decode | bridge + frontend | ~2× on `parse ms` |
+| High | **Phase B: binary WebSocket + binary network cache** — see section below | bridge + publisher + frontend | eliminates JSON parse cost; large-network load time |
 | Low | **Bridge timer precision** — replace `asyncio.sleep(1/60)` with wall-clock tracking | `ecal_ws_bridge.py` | msg/s: 100 → 60 (cosmetic given RAF sync) |
+
+---
+
+## Phase B: Binary WebSocket transport + binary network cache
+
+### Motivation
+
+Two independent problems addressed together because both require switching away from JSON in the
+bridge:
+
+1. **Large network load time** — for a large network (e.g. full Berlin), `sumolib.net.readNet()`
+   plus `_build_network_geojson()` plus `json.dumps()` plus WebSocket transfer plus
+   `JSON.parse()` in the browser adds minutes to simulation startup. The GeoJSON string alone
+   can be 50–200 MB.
+2. **35ms frontend baseline** — the main cost is `JSON.parse` of the batch WebSocket frame
+   every 16ms. Moving to binary protobuf payloads eliminates this.
+
+Both are solved by replacing JSON WebSocket frames with binary frames.
+
+### Wire format
+
+A **binary WebSocket frame** is simply a WebSocket frame with the binary opcode (0x2) instead
+of the text opcode (0x1). The browser receives `event.data` as an `ArrayBuffer` instead of a
+string — same connection, same port, just bytes. Commands and responses (low-frequency, complex
+structure) continue to use **JSON text frames** — no change to the command/service protocol.
+
+All binary frames use a one-byte type prefix followed by a **protobuf-encoded payload**:
+
+```
+[u8 msg_type] [protobuf payload bytes...]
+```
+
+| `msg_type` | Proto message | Bridge action |
+|---|---|---|
+| 1 | `SimStep` | forward raw eCAL bytes — no re-encoding |
+| 2 | `TLSUpdate` | forward raw eCAL bytes — no re-encoding |
+| 3 | `EdgeDataUpdate` | forward raw eCAL bytes — no re-encoding |
+| 4 | `LogMessage` | forward raw eCAL bytes — no re-encoding |
+| 5 | `NetworkGeometry` | encode from cached file once; forward bytes thereafter |
+
+For types 1–4 the bridge passes the raw eCAL protobuf bytes through without `MessageToDict` /
+`json.dumps` — this is the main CPU saving. Type 5 is also a proper protobuf message (see
+below) so the frontend uses ts-proto `decode()` for all types uniformly.
+
+### Network binary cache (`NetworkGeometry` proto)
+
+A new proto message replaces `NetworkData.geojson`:
+
+```protobuf
+message TlsEntry {
+  string id       = 1;
+  string tls      = 2;
+  int32  tl_index = 3;
+}
+
+message NetworkGeometry {
+  bool            geo_referenced     = 1;
+  bytes           edge_starts        = 2;  // u32[] little-endian — cumulative vertex index per edge
+  bytes           edge_positions     = 3;  // f64[] little-endian — [x0,y0,x1,y1,...] all edges
+  bytes           junction_positions = 4;  // f64[] little-endian — [x,y] centroid per junction
+  bytes           tls_positions      = 5;  // f64[] little-endian — [x1,y1,x2,y2] per TLS bar
+  repeated string edge_ids           = 6;
+  repeated string junction_ids       = 7;
+  repeated TlsEntry tls_entries      = 8;
+}
+```
+
+Using `bytes` fields for typed arrays avoids protobuf's expensive `repeated double` encoding
+(varint per element). The frontend does `new Float64Array(msg.edge_positions.buffer)` directly.
+
+**The disk cache is simply `NetworkGeometry.SerializeToString()` written to
+`<net_file>.ecaldeck`** — no custom format, no magic bytes. The publisher regenerates it only
+when the `.net.xml` mtime changes. The bridge reads the file once, caches the raw bytes in
+memory, and prepends the type-5 byte before sending — no re-encoding ever. Late-joining clients
+get the same cached bytes immediately. The frontend decodes with ts-proto `NetworkGeometry.decode()`
+identically to all other message types.
+
+For a typical large network (~150k edges, ~50k junctions): ~15 MB binary vs ~100 MB GeoJSON.
+
+**Compression:** protobuf does not compress automatically. The `edge_starts` u32 array has many
+zero upper bytes (small indices); coordinate floats are not zero-heavy but spatially coherent.
+App-level gzip (bridge compresses, frontend `DecompressionStream`) would work but adds a
+decompression step before `decode()`. The better option is **WebSocket `permessage-deflate`**
+(RFC 7692): negotiated at connection time, decompression happens in the WebSocket layer before
+`onmessage` fires — `event.data` arrives as a normal `ArrayBuffer`, no application changes.
+Note: ts-proto `decode()` internally copies `bytes` fields into new `Uint8Array` objects anyway,
+so true zero-copy is not achieved regardless. One bridge change: `websockets.serve(...,
+compression='deflate')`. The disk cache stays uncompressed (local I/O, no benefit).
+
+### Parallel readNet
+
+`sumolib.net.readNet()` currently runs sequentially after `traci.start()`. Both are pure I/O
+(disk reads) with no shared state. Moving `readNet` to a `threading.Thread` started before
+`traci.start()` overlaps the two waits — saving up to 30 s on large networks.
+
+```
+before:  [traci.start 30s]───[readNet 30s]───[build binary]───publish
+after:   [traci.start 30s]
+         [readNet 30s     ]───[build binary]───publish
+                                ^
+                         join here (only waits for remainder)
+```
+
+### Changes by component
+
+**`sumo.proto`**
+- Add `TlsEntry` and `NetworkGeometry` messages (see above)
+- `NetworkData`: remove `geojson: string`, add `cache_path: string`. `geo_referenced` stays
+  (used to signal the bridge; not forwarded to frontend — `NetworkGeometry.geo_referenced` is).
+
+**`sumo_ecal_publisher.py`**
+- Extract `net_file = _net_file_from_cfg(sumocfg_path)` before `traci.start()`
+- Start `threading.Thread(target=sumolib.net.readNet, ...)` immediately; store result via list
+- Call `traci.start()` concurrently; join thread after — both overlap
+- Replace `_build_network_geojson()` with `_build_network_binary(net, net_file, include_tls)`
+  — checks `.net.xml` mtime vs `.ecaldeck` mtime; regenerates if stale; returns cache path
+- Send `NetworkData(geo_referenced=geo_ref, cache_path=abs_path)` — tiny message, no GeoJSON
+
+**`ecal_ws_bridge.py`**
+- All topic callbacks (types 1–4): prepend type byte to raw `data.buffer`; send as individual
+  binary frame — replaces `MessageToDict` + `json.dumps` entirely in the hot path
+- `sumo/network` callback (type 5): read `.ecaldeck` file once; cache raw bytes in memory;
+  prepend type byte; send as binary frame — no encoding needed ever
+- `_broadcast_loop` **removed** — latest-value `_pending` dict still used to drop stale
+  messages between RAF ticks, but each pending message is sent as its own binary frame in a
+  single `asyncio.gather` call; no JSON batch needed since RAF sync already coalesces React
+  state updates on the frontend
+- Command/response protocol unchanged (JSON text frames in both directions)
+- `MessageToDict` / `json.dumps` kept only for command responses (low-frequency path)
+- Add `--no-compress` flag; passes `compression='deflate'` to `websockets.serve()` unless
+  set — on by default, off for benchmarking
+
+**`generate.ts`**
+- `--ts_proto_opt=onlyTypes=true` → `--ts_proto_opt=onlyTypes=false`
+- ts-proto generates `encode` / `decode` functions alongside types
+
+**`useSimSocket.ts`**
+- `onmessage`: branch on `event.data instanceof ArrayBuffer` (binary) vs `string` (text/JSON)
+- Binary: `new Uint8Array(event.data)[0]` → type byte; remaining bytes → proto `decode()`
+- Text: existing JSON handling for `response`, `state`, `attributes` messages (unchanged)
+- `network` state changes from `NetworkData | null` to `NetworkGeometry | null`
+
+**`App.tsx`**
+- `parseNetwork()` replaced by `parseNetworkGeometry(msg: NetworkGeometry)` — converts proto
+  `bytes` fields to typed arrays; bounding box computed from coordinate scan
+- ts-proto decodes `bytes` fields as `Uint8Array` with potentially non-zero `byteOffset`; use
+  `new Float64Array(u8.buffer, u8.byteOffset, u8.byteLength / 8)` — not `new Float64Array(u8.buffer)`
+- `ParsedNetwork` type replaces GeoJSON feature arrays with typed arrays:
+  ```typescript
+  edgeStarts: Uint32Array;
+  edgePositions: Float64Array;
+  edgeIds: string[];
+  edgeIdToIndex: Map<string, number>;
+  junctionPositions: Float64Array;
+  junctionIds: string[];
+  tlsPositions: Float64Array;      // [x1,y1,x2,y2] per entry — from tls_positions bytes field
+  tlsEntries: TlsEntry[];          // [{id, tls, tl_index}] — from repeated tls_entries field
+  // TLS layer merges: tlsEntries[i] metadata + tlsPositions[i*4..i*4+3] geometry
+  ```
+
+**`NetworkLayer.ts`**
+- Replace `GeoJsonLayer` × 2 with:
+  - `PathLayer` binary mode for edges: `startIndices: edgeStarts`, `attributes: {getPath: {value: edgePositions, size: 2}}`
+  - `ScatterplotLayer` binary mode for junctions: positions from `junctionPositions`
+
+**`EdgeDataLayer.ts`**
+- Replace `GeoJsonLayer` with `PathLayer` binary mode — shares `edgeStarts` + `edgePositions`
+  from `ParsedNetwork`; `BinaryEdgeGeom` absorbed into `ParsedNetwork` and removed
+
+**`TLSLayer.ts`**
+- Replace GeoJSON feature array with `tlsPositions` + `tlsEntries` from `ParsedNetwork`
+
+### Implementation order
+
+1. `sumo.proto` — add `TlsEntry`, `NetworkGeometry`; update `NetworkData`; regenerate bindings
+2. Publisher — parallel `readNet`; `_build_network_binary()`; send new `NetworkData`
+3. Bridge — binary frames for topics 1–5; drop JSON batch; add `--no-compress`
+4. `generate.ts` — switch to `onlyTypes=false`; regenerate
+5. `useSimSocket.ts` — binary frame dispatch; update `network` state type
+6. `App.tsx` + `ParsedNetwork` — `parseNetworkGeometry()`; typed array fields
+7. `NetworkLayer.ts` — PathLayer + ScatterplotLayer binary
+8. `EdgeDataLayer.ts` — PathLayer binary; remove `BinaryEdgeGeom`
+9. `TLSLayer.ts` — `tlsPositions` + `tlsEntries`
 
 ---
 

@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import type { NetworkData, SimStep, TLSUpdate, EdgeDataUpdate, GetAttributesResponse, LogMessage } from '../generated/sumo';
+import { SimStep, TLSUpdate, EdgeDataUpdate, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
 
 export type EdgeValueMap = Map<string, Record<string, number>>;
 
 const RECONNECT_DELAY_MS = 2000;
+
+// Binary frame type bytes (must match ecal_ws_bridge.py)
+const TYPE_SIMSTEP  = 1;
+const TYPE_TLS      = 2;
+const TYPE_EDGEDATA = 3;
+const TYPE_LOG      = 4;
+const TYPE_NETWORK  = 5;
 
 export interface SimControlState {
   delayMs: number;
@@ -18,11 +25,11 @@ export type CommandResponse = Record<string, unknown> & { ok?: boolean; error?: 
 
 export interface SimState {
   connected: boolean;
-  network: NetworkData | null;
+  network: NetworkGeometry | null;
   simStep: SimStep | null;
   tlsUpdate: TLSUpdate | null;
-  edgeValueMap: EdgeValueMap;          // accumulated edge attribute values (base + deltas)
-  edgeValueVersion: number;            // increments on each edgedata update to trigger re-render
+  edgeValueMap: EdgeValueMap;
+  edgeValueVersion: number;
   logMessages: LogMessage[];
   controlState: SimControlState | null;
   attributeConfig: GetAttributesResponse | null;
@@ -31,50 +38,45 @@ export interface SimState {
 }
 
 export function useSimSocket(url: string): SimState {
-  const [connected, setConnected]           = useState(false);
-  const [network, setNetwork]               = useState<NetworkData | null>(null);
-  const [simStep, setSimStep]               = useState<SimStep | null>(null);
-  const [tlsUpdate, setTlsUpdate]           = useState<TLSUpdate | null>(null);
-  const [controlState, setControlState]     = useState<SimControlState | null>(null);
+  const [connected, setConnected]             = useState(false);
+  const [network, setNetwork]                 = useState<NetworkGeometry | null>(null);
+  const [simStep, setSimStep]                 = useState<SimStep | null>(null);
+  const [tlsUpdate, setTlsUpdate]             = useState<TLSUpdate | null>(null);
+  const [controlState, setControlState]       = useState<SimControlState | null>(null);
   const [attributeConfig, setAttributeConfig] = useState<GetAttributesResponse | null>(null);
 
-  // accumulated edge value map: base + deltas merged in-place
-  const edgeValueMapRef = useRef<EdgeValueMap>(new Map());
+  const edgeValueMapRef    = useRef<EdgeValueMap>(new Map());
   const [edgeValueVersion, setEdgeValueVersion] = useState(0);
-  const [logMessages, setLogMessages] = useState<LogMessage[]>([]);
-  const recentLogTexts = useRef(new Set<string>());
+  const [logMessages, setLogMessages]           = useState<LogMessage[]>([]);
+  const recentLogTexts                          = useRef(new Set<string>());
   const updateAttributeConfig = (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) =>
     setAttributeConfig(updater);
 
-  // Latest-value buffers for high-frequency topics — written by onmessage,
-  // flushed to React state once per animation frame to cap renders at 60 fps.
-  const latestSimStep    = useRef<SimStep | null>(null);
-  const latestTLS        = useRef<TLSUpdate | null>(null);
-  const edgeDataDirty    = useRef(false);  // true when edgeValueMapRef was updated this frame
-  const rafPending       = useRef(false);
+  // Latest-value refs — written by onmessage, flushed once per animation frame
+  const latestSimStep  = useRef<SimStep | null>(null);
+  const latestTLS      = useRef<TLSUpdate | null>(null);
+  const edgeDataDirty  = useRef(false);
 
-  const wsRef            = useRef<WebSocket | null>(null);
-  const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const unmounted        = useRef(false);
-  const pendingRef       = useRef<Map<string, (r: CommandResponse) => void>>(new Map());
+  const wsRef          = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unmounted      = useRef(false);
+  const pendingRef     = useRef<Map<string, (r: CommandResponse) => void>>(new Map());
 
   // RAF loop: drain latest-value refs into React state once per browser frame
   useEffect(() => {
     let rafId: number;
     const onRaf = () => {
-      const ss  = latestSimStep.current;
-      const tls = latestTLS.current;
+      const ss    = latestSimStep.current;
+      const tls   = latestTLS.current;
       const dirty = edgeDataDirty.current;
       if (ss || tls || dirty) {
         latestSimStep.current = null;
         latestTLS.current     = null;
         edgeDataDirty.current = false;
-        // all setters in one microtask → React 18 batches into one render
         if (ss)    setSimStep(ss);
         if (tls)   setTlsUpdate(tls);
         if (dirty) setEdgeValueVersion(v => v + 1);
       }
-      rafPending.current = false;
       rafId = requestAnimationFrame(onRaf);
     };
     rafId = requestAnimationFrame(onRaf);
@@ -96,37 +98,37 @@ export function useSimSocket(url: string): SimState {
       if (unmounted.current) return;
 
       const ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
       ws.onopen = () => setConnected(true);
 
-      type Msg = { type: string; data?: unknown; id?: string; messages?: Msg[] } & Record<string, unknown>;
-
-      const dispatch = (msg: Msg) => {
-        switch (msg.type) {
-          // high-frequency: write to ref, RAF loop flushes to state
-          case 'simstep':  latestSimStep.current = msg.data as SimStep;  break;
-          case 'tls':      latestTLS.current      = msg.data as TLSUpdate; break;
-          case 'edgedata': {
-            const ed = msg.data as EdgeDataUpdate & { full_snapshot?: boolean };
-            if (ed.full_snapshot) edgeValueMapRef.current.clear();  // reset on full snapshot
-            for (const e of ed.edges ?? []) {
+      const dispatchBinary = (buf: ArrayBuffer) => {
+        const bytes = new Uint8Array(buf);
+        if (bytes.length < 2) return;
+        const type    = bytes[0];
+        const payload = bytes.subarray(1);
+        performance.mark('ws-parse-start');
+        switch (type) {
+          case TYPE_SIMSTEP:
+            latestSimStep.current = SimStep.decode(payload);
+            break;
+          case TYPE_TLS:
+            latestTLS.current = TLSUpdate.decode(payload);
+            break;
+          case TYPE_EDGEDATA: {
+            const ed = EdgeDataUpdate.decode(payload);
+            if (ed.full_snapshot) edgeValueMapRef.current.clear();
+            for (const e of ed.edges) {
               edgeValueMapRef.current.set(e.id, { ...edgeValueMapRef.current.get(e.id), ...e.attributes });
             }
             edgeDataDirty.current = true;
             break;
           }
-          // low-frequency: set state immediately
-          case 'network':
-            edgeValueMapRef.current.clear();
-            setNetwork(msg.data as NetworkData);
-            break;
-          case 'log': {
-            const m = msg.data as LogMessage;
-            // deduplicate: SUMO writes some lines twice via its message handlers
-            const key = m.text;
-            if (!recentLogTexts.current.has(key)) {
-              recentLogTexts.current.add(key);
+          case TYPE_LOG: {
+            const m = LogMessage.decode(payload);
+            if (!recentLogTexts.current.has(m.text)) {
+              recentLogTexts.current.add(m.text);
               if (recentLogTexts.current.size > 50) recentLogTexts.current.clear();
               setLogMessages(prev => {
                 const next = [...prev, m];
@@ -135,9 +137,22 @@ export function useSimSocket(url: string): SimState {
             }
             break;
           }
+          case TYPE_NETWORK:
+            edgeValueMapRef.current.clear();
+            setNetwork(NetworkGeometry.decode(payload));
+            break;
+        }
+        performance.mark('ws-parse-end');
+        performance.measure('ws-parse', 'ws-parse-start', 'ws-parse-end');
+      };
+
+      type JsonMsg = { type: string; data?: unknown; id?: string } & Record<string, unknown>;
+
+      const dispatchJson = (msg: JsonMsg) => {
+        switch (msg.type) {
           case 'state': {
             const d = msg.data as { delay_ms?: number; paused?: boolean; sumocfg_path?: string; error?: string;
-              step_interval_current?: number; step_at_min_bound?: boolean; step_at_max_bound?: boolean; };
+              step_interval_current?: number; step_at_min_bound?: boolean; step_at_max_bound?: boolean };
             if (!d?.error && d?.delay_ms !== undefined)
               setControlState({ delayMs: d.delay_ms, paused: d.paused ?? false, sumocfg_path: d.sumocfg_path ?? '',
                 step_interval_current: d.step_interval_current ?? 1,
@@ -159,27 +174,19 @@ export function useSimSocket(url: string): SimState {
       };
 
       ws.onmessage = (evt) => {
-        let envelope: Msg;
-        try {
-          performance.mark('ws-parse-start');
-          envelope = JSON.parse(evt.data) as Msg;
-          performance.mark('ws-parse-end');
-          performance.measure('ws-parse', 'ws-parse-start', 'ws-parse-end');
-        } catch {
-          return;
-        }
-        if (envelope.type === 'batch') {
-          for (const msg of envelope.messages ?? []) dispatch(msg);
+        if (evt.data instanceof ArrayBuffer) {
+          dispatchBinary(evt.data);
         } else {
-          dispatch(envelope);
+          try {
+            dispatchJson(JSON.parse(evt.data as string) as JsonMsg);
+          } catch { /* ignore malformed JSON */ }
         }
       };
 
       ws.onclose = () => {
         setConnected(false);
-        if (!unmounted.current) {
+        if (!unmounted.current)
           reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY_MS);
-        }
       };
 
       ws.onerror = () => ws.close();

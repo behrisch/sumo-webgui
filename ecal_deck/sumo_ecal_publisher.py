@@ -16,7 +16,7 @@ Service: sumo_control
 """
 
 import argparse
-import json
+import array as _array
 import os
 import sys
 import threading
@@ -37,7 +37,7 @@ except ImportError:
     import traci
 
 import sumolib
-from net.net2geojson import shape2json, add_junction_features, add_tls_features
+import sumolib.geomhelper as gh
 
 import ecal.nanobind_core as ecal_core
 from ecal.msg.proto.helper import get_descriptor_from_type
@@ -55,6 +55,27 @@ def _make_publisher(topic: str, proto_type_name: str) -> ecal_core.Publisher:
     return ecal_core.Publisher(topic, dti)
 
 
+def _make_geo_converter(proj_parameter: str, net_offset: str):
+    """Build an (x, y) → (lon, lat) converter from stored projection parameters.
+
+    Mirrors sumolib's Geo.__call__(inverse=True):
+      lon, lat = proj(x + offset_x, y + offset_y, inverse=True)
+    Returns None if proj_parameter is empty or '!'.
+    """
+    if not proj_parameter or proj_parameter == '!':
+        return None
+    try:
+        import pyproj
+        ox, oy = map(float, net_offset.split(','))
+        proj = pyproj.Proj(proj_parameter)
+        def _convert(x, y):
+            return proj(x + ox, y + oy, inverse=True)
+        return _convert
+    except Exception as exc:
+        print("Warning: could not build geo converter: %s" % exc)
+        return None
+
+
 def _net_file_from_cfg(sumocfg_path: str) -> str:
     cfg_dir = os.path.dirname(os.path.abspath(sumocfg_path))
     for inp in sumolib.xml.parse(sumocfg_path, "input"):
@@ -64,28 +85,110 @@ def _net_file_from_cfg(sumocfg_path: str) -> str:
     raise RuntimeError("Could not locate net-file entry in %s" % sumocfg_path)
 
 
-def _build_network_geojson(net, include_tls: bool) -> tuple[str, bool]:
-    """Return (geojson_string, geo_referenced)."""
 
-    class _Opts:
-        boundary = False
 
-    features = []
+def _build_network_binary(net, net_file: str, include_tls: bool) -> str:
+    """Serialize NetworkGeometry proto to <net_file>.ecaldeck; return cache path.
 
+    Skips regeneration if the cache is newer than the net file.
+    """
+    cache_path = net_file + '.ecaldeck'
+    try:
+        if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
+            print("Using cached network binary: %s" % cache_path)
+            return cache_path
+    except OSError:
+        pass
+
+    geo_ref = net.hasGeoProj()
+
+    def _xy(x, y):
+        return net.convertXY2LonLat(x, y) if geo_ref else (x, y)
+
+    # edges
+    edge_starts = _array.array('I')  # uint32 LE
+    edge_pos    = _array.array('d')  # float64 LE
+    edge_ids    = []
+    cur = 0
     for edge_id, geometry, _width in net.getGeometries(False, False):
-        features.append({
-            "type": "Feature",
-            "properties": {"element": "edge", "id": edge_id},
-            "geometry": shape2json(net, geometry, False),
-        })
+        edge_ids.append(edge_id)
+        edge_starts.append(cur)
+        for x, y in geometry:
+            lx, ly = _xy(x, y)
+            edge_pos.append(lx)
+            edge_pos.append(ly)
+        cur += len(geometry)
+    edge_starts.append(cur)  # sentinel
 
-    add_junction_features(net, features, _Opts())
+    # junctions — full polygon vertices
+    junc_starts = _array.array('I')  # uint32 LE
+    junc_pos    = _array.array('d')  # float64 LE
+    junc_ids    = []
+    junc_cur    = 0
+    for junction in net.getNodes():
+        shape = junction.getShape()
+        if len(shape) < 3:
+            continue
+        junc_ids.append(junction.getID())
+        junc_starts.append(junc_cur)
+        for x, y in shape:
+            lx, ly = _xy(x, y)
+            junc_pos.append(lx)
+            junc_pos.append(ly)
+        junc_cur += len(shape)
+    junc_starts.append(junc_cur)  # sentinel
 
+    # TLS connection bars
+    tls_pos     = _array.array('d')
+    tls_entries = []
     if include_tls:
-        add_tls_features(net, features, _Opts())
+        for edge in net.getEdges():
+            for lane in edge.getLanes():
+                outgoing = lane.getOutgoing()
+                n = len(outgoing)
+                if n == 0:
+                    continue
+                for i, con in enumerate(outgoing):
+                    if con.getTLSID() == "":
+                        continue
+                    bar = lane.getWidth() / n
+                    off = i * bar - lane.getWidth() * 0.5
+                    prev, end = lane.getShape()[-2:]
+                    p1 = gh.add(end, gh.sideOffset(prev, end, off))
+                    p2 = gh.add(end, gh.sideOffset(prev, end, off + bar))
+                    x1, y1 = _xy(*p1)
+                    x2, y2 = _xy(*p2)
+                    tls_pos.extend([x1, y1, x2, y2])
+                    tls_entries.append(sumo_pb2.TlsEntry(
+                        id="%s_%s" % (con.getJunction().getID(), con.getJunctionIndex()),
+                        tls=con.getTLSID(),
+                        tl_index=con.getTLLinkIndex(),
+                    ))
 
-    fc = {"type": "FeatureCollection", "features": features}
-    return json.dumps(fc, separators=(",", ":")), net.hasGeoProj()
+    # Store projection parameters so cached loads need no net file access at all
+    _loc = getattr(net, '_location', {}) or {}
+    proj_str       = _loc.get('projParameter', '')
+    net_offset_str = _loc.get('netOffset', '0.00,0.00')
+
+    ng = sumo_pb2.NetworkGeometry(
+        geo_referenced=geo_ref,
+        edge_starts=edge_starts.tobytes(),
+        edge_positions=edge_pos.tobytes(),
+        junction_starts=junc_starts.tobytes(),
+        junction_positions=junc_pos.tobytes(),
+        tls_positions=tls_pos.tobytes(),
+        edge_ids=edge_ids,
+        junction_ids=junc_ids,
+        tls_entries=tls_entries,
+        proj_parameter=proj_str,
+        net_offset=net_offset_str,
+    )
+    data = ng.SerializeToString()
+    with open(cache_path, 'wb') as f:
+        f.write(data)
+    print("Built network binary: %d edges, %d junctions, %d tls entries, %d bytes" % (
+        len(edge_ids), len(junc_ids), len(tls_entries), len(data)))
+    return cache_path
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +296,7 @@ def main():
     }
 
     # per-simulation state (replaced on each load)
-    sim = {"net": None, "geo_referenced": False, "all_edges": [], "has_tls": False}
+    sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False}
 
     _step_event = threading.Event()
     _step_thread: list[threading.Thread | None] = [None]
@@ -220,7 +323,7 @@ def main():
     def _step_loop():
         step          = 0
         steps_since   = 0
-        net           = sim["net"]
+        converter     = sim["converter"]
         geo_ref       = sim["geo_referenced"]
         all_edges     = sim["all_edges"]
         _t_report     = time.monotonic()
@@ -231,6 +334,8 @@ def main():
             if ctrl["paused"]:
                 _step_event.wait()
                 _step_event.clear()
+                if _step_stop.is_set():
+                    break
 
             traci.simulationStep()
             time_ms = round(traci.simulation.getTime() * 1000)
@@ -250,8 +355,8 @@ def main():
                 ss.time_ms = time_ms
                 for vid in traci.vehicle.getIDList():
                     x, y = traci.vehicle.getPosition(vid)
-                    if geo_ref:
-                        x, y = net.convertXY2LonLat(x, y)
+                    if geo_ref and converter:
+                        x, y = converter(x, y)
                     v = ss.vehicles.add()
                     v.id = vid; v.x = x; v.y = y
                     v.speed = traci.vehicle.getSpeed(vid)
@@ -339,16 +444,36 @@ def main():
             if _step_thread[0] and _step_thread[0].is_alive():
                 _step_stop.set()
                 _step_event.set()  # unblock paused loop
+                _step_thread[0].join(timeout=10)
+                # safety net: step loop calls traci.close() on exit, but guard in case
+                # it timed out or raised before reaching that point
                 try:
                     traci.close()
                 except Exception:
                     pass
-                _step_thread[0].join(timeout=10)
                 _step_stop.clear()
 
             # start a fresh reader thread — accepts the next connection on the
             # persistent log server (same port every load, no race on reconnect)
             _start_log_reader()
+
+            net_file   = _net_file_from_cfg(sumocfg_path)
+            cache_path = net_file + '.ecaldeck'
+            cache_valid = False
+            try:
+                cache_valid = os.path.getmtime(cache_path) >= os.path.getmtime(net_file)
+            except OSError:
+                pass
+
+            # For uncached networks, start readNet concurrently with traci.start()
+            _net_result: list = []
+            net_thread = None
+            if not cache_valid:
+                net_thread = threading.Thread(
+                    target=lambda: _net_result.append(
+                        sumolib.net.readNet(net_file, withInternal=False)),
+                    daemon=True)
+                net_thread.start()
 
             # start SUMO — log socket uses SUMO's "host:port" file syntax
             cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
@@ -356,14 +481,32 @@ def main():
             traci.start(cmd)
             _log("INFO", "SUMO started: %s" % sumocfg_path)
 
-            net = sumolib.net.readNet(_net_file_from_cfg(sumocfg_path), withInternal=False)
-            sim["net"]          = net
-            sim["geo_referenced"] = net.hasGeoProj()
-            sim["all_edges"]    = [e.getID() for e in net.getEdges()]
-            sim["has_tls"]      = len(traci.trafficlight.getIDList()) > 0
-            ctrl["sumocfg_path"] = sumocfg_path
+            if cache_valid:
+                # Fast path: read projection params from the cache — no net file access needed.
+                with open(cache_path, 'rb') as _f:
+                    _ng = sumo_pb2.NetworkGeometry()
+                    _ng.ParseFromString(_f.read())
+                geo_ref   = _ng.geo_referenced
+                converter = _make_geo_converter(_ng.proj_parameter, _ng.net_offset)
+                sim["geo_referenced"] = geo_ref
+                sim["converter"]      = converter
+                sim["all_edges"]      = [e for e in traci.edge.getIDList()
+                                         if not e.startswith(':')]
+                sim["has_tls"]        = len(traci.trafficlight.getIDList()) > 0
+                _log("INFO", "Using cached network binary: %s" % cache_path)
+            else:
+                # Slow path: wait for readNet, build cache
+                net_thread.join()
+                net = _net_result[0]
+                geo_ref   = net.hasGeoProj()
+                converter = net.convertXY2LonLat if geo_ref else None
+                sim["geo_referenced"] = geo_ref
+                sim["converter"]      = converter
+                sim["all_edges"]      = [e.getID() for e in net.getEdges()]
+                sim["has_tls"]        = len(traci.trafficlight.getIDList()) > 0
+                cache_path = _build_network_binary(net, net_file, include_tls=sim["has_tls"])
 
-            geojson_str, geo_ref = _build_network_geojson(net, include_tls=sim["has_tls"])
+            ctrl["sumocfg_path"] = sumocfg_path
 
             # wait for at least one subscriber before sending
             deadline = time.monotonic() + 30.0
@@ -372,9 +515,9 @@ def main():
                     print("Warning: no subscriber on sumo/network after 30 s -- still waiting")
                 time.sleep(0.1)
 
-            nd = sumo_pb2.NetworkData(geojson=geojson_str, geo_referenced=geo_ref)
+            nd = sumo_pb2.NetworkData(geo_referenced=sim["geo_referenced"], cache_path=cache_path)
             pub_network.send(nd.SerializeToString())
-            print("Published network (%d chars GeoJSON, geo_referenced=%s)" % (len(geojson_str), geo_ref))
+            _log("INFO", "Published network reference (cache: %s)" % cache_path)
 
             # reset per-sim state
             ctrl["paused"] = False

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 export interface PerfStats {
   msgPerSec: number;      // WebSocket messages received per second
-  parseMs: number;        // avg JSON.parse time (ms)
+  parseMs: number;        // avg proto decode time per binary frame (ms)
   vehicleBuildMs: number; // avg buildVehicleLayer time (ms)
   frameMs: number;        // avg time between rAF callbacks (ms)
 }
