@@ -32,15 +32,22 @@ const BASEMAP_STYLES: Record<string, string> = {
 export interface ParsedNetwork {
   geoReferenced: boolean;
   initialViewState: MapViewState | OrthographicViewState;
-  edgeCount: number;
-  edgeStarts: Uint32Array;
-  edgePositions: Float64Array;
+  // lanes — primary road geometry
+  laneCount: number;
+  laneStarts: Uint32Array;
+  lanePositions: Float64Array;
+  laneWidths: Float32Array;
+  laneEdgeIndices: Uint32Array;
+  laneIds: string[];
+  // edges — used for data queries and lane→edge resolution
   edgeIds: string[];
   edgeIdToIndex: Map<string, number>;
+  // junctions
   junctionCount: number;
   junctionStarts: Uint32Array;
   junctionPositions: Float64Array;
   junctionIds: string[];
+  // tls
   tlsPositions: Float64Array;
   tlsEntries: TlsEntry[];
 }
@@ -53,6 +60,13 @@ function toFloat64(u8: Uint8Array): Float64Array {
   aligned.set(u8);
   return new Float64Array(aligned.buffer, 0, u8.byteLength / 8);
 }
+function toFloat32(u8: Uint8Array): Float32Array {
+  if (u8.byteOffset % 4 === 0)
+    return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
+  const aligned = new Uint8Array(u8.byteLength);
+  aligned.set(u8);
+  return new Float32Array(aligned.buffer, 0, u8.byteLength / 4);
+}
 function toUint32(u8: Uint8Array): Uint32Array {
   if (u8.byteOffset % 4 === 0)
     return new Uint32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
@@ -62,20 +76,18 @@ function toUint32(u8: Uint8Array): Uint32Array {
 }
 
 function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
-  const edgeStarts        = toUint32(msg.edge_starts);
-  const edgePositions     = toFloat64(msg.edge_positions);
-  const junctionStarts    = toUint32(msg.junction_starts);
+  const laneStarts       = toUint32(msg.lane_starts);
+  const lanePositions    = toFloat64(msg.lane_positions);
+  const laneWidths       = toFloat32(msg.lane_widths);
+  const laneEdgeIndices  = toUint32(msg.lane_edge_indices);
+  const junctionStarts   = toUint32(msg.junction_starts);
   const junctionPositions = toFloat64(msg.junction_positions);
-  const tlsPositions      = toFloat64(msg.tls_positions);
+  const tlsPositions     = toFloat64(msg.tls_positions);
 
+  // bounding box from lane positions (covers the whole road network)
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (let i = 0; i < edgePositions.length; i += 2) {
-    const x = edgePositions[i], y = edgePositions[i + 1];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-  }
-  for (let i = 0; i < junctionPositions.length; i += 2) {
-    const x = junctionPositions[i], y = junctionPositions[i + 1];
+  for (let i = 0; i < lanePositions.length; i += 2) {
+    const x = lanePositions[i], y = lanePositions[i + 1];
     if (x < minX) minX = x; if (x > maxX) maxX = x;
     if (y < minY) minY = y; if (y > maxY) maxY = y;
   }
@@ -104,9 +116,12 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   return {
     geoReferenced: msg.geo_referenced,
     initialViewState,
-    edgeCount: msg.edge_ids.length,
-    edgeStarts,
-    edgePositions,
+    laneCount: msg.lane_ids.length,
+    laneStarts,
+    lanePositions,
+    laneWidths,
+    laneEdgeIndices,
+    laneIds: msg.lane_ids,
     edgeIds: msg.edge_ids,
     edgeIdToIndex,
     junctionCount: msg.junction_ids.length,
@@ -218,8 +233,9 @@ export default function App() {
     if (layerId === 'vehicles') {
       const v = simStep?.vehicles?.[info.index];
       if (v) { setSelectedObject({ type: 'vehicle', id: v.id }); setFollowing(false); }
-    } else if (layerId === 'edges' || layerId === 'edgedata') {
-      const id = parsed?.edgeIds[info.index];
+    } else if (layerId === 'lanes' || layerId === 'edgedata') {
+      const edgeIdx = parsed?.laneEdgeIndices[info.index];
+      const id = edgeIdx !== undefined ? parsed?.edgeIds[edgeIdx] : undefined;
       if (id) setSelectedObject({ type: 'edge', id });
     } else if (layerId === 'junctions') {
       const id = parsed?.junctionIds[info.index];

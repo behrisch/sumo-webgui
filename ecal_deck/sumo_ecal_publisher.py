@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 # --- path setup ---
 SUMO_HOME = os.environ.get("SUMO_HOME")
@@ -41,7 +42,6 @@ import sumolib.geomhelper as gh
 
 import ecal.nanobind_core as ecal_core
 from ecal.msg.proto.helper import get_descriptor_from_type
-import pyproj
 import sumo_pb2
 
 
@@ -56,21 +56,28 @@ def _make_publisher(topic: str, proto_type_name: str) -> ecal_core.Publisher:
     return ecal_core.Publisher(topic, dti)
 
 
-def _make_geo_converter(proj_parameter: str, net_offset: str):
-    """Build an (x, y) → (lon, lat) converter from stored projection parameters.
+def _wait_for_subscriber(pub: ecal_core.Publisher, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while pub.get_subscriber_count() == 0:
+        if time.monotonic() > deadline:
+            print("Warning: no subscriber after %.0f s -- still waiting" % timeout)
+        time.sleep(0.1)
 
-    Mirrors sumolib's Geo.__call__(inverse=True):
-      lon, lat = proj(x + offset_x, y + offset_y, inverse=True)
-    Returns None if proj_parameter is empty or '!'.
+
+def _make_geo_converter(proj_parameter: str, net_offset: str):
+    """Build an (x, y) → (lon, lat) converter using sumolib's own implementation.
+
+    Creates a minimal Net with the stored location params so the conversion is
+    identical to net.convertXY2LonLat. Returns None if not geo-referenced.
     """
     if not proj_parameter or proj_parameter == '!':
         return None
     try:
-        ox, oy = map(float, net_offset.split(','))
-        proj = pyproj.Proj(proj_parameter)
-        def _convert(x, y):
-            return proj(x + ox, y + oy, inverse=True)
-        return _convert
+        minimal_net = sumolib.net.Net()
+        minimal_net.setLocation(net_offset, '0,0,0,0', '0,0,0,0', proj_parameter)
+        if not minimal_net.hasGeoProj():
+            return None
+        return minimal_net.convertXY2LonLat
     except Exception as exc:
         print("Warning: could not build geo converter: %s" % exc)
         return None
@@ -87,16 +94,25 @@ def _net_file_from_cfg(sumocfg_path: str) -> str:
 
 
 
-def _build_network_binary(net, net_file: str, include_tls: bool) -> str:
-    """Serialize NetworkGeometry proto to <net_file>.ecaldeck; return cache path.
+_CACHE_VERSION = 2  # increment on any incompatible NetworkGeometry format change
 
-    Skips regeneration if the cache is newer than the net file.
+
+def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
+    """Serialize NetworkGeometry proto to <net_file>.ecaldeck; return (cache_path, ng).
+
+    Skips regeneration if the cache is newer than the net file and the version matches.
     """
     cache_path = net_file + '.ecaldeck'
     try:
         if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
-            print("Using cached network binary: %s" % cache_path)
-            return cache_path
+            ng = sumo_pb2.NetworkGeometry()
+            with open(cache_path, 'rb') as f:
+                ng.ParseFromString(f.read())
+            if ng.version == _CACHE_VERSION:
+                print("Using cached network binary: %s" % cache_path)
+                return cache_path, ng
+            print("Cache version mismatch (%d != %d), rebuilding: %s" % (
+                ng.version, _CACHE_VERSION, cache_path))
     except OSError:
         pass
 
@@ -105,20 +121,31 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> str:
     def _xy(x, y):
         return net.convertXY2LonLat(x, y) if geo_ref else (x, y)
 
-    # edges
-    edge_starts = _array.array('I')  # uint32 LE
-    edge_pos    = _array.array('d')  # float64 LE
-    edge_ids    = []
-    cur = 0
-    for edge_id, geometry, _width in net.getGeometries(False, False):
-        edge_ids.append(edge_id)
-        edge_starts.append(cur)
-        for x, y in geometry:
-            lx, ly = _xy(x, y)
-            edge_pos.append(lx)
-            edge_pos.append(ly)
-        cur += len(geometry)
-    edge_starts.append(cur)  # sentinel
+    # lanes (one entry per lane; edge_ids parallel to lane_edge_indices for data queries)
+    edge_ids         = []
+    edge_index: dict = {}            # edge_id → index in edge_ids
+    lane_starts      = _array.array('I')  # uint32 LE
+    lane_pos         = _array.array('d')  # float64 LE
+    lane_widths      = _array.array('f')  # float32 LE
+    lane_edge_idx    = _array.array('I')  # uint32 LE
+    lane_ids         = []
+    lane_cur         = 0
+    for edge in net.getEdges():
+        eid = edge.getID()
+        ei  = edge_index.setdefault(eid, len(edge_ids))
+        if ei == len(edge_ids):
+            edge_ids.append(eid)
+        for lane in edge.getLanes():
+            lane_ids.append(lane.getID())
+            lane_edge_idx.append(ei)
+            lane_widths.append(lane.getWidth())
+            lane_starts.append(lane_cur)
+            for x, y in lane.getShape():
+                lx, ly = _xy(x, y)
+                lane_pos.append(lx)
+                lane_pos.append(ly)
+            lane_cur += len(lane.getShape())
+    lane_starts.append(lane_cur)  # sentinel
 
     # junctions — full polygon vertices
     junc_starts = _array.array('I')  # uint32 LE
@@ -171,9 +198,8 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> str:
     net_offset_str = _loc.get('netOffset', '0.00,0.00')
 
     ng = sumo_pb2.NetworkGeometry(
+        version=_CACHE_VERSION,
         geo_referenced=geo_ref,
-        edge_starts=edge_starts.tobytes(),
-        edge_positions=edge_pos.tobytes(),
         junction_starts=junc_starts.tobytes(),
         junction_positions=junc_pos.tobytes(),
         tls_positions=tls_pos.tobytes(),
@@ -182,13 +208,18 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> str:
         tls_entries=tls_entries,
         proj_parameter=proj_str,
         net_offset=net_offset_str,
+        lane_starts=lane_starts.tobytes(),
+        lane_positions=lane_pos.tobytes(),
+        lane_widths=lane_widths.tobytes(),
+        lane_edge_indices=lane_edge_idx.tobytes(),
+        lane_ids=lane_ids,
     )
     data = ng.SerializeToString()
     with open(cache_path, 'wb') as f:
         f.write(data)
-    print("Built network binary: %d edges, %d junctions, %d tls entries, %d bytes" % (
-        len(edge_ids), len(junc_ids), len(tls_entries), len(data)))
-    return cache_path
+    print("Built network binary: %d edges, %d lanes, %d junctions, %d tls, %d bytes" % (
+        len(edge_ids), len(lane_ids), len(junc_ids), len(tls_entries), len(data)))
+    return cache_path, ng
 
 
 # ---------------------------------------------------------------------------
@@ -473,38 +504,33 @@ def main():
             if cache_valid:
                 # Read + publish the cached proto while SUMO loads.
                 def _read_and_publish_cache():
-                    ng = sumo_pb2.NetworkGeometry()
-                    with open(cache_path, 'rb') as f:
-                        ng.ParseFromString(f.read())
-                    _bg_ng.append(ng)
-                    deadline = time.monotonic() + 30.0
-                    while pub_network.get_subscriber_count() == 0:
-                        if time.monotonic() > deadline:
-                            print("Warning: no subscriber after 30 s -- still waiting")
-                        time.sleep(0.1)
-                    nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced,
-                                              cache_path=cache_path)
-                    pub_network.send(nd.SerializeToString())
+                    try:
+                        ng = sumo_pb2.NetworkGeometry()
+                        with open(cache_path, 'rb') as f:
+                            ng.ParseFromString(f.read())
+                        _bg_ng.append(ng)
+                        _wait_for_subscriber(pub_network)
+                        nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced,
+                                                  cache_path=cache_path)
+                        pub_network.send(nd.SerializeToString())
+                    except Exception as exc:
+                        print("ERROR in _read_and_publish_cache: %s" % exc)
+                        traceback.print_exc()
                 bg_thread = threading.Thread(target=_read_and_publish_cache, daemon=True)
             else:
                 # readNet + build cache + publish, all while SUMO loads.
-                _net_result: list = []
                 def _readnet_build_publish():
-                    net = sumolib.net.readNet(net_file, withInternal=False)
-                    _net_result.append(net)
-                    has_tls = len(net.getTrafficLights()) > 0
-                    cp = _build_network_binary(net, net_file, include_tls=has_tls)
-                    ng = sumo_pb2.NetworkGeometry()
-                    with open(cp, 'rb') as f:
-                        ng.ParseFromString(f.read())
-                    _bg_ng.append(ng)
-                    deadline = time.monotonic() + 30.0
-                    while pub_network.get_subscriber_count() == 0:
-                        if time.monotonic() > deadline:
-                            print("Warning: no subscriber after 30 s -- still waiting")
-                        time.sleep(0.1)
-                    nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp)
-                    pub_network.send(nd.SerializeToString())
+                    try:
+                        net = sumolib.net.readNet(net_file, withInternal=False)
+                        cp, ng = _build_network_binary(net, net_file,
+                                                       include_tls=len(net.getTrafficLights()) > 0)
+                        _bg_ng.append(ng)
+                        _wait_for_subscriber(pub_network)
+                        nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp)
+                        pub_network.send(nd.SerializeToString())
+                    except Exception as exc:
+                        print("ERROR in _readnet_build_publish: %s" % exc)
+                        traceback.print_exc()
                 bg_thread = threading.Thread(target=_readnet_build_publish, daemon=True)
 
             bg_thread.start()
@@ -516,6 +542,9 @@ def main():
             _log("INFO", "SUMO started: %s" % sumocfg_path)
 
             bg_thread.join()  # brief or free: SUMO startup dominates
+            if not _bg_ng:
+                _log("ERROR", "Network build/load failed — step loop not started. Check output above.")
+                return
             ng = _bg_ng[0]
 
             sim["geo_referenced"] = ng.geo_referenced

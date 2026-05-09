@@ -2,16 +2,23 @@ import { PathLayer, SolidPolygonLayer } from '@deck.gl/layers';
 import type { ParsedNetwork } from '../App';
 
 export function buildNetworkLayer(parsed: ParsedNetwork) {
-  const edgePaths = new PathLayer({
-    id: 'edges',
+  const lanePaths = new PathLayer({
+    id: 'lanes',
     data: {
-      length: parsed.edgeCount,
-      startIndices: parsed.edgeStarts,
-      attributes: { getPath: { value: parsed.edgePositions, size: 2 } },
+      length: parsed.laneCount,
+      startIndices: parsed.laneStarts,
+      attributes: {
+        getPath: { value: parsed.lanePositions, size: 2 },
+      },
     },
     _pathType: 'open',
+    widthUnits: 'meters',
+    widthScale: 1,
     widthMinPixels: 1,
-    getWidth: 2,
+    // getWidth must be a per-path accessor, not a binary attribute:
+    // PathLayer instances internally at the segment level (N-1 segments per path),
+    // so a binary Float32Array in data.attributes would need one value per segment.
+    getWidth: (_: unknown, { index }: { index: number }) => parsed.laneWidths[index],
     getColor: [160, 160, 160],
     pickable: true,
   });
@@ -28,5 +35,5 @@ export function buildNetworkLayer(parsed: ParsedNetwork) {
     pickable: true,
   });
 
-  return [edgePaths, junctionPolygons];
+  return [lanePaths, junctionPolygons];
 }

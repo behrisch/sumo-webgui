@@ -18,10 +18,11 @@ export function buildEdgeDataLayer(
   }
   const range = max - min || 1;
 
-  const colors = new Uint8Array(parsed.edgeCount * 4);
-  for (let i = 0; i < parsed.edgeCount; i++) {
-    const attrs = valueMap.get(parsed.edgeIds[i]);
-    const val = attrs?.[colorAttr];
+  // one colour entry per lane, looked up via lane→edge index
+  const colors = new Uint8Array(parsed.laneCount * 4);
+  for (let i = 0; i < parsed.laneCount; i++) {
+    const edgeId = parsed.edgeIds[parsed.laneEdgeIndices[i]];
+    const val = valueMap.get(edgeId)?.[colorAttr];
     if (val === undefined) {
       colors[i * 4] = 144; colors[i * 4 + 1] = 144; colors[i * 4 + 2] = 144; colors[i * 4 + 3] = 80;
     } else {
@@ -33,16 +34,18 @@ export function buildEdgeDataLayer(
   return new PathLayer({
     id: 'edgedata',
     data: {
-      length: parsed.edgeCount,
-      startIndices: parsed.edgeStarts,
+      length: parsed.laneCount,
+      startIndices: parsed.laneStarts,
       attributes: {
-        getPath:  { value: parsed.edgePositions, size: 2 },
+        getPath:  { value: parsed.lanePositions, size: 2 },
         getColor: { value: colors, size: 4 },
       },
     },
     _pathType: 'open',
+    widthUnits: 'meters',
+    widthScale: 1,
     widthMinPixels: 2,
-    getWidth: 2,
+    getWidth: (_: unknown, { index }: { index: number }) => parsed.laneWidths[index],
     updateTriggers: { getColor: [colors] },
     pickable: false,
   });

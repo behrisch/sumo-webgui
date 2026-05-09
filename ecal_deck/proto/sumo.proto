@@ -38,9 +38,8 @@ message TlsEntry {
 }
 
 message NetworkGeometry {
+  uint32          version            = 17; // incremented on incompatible format changes
   bool            geo_referenced     = 1;
-  bytes           edge_starts        = 2;  // u32[] LE — cumulative vertex index per edge
-  bytes           edge_positions     = 3;  // f64[] LE — [x0,y0,x1,y1,...] all edges
   bytes           junction_starts    = 4;  // u32[] LE — cumulative vertex index per junction polygon
   bytes           junction_positions = 9;  // f64[] LE — [x0,y0,...] all junction polygon vertices
   bytes           tls_positions      = 5;  // f64[] LE — [x1,y1,x2,y2] per TLS bar
@@ -49,6 +48,11 @@ message NetworkGeometry {
   repeated TlsEntry tls_entries      = 8;
   string          proj_parameter     = 10; // proj4 string from <location>, empty if not geo-referenced
   string          net_offset         = 11; // "x,y" offset from <location>
+  bytes           lane_starts        = 12; // u32[] LE — cumulative vertex index per lane
+  bytes           lane_positions     = 13; // f64[] LE — [x0,y0,x1,y1,...] all lane centerlines
+  bytes           lane_widths        = 14; // f32[] LE — width in metres per lane
+  bytes           lane_edge_indices  = 15; // u32[] LE — index into edge_ids per lane
+  repeated string lane_ids           = 16;
 }
 
 message EdgeData {

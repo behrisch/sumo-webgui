@@ -77,16 +77,18 @@ _pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 # ---------------------------------------------------------------------------
 # eCAL callback (runs in eCAL thread — must not touch asyncio directly)
 # ---------------------------------------------------------------------------
+_FULL_SNAPSHOT_TAIL = bytes([0x18, 0x01])  # proto3 wire: field 3 (bool) = true
+
 def _make_callback(topic: str, type_byte: int):
     def _cb(publisher_id, data_type_info, data):
         global _network_frame, _edgedata_snapshot_frame
         try:
-            frame = bytes([type_byte]) + bytes(data.buffer)
+            buf   = bytes(data.buffer)
+            frame = bytes([type_byte]) + buf
 
             if type_byte == _TYPE_NETWORK:
-                # read cache file path from NetworkData, load the NetworkGeometry bytes
                 nd = sumo_pb2.NetworkData()
-                nd.ParseFromString(bytes(data.buffer))
+                nd.ParseFromString(buf)
                 if nd.cache_path:
                     with open(nd.cache_path, 'rb') as f:
                         ng_bytes = f.read()
@@ -97,11 +99,9 @@ def _make_callback(topic: str, type_byte: int):
                 return
 
             if type_byte == _TYPE_EDGEDATA:
-                # peek at full_snapshot flag without full decode: field 3, varint, value 1
-                # simpler: just parse the small header fields
-                edu = sumo_pb2.EdgeDataUpdate()
-                edu.ParseFromString(bytes(data.buffer))
-                if edu.full_snapshot:
+                # full_snapshot (field 3, bool=true) serialises as tag 0x18, value 0x01
+                # at the end of the buffer (Python protobuf writes fields in order).
+                if buf[-2:] == _FULL_SNAPSHOT_TAIL:
                     _edgedata_snapshot_frame = frame
 
             if _loop is not None:
