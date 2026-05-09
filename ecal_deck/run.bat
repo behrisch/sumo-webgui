@@ -15,16 +15,6 @@ if not defined SUMO_HOME (
 echo Starting bridge...
 start "SUMO Bridge" /B %PYTHON% ecal_ws_bridge.py --ws-port %WS_PORT%
 
-:: Wait until the bridge port is open
-echo Waiting for bridge...
-:wait_loop
-    netstat -an | findstr ":%WS_PORT% " | findstr "LISTENING" >nul 2>&1
-    if errorlevel 1 (
-        timeout /t 1 /nobreak >nul
-        goto wait_loop
-    )
-echo Bridge ready.
-
 echo Starting publisher...
 start "SUMO Publisher" /B %PYTHON% sumo_ecal_publisher.py --delay 1000
 

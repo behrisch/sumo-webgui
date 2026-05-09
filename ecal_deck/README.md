@@ -10,9 +10,9 @@ Real-time SUMO simulation visualizer using deck.gl and MapLibre, communicating v
 | Python | 3.12 | system / pyenv | `brew install python@3.12` | python.org installer |
 | eclipse-ecal | any | `pip install eclipse-ecal` | `pip install eclipse-ecal` | `pip install eclipse-ecal` |
 | websockets | 16+ | `pip install websockets` | `pip install websockets` | `pip install websockets` |
-| protobuf | 6.x | `pip install protobuf` | `pip install protobuf` | `pip install protobuf` |
+| protobuf | **6.x** | `pip install "protobuf<7"` | `pip install "protobuf<7"` | `pip install "protobuf<7"` |
 | libsumo | same as SUMO | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* |
-| protoc | 3.x | `apt install protobuf-compiler` | `brew install protobuf` | `winget install Google.Protobuf` |
+| protoc | 33.x | `apt install protobuf-compiler` | `brew install protobuf@6` | `winget install Google.Protobuf --version 33.4` |
 | Node.js | 18+ | `apt install nodejs` | `brew install node` | `winget install OpenJS.NodeJS` |
 | npm | 9+ | `apt install npm` | bundled with Node | bundled with Node |
 
@@ -28,22 +28,14 @@ a pre-built standalone version.
 
 ### macOS
 
-The setup is nearly identical to Linux. Only two differences:
-
-**`run.sh` uses `ss` (Linux-only).** Replace the readiness check with `lsof`:
-```bash
-# replace this line in run.sh:
-until ss -tlnp 2>/dev/null | grep -q ":$WS_PORT "; do sleep 0.2; done
-# with:
-until lsof -i :$WS_PORT | grep -q LISTEN; do sleep 0.2; done
-```
+The setup is nearly identical to Linux. One difference:
 
 **Python environment:** `tests/sumo_test_env/` was created on Linux and will not work on macOS.
 Create your own:
 ```bash
 python3.12 -m venv ecal_deck/.venv
 source ecal_deck/.venv/bin/activate
-pip install eclipse-ecal websockets protobuf libsumo
+pip install eclipse-ecal websockets "protobuf<7" libsumo
 ```
 Then update `PYTHON` in `run.sh` to `ecal_deck/.venv/bin/python`.
 
@@ -61,7 +53,7 @@ As with macOS, `tests/sumo_test_env/` is Linux-specific. Create your own:
 ```powershell
 python -m venv ecal_deck\.venv
 ecal_deck\.venv\Scripts\Activate.ps1
-pip install eclipse-ecal websockets protobuf libsumo
+pip install eclipse-ecal websockets "protobuf<7" libsumo
 ```
 
 **Set SUMO_HOME (Command Prompt):**
@@ -72,6 +64,15 @@ PowerShell:
 ```powershell
 $env:SUMO_HOME = (Get-Location).Path
 ```
+
+**protoc version — important:** eclipse-ecal requires the protobuf 6.x Python runtime
+(`pip install "protobuf<7"`). The generated code must match that runtime.
+winget uses a cross-platform version scheme: protoc **33.x** maps to the Python 6.x runtime,
+while protoc 34.x maps to Python 7.x and is incompatible. Install the correct version with:
+```powershell
+winget install Google.Protobuf --version 33.4
+```
+(replace `33.4` with the highest `33.x` version listed by `winget show Google.Protobuf --versions`)
 
 **`run.sh` does not run natively on Windows.** Use one of:
 - **Git Bash** — run `./run.sh` from the Git Bash terminal (recommended)
