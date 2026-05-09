@@ -1,7 +1,11 @@
 #!/bin/bash
 set -e
 
-PYTHON=$HOME/sumo/tests/sumo_test_env/bin/python
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) _venv_bin=Scripts ;;
+    *)                     _venv_bin=bin ;;
+esac
+PYTHON=$HOME/sumo/tests/sumo_test_env/$_venv_bin/python
 WS_PORT=8765
 
 cleanup() {
