@@ -11,9 +11,19 @@ message Vehicle {
   map<string, double> attributes = 7;
 }
 
+message MobileAgent {
+  string id      = 1;
+  double x       = 2;
+  double y       = 3;
+  float  angle   = 4;
+  string type_id = 5;
+}
+
 message SimStep {
-  int64            time_ms  = 1;
-  repeated Vehicle vehicles = 2;
+  int64                time_ms    = 1;
+  repeated Vehicle     vehicles   = 2;
+  repeated MobileAgent persons    = 3;
+  repeated MobileAgent containers = 4;
 }
 
 message TLSPhase {

@@ -5,6 +5,8 @@ export interface LayerVisibility {
   edges: boolean;
   junctions: boolean;
   vehicles: boolean;
+  persons: boolean;
+  containers: boolean;
   tls: boolean;
   edgeData: boolean;
   basemap: boolean;

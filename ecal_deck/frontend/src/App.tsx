@@ -10,6 +10,7 @@ import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
 import { buildNetworkLayer } from './layers/NetworkLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
+import { buildPersonLayer, buildContainerLayer } from './layers/PersonLayer';
 import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
 import { ControlPanel } from './components/ControlPanel';
@@ -198,7 +199,8 @@ export default function App() {
   };
 
   const [visibility, setVisibility] = useState<LayerVisibility>({
-    edges: true, junctions: true, vehicles: true, tls: true, edgeData: true, basemap: true,
+    edges: true, junctions: true, vehicles: true, persons: true, containers: true,
+    tls: true, edgeData: true, basemap: true,
   });
   const patchVisibility = (patch: Partial<LayerVisibility>) =>
     setVisibility((v) => ({ ...v, ...patch }));
@@ -233,6 +235,12 @@ export default function App() {
     if (layerId === 'vehicles') {
       const v = simStep?.vehicles?.[info.index];
       if (v) { setSelectedObject({ type: 'vehicle', id: v.id }); setFollowing(false); }
+    } else if (layerId === 'persons') {
+      const p = simStep?.persons?.[info.index];
+      if (p) setSelectedObject({ type: 'person', id: p.id });
+    } else if (layerId === 'containers') {
+      const c = simStep?.containers?.[info.index];
+      if (c) setSelectedObject({ type: 'container', id: c.id });
     } else if (layerId === 'lanes' || layerId === 'edgedata') {
       const edgeIdx = parsed?.laneEdgeIndices[info.index];
       const id = edgeIdx !== undefined ? parsed?.edgeIds[edgeIdx] : undefined;
@@ -274,6 +282,10 @@ export default function App() {
     if (visibility.vehicles)
       result.push(buildVehicleLayer(simStep?.vehicles ?? [],
         vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr));
+    if (visibility.persons)
+      result.push(buildPersonLayer(simStep?.persons ?? []));
+    if (visibility.containers)
+      result.push(buildContainerLayer(simStep?.containers ?? []));
     return result;
   }, [edgeLayer, junctionLayer, parsed, simStep, tlsUpdate, edgeValueVersion, visibility, vehicleColorAttr, edgeColorAttr]);
 
@@ -343,6 +355,8 @@ export default function App() {
     <InfoPanel
       selected={selectedObject}
       vehicles={simStep?.vehicles ?? []}
+      persons={simStep?.persons ?? []}
+      containers={simStep?.containers ?? []}
       edgeValueMap={edgeValueMap}
       tlsLights={tlsUpdate?.lights ?? []}
       following={following}

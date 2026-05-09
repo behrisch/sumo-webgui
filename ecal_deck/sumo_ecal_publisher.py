@@ -121,30 +121,49 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
     def _xy(x, y):
         return net.convertXY2LonLat(x, y) if geo_ref else (x, y)
 
-    # lanes (one entry per lane; edge_ids parallel to lane_edge_indices for data queries)
-    edge_ids         = []
-    edge_index: dict = {}            # edge_id → index in edge_ids
-    lane_starts      = _array.array('I')  # uint32 LE
-    lane_pos         = _array.array('d')  # float64 LE
-    lane_widths      = _array.array('f')  # float32 LE
-    lane_edge_idx    = _array.array('I')  # uint32 LE
-    lane_ids         = []
-    lane_cur         = 0
-    for edge in net.getEdges():
-        eid = edge.getID()
-        ei  = edge_index.setdefault(eid, len(edge_ids))
-        if ei == len(edge_ids):
-            edge_ids.append(eid)
+    # lanes + TLS in a single pass over edges
+    edge_ids    = []
+    lane_starts = _array.array('I')  # uint32 LE
+    lane_pos    = _array.array('d')  # float64 LE
+    lane_widths = _array.array('f')  # float32 LE
+    lane_edge_idx = _array.array('I')  # uint32 LE
+    lane_ids    = []
+    lane_cur    = 0
+    tls_pos     = _array.array('d')
+    tls_entries = []
+    for ei, edge in enumerate(net.getEdges()):
+        edge_ids.append(edge.getID())
         for lane in edge.getLanes():
             lane_ids.append(lane.getID())
             lane_edge_idx.append(ei)
             lane_widths.append(lane.getWidth())
             lane_starts.append(lane_cur)
-            for x, y in lane.getShape():
+            shape = lane.getShape()
+            for x, y in shape:
                 lx, ly = _xy(x, y)
                 lane_pos.append(lx)
                 lane_pos.append(ly)
-            lane_cur += len(lane.getShape())
+            lane_cur += len(shape)
+            if include_tls:
+                outgoing = lane.getOutgoing()
+                n = len(outgoing)
+                if n > 0:
+                    for i, con in enumerate(outgoing):
+                        if con.getTLSID() == "":
+                            continue
+                        bar = lane.getWidth() / n
+                        off = i * bar - lane.getWidth() * 0.5
+                        prev, end = shape[-2:]
+                        p1 = gh.add(end, gh.sideOffset(prev, end, off))
+                        p2 = gh.add(end, gh.sideOffset(prev, end, off + bar))
+                        x1, y1 = _xy(*p1)
+                        x2, y2 = _xy(*p2)
+                        tls_pos.extend([x1, y1, x2, y2])
+                        tls_entries.append(sumo_pb2.TlsEntry(
+                            id="%s_%s" % (con.getJunction().getID(), con.getJunctionIndex()),
+                            tls=con.getTLSID(),
+                            tl_index=con.getTLLinkIndex(),
+                        ))
     lane_starts.append(lane_cur)  # sentinel
 
     # junctions — full polygon vertices
@@ -164,33 +183,6 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
             junc_pos.append(ly)
         junc_cur += len(shape)
     junc_starts.append(junc_cur)  # sentinel
-
-    # TLS connection bars
-    tls_pos     = _array.array('d')
-    tls_entries = []
-    if include_tls:
-        for edge in net.getEdges():
-            for lane in edge.getLanes():
-                outgoing = lane.getOutgoing()
-                n = len(outgoing)
-                if n == 0:
-                    continue
-                for i, con in enumerate(outgoing):
-                    if con.getTLSID() == "":
-                        continue
-                    bar = lane.getWidth() / n
-                    off = i * bar - lane.getWidth() * 0.5
-                    prev, end = lane.getShape()[-2:]
-                    p1 = gh.add(end, gh.sideOffset(prev, end, off))
-                    p2 = gh.add(end, gh.sideOffset(prev, end, off + bar))
-                    x1, y1 = _xy(*p1)
-                    x2, y2 = _xy(*p2)
-                    tls_pos.extend([x1, y1, x2, y2])
-                    tls_entries.append(sumo_pb2.TlsEntry(
-                        id="%s_%s" % (con.getJunction().getID(), con.getJunctionIndex()),
-                        tls=con.getTLSID(),
-                        tl_index=con.getTLLinkIndex(),
-                    ))
 
     # Store projection parameters so cached loads need no net file access at all
     _loc = getattr(net, '_location', {}) or {}
@@ -398,6 +390,22 @@ def main():
                         if getter:
                             try: v.attributes[attr] = getter(vid)
                             except Exception: pass
+                for pid in traci.person.getIDList():
+                    x, y = traci.person.getPosition(pid)
+                    if geo_ref and converter:
+                        x, y = converter(x, y)
+                    p = ss.persons.add()
+                    p.id = pid; p.x = x; p.y = y
+                    p.angle = traci.person.getAngle(pid)
+                    p.type_id = traci.person.getTypeID(pid)
+                # for cid in traci.container.getIDList():
+                #     x, y = traci.container.getPosition(cid)
+                #     if geo_ref and converter:
+                #         x, y = converter(x, y)
+                #     c = ss.containers.add()
+                #     c.id = cid; c.x = x; c.y = y
+                #     c.angle = traci.container.getAngle(cid)
+                #     c.type_id = traci.container.getTypeID(cid)
                 pub_simstep.send(ss.SerializeToString())
 
                 # tls

@@ -563,117 +563,23 @@ All licenses are permissive (no GPL). See `TAURI.md` for full license table.
 
 ---
 
-## Lane-based network rendering
+## ~~Lane-based network rendering~~ — implemented
 
-### Motivation
+`NetworkGeometry` fields 2/3 (`edge_starts`/`edge_positions`) removed; lane fields 12–16
+added (`lane_starts`, `lane_positions`, `lane_widths`, `lane_edge_indices`, `lane_ids`).
+`edge_ids` kept for TraCI data queries. `_CACHE_VERSION` bumped to 2; old caches auto-rebuild.
 
-The current `NetworkLayer` renders one path per **edge**. A SUMO edge consists of one or more
-parallel **lanes**, each with a fixed width and its own centerline shape. Switching to per-lane
-rendering gives accurate road widths and individual lane visibility at high zoom — with no extra
-TraCI cost since the geometry is already in the `.ecaldeck` cache.
+`_build_network_binary` iterates `net.getEdges()` → `edge.getLanes()` → `lane.getShape()` +
+`lane.getWidth()`. `lane_edge_indices[i]` maps lane i to its parent edge index.
 
-### Proto changes (`sumo.proto`, `NetworkGeometry`)
+`NetworkLayer.ts`: `PathLayer` with `widthUnits: 'meters'` and per-path `getWidth` accessor
+(not binary attribute — PathLayer instances at segment level, not path level).
+`EdgeDataLayer.ts`: color array indexed by lane, parent edge value looked up via
+`laneEdgeIndices`. `SolidPolygonLayer` for junctions keeps `_normalize: false`.
 
-Replace the edge geometry fields with lane geometry. Keep `edge_ids` — still needed for
-edge-data TraCI queries and for lane→edge resolution at click time.
-
-```protobuf
-// remove:  bytes edge_starts = 2;  bytes edge_positions = 3;
-// add:
-bytes           lane_starts        = 12; // u32[] LE — cumulative vertex index per lane
-bytes           lane_positions     = 13; // f64[] LE — [x,y,...] all lane centerline vertices
-bytes           lane_widths        = 14; // f32[] LE — width per lane in meters
-bytes           lane_edge_indices  = 15; // u32[] LE — index into edge_ids per lane
-repeated string lane_ids           = 16;
-```
-
-`lane_widths` stores raw metres; deck.gl `PathLayer` with `widthUnits: 'meters'` scales
-correctly for both geo-referenced (lon/lat) and internal-coordinate (metres) networks.
-`lane_edge_indices[i]` maps lane `i` to `edge_ids[lane_edge_indices[i]]` for picking and
-edge-data colouring.
-
-### Publisher (`_build_network_binary`)
-
-Replace the `net.getGeometries(False, False)` loop with a lane loop:
-
-```python
-for edge in net.getEdges():
-    edge_idx = len(edge_ids)
-    edge_ids.append(edge.getID())
-    for lane in edge.getLanes():
-        lane_ids.append(lane.getID())
-        lane_edge_indices.append(edge_idx)
-        lane_widths.append(lane.getWidth())  # float32
-        lane_starts.append(lane_cur)
-        for x, y in lane.getShape():
-            lx, ly = _xy(x, y)
-            lane_pos.append(lx); lane_pos.append(ly)
-        lane_cur += len(lane.getShape())
-lane_starts.append(lane_cur)  # sentinel
-```
-
-`edge_ids` is now built from the outer loop (one per edge, matching `lane_edge_indices`).
-
-### `ParsedNetwork` (App.tsx)
-
-Remove `edgeStarts`/`edgePositions` (from edge geometry). Add:
-```typescript
-laneCount:        number;
-laneStarts:       Uint32Array;
-lanePositions:    Float64Array;
-laneWidths:       Float32Array;
-laneEdgeIndices:  Uint32Array;
-laneIds:          string[];
-```
-Keep `edgeIds`/`edgeIdToIndex` — still used by edge data layer and picking.
-
-### Layer changes
-
-**`NetworkLayer.ts`** — edge `PathLayer` becomes lane `PathLayer`:
-```typescript
-new PathLayer({
-  id: 'lanes',
-  data: { length: laneCount, startIndices: laneStarts,
-          attributes: { getPath: { value: lanePositions, size: 2 },
-                        getWidth: { value: laneWidths, size: 1 } } },
-  _pathType: 'open',
-  widthUnits: 'meters',
-  widthScale: 1,
-  pickable: true,
-})
-```
-
-**`EdgeDataLayer.ts`** — colour per lane by parent edge value:
-```typescript
-// build colors indexed by lane (not edge)
-for (let i = 0; i < laneCount; i++) {
-  const edgeId = edgeIds[laneEdgeIndices[i]];
-  // lookup value in valueMap, write to colors[i*4..]
-}
-new PathLayer({ data: { startIndices: laneStarts, attributes: {
-  getPath: { value: lanePositions, size: 2 },
-  getColor: { value: colors, size: 4 },
-  getWidth: { value: laneWidths, size: 1 },
-}}, widthUnits: 'meters', ... })
-```
-
-**`App.tsx` — picking** — lane click resolves to edge:
-```typescript
-} else if (layerId === 'lanes' || layerId === 'edgedata') {
-  const edgeId = parsed?.edgeIds[parsed.laneEdgeIndices[info.index]];
-  if (edgeId) setSelectedObject({ type: 'edge', id: edgeId });
-}
-```
-
-### Implementation order
-
-1. `sumo.proto` — add lane fields, keep `edge_ids`; regenerate
-2. `_build_network_binary` — replace edge loop with lane loop
-3. `parseNetworkGeometry` — add lane typed arrays; keep edge index/id arrays
-4. `NetworkLayer.ts` — lane PathLayer with `widthUnits: 'meters'`
-5. `EdgeDataLayer.ts` — lane-indexed colour array
-6. `App.tsx` — picking: lane index → edge via `laneEdgeIndices`
-7. Delete existing `.ecaldeck` caches (format changed)
+`_make_geo_converter` uses a minimal `sumolib.net.Net` with `setLocation` so the conversion
+is byte-for-byte identical to `net.convertXY2LonLat` (custom pyproj call gave wrong results
+due to axis-ordering differences in pyproj 2.x).
 
 ---
 

@@ -1,16 +1,20 @@
 import { useState } from 'react';
-import type { Vehicle, TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse } from '../generated/sumo';
+import type { Vehicle, MobileAgent, TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse } from '../generated/sumo';
 import type { EdgeValueMap, CommandResponse } from '../hooks/useSimSocket';
 
 export type SelectedObject =
-  | { type: 'vehicle';  id: string }
-  | { type: 'edge';     id: string }
-  | { type: 'junction'; id: string }
-  | { type: 'tls';      id: string; tlIndex: number };
+  | { type: 'vehicle';   id: string }
+  | { type: 'person';    id: string }
+  | { type: 'container'; id: string }
+  | { type: 'edge';      id: string }
+  | { type: 'junction';  id: string }
+  | { type: 'tls';       id: string; tlIndex: number };
 
 interface Props {
   selected: SelectedObject;
   vehicles: Vehicle[];
+  persons: MobileAgent[];
+  containers: MobileAgent[];
   edgeValueMap: EdgeValueMap;
   tlsLights: TLSPhase[];
   following: boolean;
@@ -71,6 +75,18 @@ function EdgeInfo({ id, edgeValueMap }: { id: string; edgeValueMap: EdgeValueMap
   );
 }
 
+function AgentInfo({ id, agents }: { id: string; agents: MobileAgent[] }) {
+  const a = agents.find(a => a.id === id);
+  if (!a) return <div style={{ opacity: 0.5 }}>No longer present</div>;
+  return (
+    <>
+      {row('id',    a.id)}
+      {row('type',  a.type_id ?? '?')}
+      {row('angle', (a.angle ?? 0).toFixed(0) + '°')}
+    </>
+  );
+}
+
 function TLSInfo({ id, tlIndex, tlsLights }: { id: string; tlIndex: number; tlsLights: TLSPhase[] }) {
   const phase = tlsLights.find(l => l.id === id);
   const char  = phase?.state?.[tlIndex] ?? '?';
@@ -94,7 +110,7 @@ function TLSInfo({ id, tlIndex, tlsLights }: { id: string; tlIndex: number; tlsL
   );
 }
 
-export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, following, onFollow, onClose, sendCommand }: Props) {
+export function InfoPanel({ selected, vehicles, persons, containers, edgeValueMap, tlsLights, following, onFollow, onClose, sendCommand }: Props) {
   const [extraVehicle, setExtraVehicle] = useState<GetVehicleInfoResponse | null>(null);
   const [extraEdge,    setExtraEdge]    = useState<GetEdgeInfoResponse    | null>(null);
   const [loading, setLoading] = useState(false);
@@ -114,7 +130,8 @@ export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, followi
     }
   };
   const titles: Record<string, string> = {
-    vehicle: 'Vehicle', edge: 'Edge', junction: 'Junction', tls: 'Signal',
+    vehicle: 'Vehicle', person: 'Person', container: 'Container',
+    edge: 'Edge', junction: 'Junction', tls: 'Signal',
   };
 
   return (
@@ -136,9 +153,11 @@ export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, followi
         </div>
       </div>
 
-      {selected.type === 'vehicle' && <VehicleInfo id={selected.id} vehicles={vehicles} />}
-      {selected.type === 'edge'    && <EdgeInfo id={selected.id} edgeValueMap={edgeValueMap} />}
-      {selected.type === 'junction' && row('id', selected.id)}
+      {selected.type === 'vehicle'   && <VehicleInfo id={selected.id} vehicles={vehicles} />}
+      {selected.type === 'person'    && <AgentInfo id={selected.id} agents={persons} />}
+      {selected.type === 'container' && <AgentInfo id={selected.id} agents={containers} />}
+      {selected.type === 'edge'      && <EdgeInfo id={selected.id} edgeValueMap={edgeValueMap} />}
+      {selected.type === 'junction'  && row('id', selected.id)}
       {selected.type === 'tls' && (
         <TLSInfo id={selected.id} tlIndex={selected.tlIndex} tlsLights={tlsLights} />
       )}
