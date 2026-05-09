@@ -189,6 +189,26 @@ export default function App() {
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
   const [selectedObject, setSelectedObject] = useState<SelectedObject | null>(null);
+  const [following, setFollowing] = useState(false);
+
+  // track selected vehicle position when following
+  useEffect(() => {
+    if (!following || selectedObject?.type !== 'vehicle' || !parsed) return;
+    const v = simStep?.vehicles?.find(v => v.id === selectedObject.id);
+    if (!v) {
+      // vehicle finished its route — stop following and close the panel
+      setFollowing(false);
+      setSelectedObject(null);
+      return;
+    }
+    const x = v.x ?? 0, y = v.y ?? 0;
+    setViewState(prev => {
+      if (!prev) return prev;
+      return parsed.geoReferenced
+        ? { ...(prev as MapViewState), longitude: x, latitude: y }
+        : { ...(prev as OrthographicViewState), target: [x, y, 0] };
+    });
+  }, [simStep, following, selectedObject, parsed]);
 
   const handleClick = useCallback((info: PickingInfo) => {
     const layerId = info.layer?.id;
@@ -196,7 +216,7 @@ export default function App() {
 
     if (layerId === 'vehicles') {
       const v = simStep?.vehicles?.[info.index];
-      if (v) setSelectedObject({ type: 'vehicle', id: v.id, index: info.index });
+      if (v) { setSelectedObject({ type: 'vehicle', id: v.id }); setFollowing(false); }
     } else if (layerId === 'edges' || layerId === 'junctions' || layerId === 'edgedata') {
       const id = (info.object as { properties?: { id?: string } })?.properties?.id;
       const type = layerId === 'junctions' ? 'junction' : 'edge';
@@ -286,8 +306,14 @@ export default function App() {
     />
   );
 
-  const onViewChange = ({ viewState: vs }: { viewState: MapViewState | OrthographicViewState }) =>
+  const onViewChange = ({ viewState: vs, interactionState }: {
+    viewState: MapViewState | OrthographicViewState;
+    interactionState?: { isPanning?: boolean; isZooming?: boolean; isRotating?: boolean };
+  }) => {
     setViewState(vs);
+    if (interactionState?.isPanning || interactionState?.isZooming || interactionState?.isRotating)
+      setFollowing(false);
+  };
 
   const infoPanel = selectedObject && (
     <InfoPanel
@@ -295,7 +321,10 @@ export default function App() {
       vehicles={simStep?.vehicles ?? []}
       edgeValueMap={edgeValueMap}
       tlsLights={tlsUpdate?.lights ?? []}
-      onClose={() => setSelectedObject(null)}
+      following={following}
+      onFollow={() => setFollowing(f => !f)}
+      onClose={() => { setSelectedObject(null); setFollowing(false); }}
+      sendCommand={sendCommand}
     />
   );
 

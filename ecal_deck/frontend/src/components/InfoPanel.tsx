@@ -1,8 +1,9 @@
-import type { Vehicle, TLSPhase } from '../generated/sumo';
-import type { EdgeValueMap } from '../hooks/useSimSocket';
+import { useState } from 'react';
+import type { Vehicle, TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse } from '../generated/sumo';
+import type { EdgeValueMap, CommandResponse } from '../hooks/useSimSocket';
 
 export type SelectedObject =
-  | { type: 'vehicle';  id: string; index: number }
+  | { type: 'vehicle';  id: string }
   | { type: 'edge';     id: string }
   | { type: 'junction'; id: string }
   | { type: 'tls';      id: string; tlIndex: number };
@@ -12,7 +13,10 @@ interface Props {
   vehicles: Vehicle[];
   edgeValueMap: EdgeValueMap;
   tlsLights: TLSPhase[];
+  following: boolean;
+  onFollow: () => void;
   onClose: () => void;
+  sendCommand: (service: string, request?: Record<string, unknown>, onResponse?: (r: CommandResponse) => void) => void;
 }
 
 const panel: React.CSSProperties = {
@@ -36,8 +40,8 @@ const row = (label: string, value: string | number) => (
   </div>
 );
 
-function VehicleInfo({ index, vehicles }: { index: number; vehicles: Vehicle[] }) {
-  const v = vehicles[index];
+function VehicleInfo({ id, vehicles }: { id: string; vehicles: Vehicle[] }) {
+  const v = vehicles.find(v => v.id === id);
   if (!v) return <div style={{ opacity: 0.5 }}>Vehicle no longer present</div>;
   // protobuf omits default (0) values — guard with ?? 0
   const speed = v.speed ?? 0;
@@ -90,7 +94,25 @@ function TLSInfo({ id, tlIndex, tlsLights }: { id: string; tlIndex: number; tlsL
   );
 }
 
-export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, onClose }: Props) {
+export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, following, onFollow, onClose, sendCommand }: Props) {
+  const [extraVehicle, setExtraVehicle] = useState<GetVehicleInfoResponse | null>(null);
+  const [extraEdge,    setExtraEdge]    = useState<GetEdgeInfoResponse    | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchMore = () => {
+    setLoading(true);
+    if (selected.type === 'vehicle') {
+      sendCommand('get_vehicle_info', { id: selected.id }, (r) => {
+        setLoading(false);
+        setExtraVehicle(r as unknown as GetVehicleInfoResponse);
+      });
+    } else if (selected.type === 'edge') {
+      sendCommand('get_edge_info', { id: selected.id }, (r) => {
+        setLoading(false);
+        setExtraEdge(r as unknown as GetEdgeInfoResponse);
+      });
+    }
+  };
   const titles: Record<string, string> = {
     vehicle: 'Vehicle', edge: 'Edge', junction: 'Junction', tls: 'Signal',
   };
@@ -99,23 +121,66 @@ export function InfoPanel({ selected, vehicles, edgeValueMap, tlsLights, onClose
     <div style={panel}>
       <div style={header}>
         <span style={{ fontWeight: 'bold' }}>{titles[selected.type]} — {selected.id}</span>
-        <button onClick={onClose} style={{
-          background: 'none', border: 'none', color: '#aaa',
-          cursor: 'pointer', fontSize: 14, padding: 0,
-        }}>✕</button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {selected.type === 'vehicle' && (
+            <button onClick={onFollow} title={following ? 'Stop following' : 'Follow vehicle'} style={{
+              background: following ? '#246' : 'none', border: '1px solid #555',
+              color: following ? '#8bf' : '#aaa', borderRadius: 3,
+              cursor: 'pointer', fontSize: 11, padding: '1px 5px',
+            }}>⊙</button>
+          )}
+          <button onClick={onClose} style={{
+            background: 'none', border: 'none', color: '#aaa',
+            cursor: 'pointer', fontSize: 14, padding: 0,
+          }}>✕</button>
+        </div>
       </div>
 
-      {selected.type === 'vehicle' && (
-        <VehicleInfo index={selected.index} vehicles={vehicles} />
-      )}
-      {selected.type === 'edge' && (
-        <EdgeInfo id={selected.id} edgeValueMap={edgeValueMap} />
-      )}
-      {selected.type === 'junction' && (
-        row('id', selected.id)
-      )}
+      {selected.type === 'vehicle' && <VehicleInfo id={selected.id} vehicles={vehicles} />}
+      {selected.type === 'edge'    && <EdgeInfo id={selected.id} edgeValueMap={edgeValueMap} />}
+      {selected.type === 'junction' && row('id', selected.id)}
       {selected.type === 'tls' && (
         <TLSInfo id={selected.id} tlIndex={selected.tlIndex} tlsLights={tlsLights} />
+      )}
+
+      {/* deep query — on demand */}
+      {(selected.type === 'vehicle' || selected.type === 'edge') && (
+        <>
+          <div style={{ borderTop: '1px solid #333', paddingTop: 4 }}>
+            <button onClick={fetchMore} disabled={loading} style={{
+              background: 'none', border: '1px solid #555', color: '#aaa',
+              borderRadius: 3, cursor: 'pointer', fontSize: 11, padding: '1px 6px',
+            }}>
+              {loading ? 'Loading…' : '+ More info'}
+            </button>
+          </div>
+          {selected.type === 'vehicle' && extraVehicle && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {row('route',    extraVehicle.route_id   ?? '?')}
+              {row('lane',     extraVehicle.lane_id    ?? '?')}
+              {row('lane pos', ((extraVehicle.lane_pos ?? 0) as number).toFixed(1) + ' m')}
+              {(extraVehicle.route_edges ?? []).length > 0 && (
+                <div style={{ opacity: 0.5, fontSize: 11, wordBreak: 'break-all' }}>
+                  {(extraVehicle.route_edges ?? []).join(' → ')}
+                </div>
+              )}
+            </div>
+          )}
+          {selected.type === 'edge' && extraEdge && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {row('speed',    ((extraEdge.mean_speed   ?? 0) as number).toFixed(1) + ' m/s')}
+              {row('vehicles', String(extraEdge.vehicle_count ?? 0))}
+              {row('halting',  String(extraEdge.halting_count ?? 0))}
+              {row('occupancy',((extraEdge.occupancy    ?? 0) as number).toFixed(1) + ' %')}
+              {row('wait',     ((extraEdge.waiting_time ?? 0) as number).toFixed(1) + ' s')}
+              {(extraEdge.vehicle_ids ?? []).length > 0 && (
+                <div style={{ opacity: 0.5, fontSize: 11 }}>
+                  {(extraEdge.vehicle_ids ?? []).join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

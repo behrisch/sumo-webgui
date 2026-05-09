@@ -99,3 +99,23 @@ message ListDirResponse {
   repeated string files = 3;
   string          error = 4;
 }
+
+message GetVehicleInfoRequest  { string id = 1; }
+message GetVehicleInfoResponse {
+  string              type_id     = 1;
+  string              route_id    = 2;
+  string              lane_id     = 3;
+  double              lane_pos    = 4;
+  repeated string     route_edges = 5;
+  map<string, double> attributes  = 6;
+}
+
+message GetEdgeInfoRequest  { string id = 1; }
+message GetEdgeInfoResponse {
+  double          mean_speed    = 1;
+  int32           vehicle_count = 2;
+  int32           halting_count = 3;
+  double          occupancy     = 4;
+  double          waiting_time  = 5;
+  repeated string vehicle_ids   = 6;
+}

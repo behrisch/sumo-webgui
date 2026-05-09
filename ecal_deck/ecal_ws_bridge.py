@@ -35,7 +35,9 @@ _SERVICE_REGISTRY = {
     "get_state":      (sumo_pb2.GetStateRequest,      sumo_pb2.GetStateResponse),
     "get_attributes":   (sumo_pb2.GetAttributesRequest,   sumo_pb2.GetAttributesResponse),
     "set_attributes":   (sumo_pb2.SetAttributesRequest,   sumo_pb2.CommandAck),
-    "set_step_config":  (sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck),
+    "set_step_config":   (sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck),
+    "get_vehicle_info":  (sumo_pb2.GetVehicleInfoRequest,  sumo_pb2.GetVehicleInfoResponse),
+    "get_edge_info":     (sumo_pb2.GetEdgeInfoRequest,     sumo_pb2.GetEdgeInfoResponse),
 }
 
 # ---------------------------------------------------------------------------

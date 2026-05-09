@@ -484,6 +484,42 @@ def main():
         except Exception as e:
             return _ack(False, str(e))
 
+    def _on_get_vehicle_info(_mi, req_bytes):
+        try:
+            req = sumo_pb2.GetVehicleInfoRequest()
+            req.ParseFromString(req_bytes)
+            vid = req.id
+            resp = sumo_pb2.GetVehicleInfoResponse(
+                type_id=traci.vehicle.getTypeID(vid),
+                route_id=traci.vehicle.getRouteID(vid),
+                lane_id=traci.vehicle.getLaneID(vid),
+                lane_pos=traci.vehicle.getLanePosition(vid),
+                route_edges=list(traci.vehicle.getRoute(vid)),
+            )
+            for attr, getter in vehicle_attr_getters.items():
+                try: resp.attributes[attr] = getter(vid)
+                except Exception: pass
+            return 0, resp.SerializeToString()
+        except Exception as e:
+            return 0, sumo_pb2.GetVehicleInfoResponse().SerializeToString()
+
+    def _on_get_edge_info(_mi, req_bytes):
+        try:
+            req = sumo_pb2.GetEdgeInfoRequest()
+            req.ParseFromString(req_bytes)
+            eid = req.id
+            resp = sumo_pb2.GetEdgeInfoResponse(
+                mean_speed=traci.edge.getLastStepMeanSpeed(eid),
+                vehicle_count=traci.edge.getLastStepVehicleNumber(eid),
+                halting_count=traci.edge.getLastStepHaltingNumber(eid),
+                occupancy=traci.edge.getLastStepOccupancy(eid),
+                waiting_time=traci.edge.getWaitingTime(eid),
+                vehicle_ids=list(traci.edge.getLastStepVehicleIDs(eid)),
+            )
+            return 0, resp.SerializeToString()
+        except Exception as e:
+            return 0, sumo_pb2.GetEdgeInfoResponse().SerializeToString()
+
     def _method_info(name, req_cls, resp_cls):
         def _dti(cls):
             d = ecal_core.DataTypeInformation()
@@ -504,7 +540,9 @@ def main():
         ("get_state",        sumo_pb2.GetStateRequest,        sumo_pb2.GetStateResponse,      _on_get_state),
         ("set_step_config",  sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck,            _on_set_step_config),
         ("get_attributes",   sumo_pb2.GetAttributesRequest,   sumo_pb2.GetAttributesResponse, _on_get_attributes),
-        ("set_attributes",   sumo_pb2.SetAttributesRequest,   sumo_pb2.CommandAck,            _on_set_attributes),
+        ("set_attributes",   sumo_pb2.SetAttributesRequest,    sumo_pb2.CommandAck,             _on_set_attributes),
+        ("get_vehicle_info", sumo_pb2.GetVehicleInfoRequest,   sumo_pb2.GetVehicleInfoResponse, _on_get_vehicle_info),
+        ("get_edge_info",    sumo_pb2.GetEdgeInfoRequest,      sumo_pb2.GetEdgeInfoResponse,    _on_get_edge_info),
     ]:
         svc.set_method_callback(_method_info(name, req_cls, resp_cls), cb)
 
