@@ -41,6 +41,7 @@ import sumolib.geomhelper as gh
 
 import ecal.nanobind_core as ecal_core
 from ecal.msg.proto.helper import get_descriptor_from_type
+import pyproj
 import sumo_pb2
 
 
@@ -65,7 +66,6 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
     if not proj_parameter or proj_parameter == '!':
         return None
     try:
-        import pyproj
         ox, oy = map(float, net_offset.split(','))
         proj = pyproj.Proj(proj_parameter)
         def _convert(x, y):
@@ -465,15 +465,49 @@ def main():
             except OSError:
                 pass
 
-            # For uncached networks, start readNet concurrently with traci.start()
-            _net_result: list = []
-            net_thread = None
-            if not cache_valid:
-                net_thread = threading.Thread(
-                    target=lambda: _net_result.append(
-                        sumolib.net.readNet(net_file, withInternal=False)),
-                    daemon=True)
-                net_thread.start()
+            # Both branches start a background thread that runs concurrently with
+            # traci.start() so neither readNet nor proto-read nor subscriber-wait
+            # adds to the wall-clock load time.
+            _bg_ng: list = []   # filled with NetworkGeometry by whichever thread runs
+
+            if cache_valid:
+                # Read + publish the cached proto while SUMO loads.
+                def _read_and_publish_cache():
+                    ng = sumo_pb2.NetworkGeometry()
+                    with open(cache_path, 'rb') as f:
+                        ng.ParseFromString(f.read())
+                    _bg_ng.append(ng)
+                    deadline = time.monotonic() + 30.0
+                    while pub_network.get_subscriber_count() == 0:
+                        if time.monotonic() > deadline:
+                            print("Warning: no subscriber after 30 s -- still waiting")
+                        time.sleep(0.1)
+                    nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced,
+                                              cache_path=cache_path)
+                    pub_network.send(nd.SerializeToString())
+                bg_thread = threading.Thread(target=_read_and_publish_cache, daemon=True)
+            else:
+                # readNet + build cache + publish, all while SUMO loads.
+                _net_result: list = []
+                def _readnet_build_publish():
+                    net = sumolib.net.readNet(net_file, withInternal=False)
+                    _net_result.append(net)
+                    has_tls = len(net.getTrafficLights()) > 0
+                    cp = _build_network_binary(net, net_file, include_tls=has_tls)
+                    ng = sumo_pb2.NetworkGeometry()
+                    with open(cp, 'rb') as f:
+                        ng.ParseFromString(f.read())
+                    _bg_ng.append(ng)
+                    deadline = time.monotonic() + 30.0
+                    while pub_network.get_subscriber_count() == 0:
+                        if time.monotonic() > deadline:
+                            print("Warning: no subscriber after 30 s -- still waiting")
+                        time.sleep(0.1)
+                    nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp)
+                    pub_network.send(nd.SerializeToString())
+                bg_thread = threading.Thread(target=_readnet_build_publish, daemon=True)
+
+            bg_thread.start()
 
             # start SUMO — log socket uses SUMO's "host:port" file syntax
             cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
@@ -481,43 +515,15 @@ def main():
             traci.start(cmd)
             _log("INFO", "SUMO started: %s" % sumocfg_path)
 
-            if cache_valid:
-                # Fast path: read projection params from the cache — no net file access needed.
-                with open(cache_path, 'rb') as _f:
-                    _ng = sumo_pb2.NetworkGeometry()
-                    _ng.ParseFromString(_f.read())
-                geo_ref   = _ng.geo_referenced
-                converter = _make_geo_converter(_ng.proj_parameter, _ng.net_offset)
-                sim["geo_referenced"] = geo_ref
-                sim["converter"]      = converter
-                sim["all_edges"]      = [e for e in traci.edge.getIDList()
-                                         if not e.startswith(':')]
-                sim["has_tls"]        = len(traci.trafficlight.getIDList()) > 0
-                _log("INFO", "Using cached network binary: %s" % cache_path)
-            else:
-                # Slow path: wait for readNet, build cache
-                net_thread.join()
-                net = _net_result[0]
-                geo_ref   = net.hasGeoProj()
-                converter = net.convertXY2LonLat if geo_ref else None
-                sim["geo_referenced"] = geo_ref
-                sim["converter"]      = converter
-                sim["all_edges"]      = [e.getID() for e in net.getEdges()]
-                sim["has_tls"]        = len(traci.trafficlight.getIDList()) > 0
-                cache_path = _build_network_binary(net, net_file, include_tls=sim["has_tls"])
+            bg_thread.join()  # brief or free: SUMO startup dominates
+            ng = _bg_ng[0]
 
-            ctrl["sumocfg_path"] = sumocfg_path
-
-            # wait for at least one subscriber before sending
-            deadline = time.monotonic() + 30.0
-            while pub_network.get_subscriber_count() == 0:
-                if time.monotonic() > deadline:
-                    print("Warning: no subscriber on sumo/network after 30 s -- still waiting")
-                time.sleep(0.1)
-
-            nd = sumo_pb2.NetworkData(geo_referenced=sim["geo_referenced"], cache_path=cache_path)
-            pub_network.send(nd.SerializeToString())
-            _log("INFO", "Published network reference (cache: %s)" % cache_path)
+            sim["geo_referenced"] = ng.geo_referenced
+            sim["converter"]      = _make_geo_converter(ng.proj_parameter, ng.net_offset)
+            sim["all_edges"]      = list(ng.edge_ids)
+            sim["has_tls"]        = bool(ng.tls_entries)
+            ctrl["sumocfg_path"]  = sumocfg_path
+            _log("INFO", "Published network (cache: %s)" % cache_path)
 
             # reset per-sim state
             ctrl["paused"] = False
