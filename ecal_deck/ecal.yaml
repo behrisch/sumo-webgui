@@ -1,0 +1,10 @@
+# Minimal eCAL configuration for sumo-webgui.
+# Placed in the working directory (ecal_deck/) so both ecal_ws_bridge.py and
+# sumo_ecal_publisher.py pick it up automatically (priority 2 in eCAL's load order).
+
+# Disable the time-sync module; we don't need PTP/gPTP synchronisation and
+# the default "ecaltime-localtime" shared library is not installed, which
+# would otherwise produce a warning on every startup.
+time:
+  rt: ""
+  replay: ""

@@ -40,7 +40,7 @@ ecal_deck/
         NetworkLayer.ts     # edges + junctions (GeoJsonLayer)
         VehicleLayer.ts     # vehicles (ScatterplotLayer, colored by attribute or speed)
         TLSLayer.ts         # traffic lights (GeoJsonLayer colored by phase)
-        EdgeDataLayer.ts    # live edge attribute coloring (GeoJsonLayer)
+        EdgeDataLayer.ts    # live edge attribute coloring (PathLayer, viewport-culled, occupied-only)
       utils/
         colormap.ts
       App.tsx
@@ -150,11 +150,12 @@ Edge data uses an additional base + delta layer on top of the step interval:
 - Frontend merges into accumulated map; unoccupied edges keep snapshot baseline values
 
 **Frontend edge value map:**
-- `edgeValueMap: useRef<Map<string, Record<string, number>>>` accumulates all received values
-- Full snapshot (`full_snapshot = true`): resets map then merges all edges
-- Delta update: merges only received edges (partial write, keeps existing values for others)
-- Version counter in React state triggers re-renders without copying the large map
-- `buildEdgeDataLayer` reads the full accumulated map; all edges always have a value
+- `edgeValueMap: useRef<Map<string, Record<string, number>>>` holds only the edges in the **latest batch**
+- Every update (full snapshot or delta) clears the map then populates it from the received edges only
+- Delta updates therefore keep the map small (occupied edges only, typically hundreds not tens-of-thousands)
+- Version counter in React state triggers re-renders without copying the map
+- `buildEdgeDataLayer` iterates `valueMap` keys (not all lanes) using the precomputed `edgeLaneIndices`
+  reverse map; viewport-culled to lanes whose bounding box overlaps the current view
 
 ---
 
@@ -220,8 +221,8 @@ For geo-referenced networks, vehicle positions from TraCI (XY) are converted to 
 ### Attribute coloring
 
 - Vehicle color: speed (default) or any enabled vehicle attribute with fixed per-attribute ranges
-- Edge data: any enabled edge attribute; per-frame min/max normalization; blue-green-red colormap;
-  empty edges use the default value from the initial full snapshot (not hidden)
+- Edge data: any enabled edge attribute; per-update min/max normalization; blue-green-red colormap;
+  only occupied edges (present in latest delta) are coloured; viewport-culled via lane bboxes
 - Available/enabled attributes populated from `get_attributes` on connect (no inference needed)
 - Checkbox changes send `set_attributes` + trigger a new full snapshot from the publisher
 - Step interval config (min/max/autotune) shown in control panel with bound warnings;
@@ -356,6 +357,7 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 | 7 | **Unified step interval + edge data base/delta** — one adaptive interval `[min, max]` with autotune controls simstep+tls+edgedata together; auto-tuner targets ≤25% of non-sleep step time. Edge data: full TraCI snapshot on `set_attributes`/load (`full_snapshot=true`), occupied-only deltas per interval. Frontend accumulates in `edgeValueMap` ref; empty edges shown in neutral grey from snapshot baseline. | publisher + bridge + frontend | step time with edge data: 22ms → ~7ms; steps/s: 45 → ~120 | implemented |
 | 8 | **Binary WebSocket transport** — all simulation topics sent as raw protobuf bytes with 1-byte type prefix; bridge skips `MessageToDict`/`json.dumps`; frontend uses ts-proto `decode()`; JSON batch replaced by individual binary frames per type; `permessage-deflate` compression on by default | bridge + publisher + frontend | eliminates `JSON.parse` cost per frame; large-network transfer | implemented |
 | 9 | **Binary network cache + parallel load** — `NetworkGeometry` proto with binary typed arrays replaces GeoJSON; cached to `<net.xml>.ecaldeck`; background thread handles read/build/publish concurrently with `traci.start()`; junction polygons (not centroids) for `SolidPolygonLayer`; projection params stored in cache so reload needs no net file access; network layers memoized to avoid per-frame `SolidPolygonLayer` tessellation | publisher + frontend | large-network load: minutes → ~SUMO startup time; frame time: 250ms → normal on large networks | implemented |
+| 10 | **Edge data viewport culling + occupied-only map** — (a) `edgeValueMap` always replaced (not merged) so map holds only occupied edges from the latest delta (typically hundreds vs tens-of-thousands); (b) `edgeLaneIndices` reverse map (edge→lanes) precomputed at network load; `buildEdgeDataLayer` iterates `valueMap` keys instead of all lanes — cost scales with occupied×visible, not total lanes; (c) per-lane bboxes (`laneBBoxes`) computed at network load; each candidate lane bbox-tested against viewport before inclusion; (d) PathLayer `getColor` uses `target` parameter to avoid per-lane array allocations; (e) `edgeDataLayer` memoized independently from `simStep` | frontend | frame time with edge data on large network: 750ms → solved | implemented |
 
 ### Benchmark results
 
@@ -465,15 +467,7 @@ uncached: [traci.start ~30s                              ]
 
 ### Near-term
 
-- **Edge coloring broken + slow on large networks**: selecting an edge attribute for coloring
-  does not visually work, and on large networks enabling edge data coloring makes the simulation
-  very slow. Two separate problems to investigate: (1) the color mapping in `EdgeDataLayer.ts`
-  — verify that `edgeValueMap` is populated for the selected attribute, that the per-frame
-  min/max normalisation produces a sensible range (not 0–0), and that the color array is
-  actually being read by the `PathLayer` `getColor` accessor; (2) the per-frame cost of
-  rebuilding the color array for all lanes on large networks — the rebuild iterates every lane
-  every frame even when values haven't changed; add a dirty flag or version check so the array
-  is only rebuilt when `edgeValueVersion` changes.
+- ~~**Edge coloring broken + slow on large networks**~~: fixed — see performance section step 10.
 
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
@@ -485,12 +479,10 @@ uncached: [traci.start ~30s                              ]
   `InfoPanel` for these types. Consider adding a `get_person_info` service method in the
   publisher and bridge for richer on-demand queries (current lane, stage, waiting time).
 
-- **eCAL time-sync warning**: on startup both publisher and bridge log
-  `error | Could not load eCAL time sync module libecaltime-localtime.so`. This is eCAL trying
-  to load an optional time-synchronisation plugin that is not installed. Suppress by setting
-  `ECAL_TIME_SYNC_MODULE` env var to an empty string or `"none"` before `ecal_core.initialize`
-  (or equivalently add `export ECAL_TIME_SYNC_MODULE=none` to `run.sh`). Verify by checking
-  eCAL's `ecal_time.cpp` for the env-var name used in this installation.
+- ~~**eCAL time-sync warning**~~: fixed — `ecal_deck/ecal.yaml` added with `time: rt: ""`.
+  eCAL loads `$PWD/ecal.yaml` at priority 2 (before user/system config), so both processes
+  pick it up automatically. This also eliminated the secondary "yaml configuration path not
+  valid" warning that appeared when no config file was found at all.
 
 - **Directional vehicle/person shapes**: vehicles and persons are rendered as circles.
   SUMO-GUI uses small oriented rectangles/arrows. Switch `VehicleLayer` and `PersonLayer` from
@@ -606,8 +598,10 @@ added (`lane_starts`, `lane_positions`, `lane_widths`, `lane_edge_indices`, `lan
 
 `NetworkLayer.ts`: `PathLayer` with `widthUnits: 'meters'` and per-path `getWidth` accessor
 (not binary attribute — PathLayer instances at segment level, not path level).
-`EdgeDataLayer.ts`: color array indexed by lane, parent edge value looked up via
-`laneEdgeIndices`. `SolidPolygonLayer` for junctions keeps `_normalize: false`.
+`EdgeDataLayer.ts`: iterates `edgeValueMap` (occupied edges only) via `edgeLaneIndices` reverse
+map; bbox-tests each candidate lane against the current viewport; builds filtered typed arrays
+(positions, widths, colors) for the visible occupied subset only. `SolidPolygonLayer` for
+junctions keeps `_normalize: false`.
 
 `_make_geo_converter` uses a minimal `sumolib.net.Net` with `setLocation` so the conversion
 is byte-for-byte identical to `net.convertXY2LonLat` (custom pyproj call gave wrong results
