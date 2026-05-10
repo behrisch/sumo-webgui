@@ -9,6 +9,9 @@ message Vehicle {
   float               angle      = 5;
   string              type_id    = 6;
   map<string, double> attributes = 7;
+  float               length     = 8;  // type length in metres (cached per type_id)
+  float               width      = 9;  // type width in metres  (cached per type_id)
+  string              gui_shape  = 10; // traci vehicletype shape class, e.g. "passenger", "truck"
 }
 
 message MobileAgent {

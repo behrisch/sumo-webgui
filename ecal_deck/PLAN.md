@@ -484,13 +484,51 @@ uncached: [traci.start ~30s                              ]
   pick it up automatically. This also eliminated the secondary "yaml configuration path not
   valid" warning that appeared when no config file was found at all.
 
-- **Directional vehicle/person shapes**: vehicles and persons are rendered as circles.
-  SUMO-GUI uses small oriented rectangles/arrows. Switch `VehicleLayer` and `PersonLayer` from
-  `ScatterplotLayer` to an `IconLayer` with a triangle/arrow SVG atlas, using `getAngle` for
-  rotation. Alternatively use deck.gl's `SimpleMeshLayer` with a flat triangle mesh and
-  `getOrientation`. `IconLayer` is simpler: define a small SVG arrow as a data-URL in the atlas,
-  set `iconMapping` with the icon dimensions, and use `getAngle: (_, {index}) => angles[index]`
-  where `angles` is a typed array built alongside positions.
+- **Directional vehicle/person shapes**: implemented — `VehicleLayer` uses `IconLayer` with
+  SVG atlas data-URLs, `sizeUnits:'meters'`, `getAngle` from a `Float32Array`. Three modes
+  selectable in the UI: circle, triangle, car (auto per-type).
+
+  **Car mode (per-vehicle shape + size)**:
+  - Proto fields `length` (f8), `width` (f9), `gui_shape` (f10) added to `Vehicle` message.
+  - Publisher caches per-type properties (`_type_cache` dict, `_get_type_props()` helper) using
+    `traci.vehicletype.getLength/getWidth/getShapeClass`; cache cleared on each load.
+  - `vehicleShapes.ts`: 64×256 multi-shape SVG atlas with four 64×64 cells stacked vertically —
+    cell 0 `car` (passenger), cell 1 `truck` (bus/rail/delivery), cell 2 `cyclist`, cell 3 `pedestrian`.
+    Car and truck shapes derived from SUMO's `GUIBaseVehicleHelper` polygons; windshield punched
+    out via `fill-rule="evenodd"` (the only way to create an alpha=0 hole with a single masked icon).
+  - `guiShapeToIconIndex()` maps `traci.vehicletype.getShapeClass()` strings to the 0–3 index.
+  - `VehicleLayer.ts` car mode: `Float32Array sizes` per vehicle (`length × SIZE_SCALE`),
+    `Uint8Array iconIndices` per vehicle; `getSize` and `getIcon` use these typed arrays.
+  - `SIZE_SCALE = 64/56`: car body occupies 56 of 64 cell pixels; this factor makes the
+    rendered body height exactly equal the vehicle's `length` in metres.
+
+  **Front-bumper anchor**: SUMO TraCI reports positions at the centre of the front bumper.
+  - `anchorY = 4` (cell-relative pixels from the top of each 64×64 cell), where y=4 is where
+    the body's front edge sits in the SVG. The body extends from y=4 downward to y=60, so the
+    body trails behind (south of) the anchor for a north-heading vehicle — correct behaviour.
+  - **Gotcha — cell-relative, not atlas-absolute**: deck.gl icon mapping `anchorX`/`anchorY`
+    are relative to the icon's own cell top-left (0,0), **not** the atlas origin. The default
+    is `width/2`, `height/2`. Setting `anchorY = y_offset + 4` is correct only for cell 0
+    (y_offset=0); for truck (y_offset=64), cyclist (128), pedestrian (192) it placed the anchor
+    deep inside or past the cell bottom. Fix: always use `anchorY = 4` regardless of cell offset.
+    Verified from deck.gl 9 source: `[width/2 − anchorX, height/2 − anchorY, x, y, w, h, mask]`.
+
+  **Multi-color icon research**: SUMO draws cars with 3 layers (body at vehicle color, front
+  hood at +51 brightness, windshield black). Replicating all three tones in one IconLayer is
+  not possible: `mask: true` uses only the alpha channel (not luminance), so all filled SVG
+  regions render as the same vehicle color regardless of their fill color. Options evaluated:
+  - **2–3 stacked IconLayers** (body + lighter front + dark windshield): simplest to implement,
+    near-zero extra GPU cost (instanced rendering; extra draw calls don't scale with N). The
+    lighter front uses `getColor` with per-vehicle `color + 51` brightness; the windshield layer
+    uses a fixed dark `getColor` constant.
+  - **Custom shader extension**: encode body mask in atlas red channel, window mask in green
+    channel; combine in GLSL with two different colors. One draw call, one atlas, elegant — but
+    requires writing a deck.gl shader extension.
+  - **SolidPolygonLayer**: pixel-perfect edges, natural color boundaries. Requires CPU-side
+    vertex transform (rotate + translate each polygon vertex per vehicle per frame, ~84k trig
+    ops/frame for N=1000). Works cleanly in orthographic mode; geo-referenced mode requires
+    additional metric→lon/lat conversion per vertex. Viable but significantly more code.
+  Current implementation keeps the single-layer evenodd approach (body + windshield cutout).
 
 - ~~**Loading feedback**~~: implemented — `toast.loading` shown on `load` command, transitions
   to `toast.success` when network arrives, `toast.error` on failure.

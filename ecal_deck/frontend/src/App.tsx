@@ -10,6 +10,7 @@ import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
 import { buildNetworkLayer } from './layers/NetworkLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
+import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
 import { buildPersonLayer, buildContainerLayer } from './layers/PersonLayer';
 import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
@@ -245,6 +246,7 @@ export default function App() {
     setVisibility((v) => ({ ...v, ...patch }));
 
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
+  const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('triangle');
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
   // Auto-select the first available edge attribute when the config arrives or changes
@@ -340,13 +342,13 @@ export default function App() {
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
       result.push(buildVehicleLayer(simStep?.vehicles ?? [],
-        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr));
+        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape));
     if (visibility.persons)
       result.push(buildPersonLayer(simStep?.persons ?? []));
     if (visibility.containers)
       result.push(buildContainerLayer(simStep?.containers ?? []));
     return result;
-  }, [edgeLayer, junctionLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr]);
+  }, [edgeLayer, junctionLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape]);
 
   if (!parsed || !activeView) {
     return (
@@ -388,6 +390,7 @@ export default function App() {
       basemapStyle={basemapStyle} basemapStyles={Object.keys(BASEMAP_STYLES)} onBasemapStyle={setBasemapStyle}
       visibility={visibility} onVisibility={patchVisibility}
       vehicleColorAttr={vehicleColorAttr} vehicleKeys={vehicleKeys} onVehicleColorAttr={setVehicleColorAttr}
+      vehicleShape={vehicleShape} onVehicleShape={setVehicleShape} vehicleShapes={VEHICLE_SHAPES}
       edgeColorAttr={edgeColorAttr} edgeKeys={edgeKeys} onEdgeColorAttr={setEdgeColorAttr}
       attributeConfig={attributeConfig} onSetAttributes={handleAttributes}
       intervalMin={intervalMin} intervalMax={intervalMax} autotune={autotune}

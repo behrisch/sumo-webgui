@@ -1,5 +1,6 @@
 import type { SimStep, GetAttributesResponse } from '../generated/sumo';
 import type { PerfStats } from '../hooks/usePerfStats';
+import type { VehicleShape } from '../layers/vehicleShapes';
 
 export interface LayerVisibility {
   edges: boolean;
@@ -30,6 +31,9 @@ interface Props {
   vehicleColorAttr: string;
   vehicleKeys: string[];
   onVehicleColorAttr: (v: string) => void;
+  vehicleShape: VehicleShape;
+  vehicleShapes: VehicleShape[];
+  onVehicleShape: (s: VehicleShape) => void;
   edgeColorAttr: string;
   edgeKeys: string[];
   onEdgeColorAttr: (v: string) => void;
@@ -136,12 +140,18 @@ export function ControlPanel(p: Props) {
 
       <div style={{ borderTop: '1px solid #444' }} />
 
-      {/* color selectors */}
+      {/* color + shape selectors */}
       <div style={row}>
         <span style={{ whiteSpace: 'nowrap' }}>Vehicle color</span>
         <select value={p.vehicleColorAttr} onChange={(e) => p.onVehicleColorAttr(e.target.value)} style={sel}>
           <option value="speed">speed</option>
           {p.vehicleKeys.map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
+      </div>
+      <div style={row}>
+        <span style={{ whiteSpace: 'nowrap' }}>Vehicle shape</span>
+        <select value={p.vehicleShape} onChange={(e) => p.onVehicleShape(e.target.value as VehicleShape)} style={sel}>
+          {p.vehicleShapes.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
       {p.edgeKeys.length > 0 && (

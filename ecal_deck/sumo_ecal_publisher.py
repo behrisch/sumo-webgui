@@ -321,6 +321,21 @@ def main():
     # per-simulation state (replaced on each load)
     sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False}
 
+    # type-level property cache: type_id → (length, width, gui_shape)
+    # cleared on each load so stale type data from a previous simulation doesn't leak
+    _type_cache: dict[str, tuple[float, float, str]] = {}
+
+    def _get_type_props(type_id: str) -> tuple[float, float, str]:
+        if type_id not in _type_cache:
+            try:
+                length    = traci.vehicletype.getLength(type_id)
+                width     = traci.vehicletype.getWidth(type_id)
+                gui_shape = traci.vehicletype.getShapeClass(type_id)
+            except Exception:
+                length, width, gui_shape = 5.0, 1.8, "passenger"
+            _type_cache[type_id] = (length, width, gui_shape)
+        return _type_cache[type_id]
+
     _step_event = threading.Event()
     _step_thread: list[threading.Thread | None] = [None]
     _step_stop   = threading.Event()
@@ -385,6 +400,7 @@ def main():
                     v.speed = traci.vehicle.getSpeed(vid)
                     v.angle = traci.vehicle.getAngle(vid)
                     v.type_id = traci.vehicle.getTypeID(vid)
+                    v.length, v.width, v.gui_shape = _get_type_props(v.type_id)
                     for attr in ctrl["vehicle_attributes"]:
                         getter = vehicle_attr_getters.get(attr)
                         if getter:
@@ -567,6 +583,7 @@ def main():
             ctrl["interval_current"] = ctrl["interval_min"]
             ctrl["at_min_bound"] = False
             ctrl["at_max_bound"] = False
+            _type_cache.clear()
             if ctrl["edge_attributes"]:
                 ctrl["needs_edgedata_snapshot"] = True
 
