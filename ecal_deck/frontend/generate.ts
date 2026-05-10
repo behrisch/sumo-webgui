@@ -11,7 +11,7 @@ const out    = join('src', 'generated');
 
 mkdirSync(out, { recursive: true });
 
-const cmd = [
+const tsCmd = [
   'protoc',
   `--plugin=${plugin}`,
   `--ts_proto_out=${out}`,
@@ -21,5 +21,15 @@ const cmd = [
   join(proto, 'sumo.proto'),
 ].join(' ');
 
-console.log(cmd);
-execSync(cmd, { stdio: 'inherit' });
+console.log(tsCmd);
+execSync(tsCmd, { stdio: 'inherit' });
+
+const pyCmd = [
+  'protoc',
+  `--python_out=${proto}`,
+  `-I ${proto}`,
+  join(proto, 'sumo.proto'),
+].join(' ');
+
+console.log(pyCmd);
+execSync(pyCmd, { stdio: 'inherit' });

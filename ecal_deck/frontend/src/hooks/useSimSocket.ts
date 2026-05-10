@@ -103,7 +103,12 @@ export function useSimSocket(url: string): SimState {
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
-      ws.onopen = () => { setConnected(true); setReconnectAttempt(0); };
+      // Force-close if the handshake never completes so onclose fires and we retry
+      const connTimeout = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) ws.close();
+      }, 3000);
+
+      ws.onopen = () => { clearTimeout(connTimeout); setConnected(true); setReconnectAttempt(0); };
 
       const dispatchBinary = (buf: ArrayBuffer) => {
         const bytes = new Uint8Array(buf);
@@ -186,6 +191,7 @@ export function useSimSocket(url: string): SimState {
       };
 
       ws.onclose = () => {
+        clearTimeout(connTimeout);
         setConnected(false);
         if (!unmounted.current) {
           setReconnectAttempt(n => n + 1);
