@@ -125,9 +125,11 @@ export function useSimSocket(url: string): SimState {
             break;
           case TYPE_EDGEDATA: {
             const ed = EdgeDataUpdate.decode(payload);
-            if (ed.full_snapshot) edgeValueMapRef.current.clear();
+            // Always replace so the map only holds the latest batch — deltas
+            // contain only occupied edges, keeping the map small between snapshots.
+            edgeValueMapRef.current.clear();
             for (const e of ed.edges) {
-              edgeValueMapRef.current.set(e.id, { ...edgeValueMapRef.current.get(e.id), ...e.attributes });
+              edgeValueMapRef.current.set(e.id, { ...e.attributes });
             }
             edgeDataDirty.current = true;
             break;

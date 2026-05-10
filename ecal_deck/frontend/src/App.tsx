@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import DeckGL from '@deck.gl/react';
-import { OrthographicView } from '@deck.gl/core';
+import { OrthographicView, WebMercatorViewport } from '@deck.gl/core';
 import type { MapViewState, OrthographicViewState } from '@deck.gl/core';
 import MapGL from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -40,6 +40,8 @@ export interface ParsedNetwork {
   laneWidths: Float32Array;
   laneEdgeIndices: Uint32Array;
   laneIds: string[];
+  laneBBoxes: Float32Array;       // [minX, minY, maxX, maxY] per lane, for viewport culling
+  edgeLaneIndices: Map<string, number[]>;  // edge ID → lane indices (reverse of laneEdgeIndices)
   // edges — used for data queries and lane→edge resolution
   edgeIds: string[];
   edgeIdToIndex: Map<string, number>;
@@ -85,12 +87,23 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const junctionPositions = toFloat64(msg.junction_positions);
   const tlsPositions     = toFloat64(msg.tls_positions);
 
-  // bounding box from lane positions (covers the whole road network)
+  // Per-lane bounding boxes for viewport culling, plus overall network bbox.
+  const laneCount0 = msg.lane_ids.length;
+  const totalPts0  = lanePositions.length / 2;
+  const laneBBoxes = new Float32Array(laneCount0 * 4);
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (let i = 0; i < lanePositions.length; i += 2) {
-    const x = lanePositions[i], y = lanePositions[i + 1];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  for (let li = 0; li < laneCount0; li++) {
+    const ptS = laneStarts[li], ptE = li + 1 < laneCount0 ? laneStarts[li + 1] : totalPts0;
+    let lx0 = Infinity, lx1 = -Infinity, ly0 = Infinity, ly1 = -Infinity;
+    for (let p = ptS; p < ptE; p++) {
+      const x = lanePositions[p * 2], y = lanePositions[p * 2 + 1];
+      if (x < lx0) lx0 = x; if (x > lx1) lx1 = x;
+      if (y < ly0) ly0 = y; if (y > ly1) ly1 = y;
+    }
+    laneBBoxes[li * 4] = lx0; laneBBoxes[li * 4 + 1] = ly0;
+    laneBBoxes[li * 4 + 2] = lx1; laneBBoxes[li * 4 + 3] = ly1;
+    if (lx0 < minX) minX = lx0; if (lx1 > maxX) maxX = lx1;
+    if (ly0 < minY) minY = ly0; if (ly1 > maxY) maxY = ly1;
   }
 
   let initialViewState: MapViewState | OrthographicViewState;
@@ -114,6 +127,13 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const edgeIdToIndex = new Map<string, number>();
   msg.edge_ids.forEach((id, i) => edgeIdToIndex.set(id, i));
 
+  const edgeLaneIndices = new Map<string, number[]>();
+  for (let li = 0; li < msg.lane_ids.length; li++) {
+    const eid = msg.edge_ids[laneEdgeIndices[li]];
+    const arr = edgeLaneIndices.get(eid);
+    if (arr) arr.push(li); else edgeLaneIndices.set(eid, [li]);
+  }
+
   return {
     geoReferenced: msg.geo_referenced,
     initialViewState,
@@ -123,8 +143,10 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     laneWidths,
     laneEdgeIndices,
     laneIds: msg.lane_ids,
+    laneBBoxes,
     edgeIds: msg.edge_ids,
     edgeIdToIndex,
+    edgeLaneIndices,
     junctionCount: msg.junction_ids.length,
     junctionStarts,
     junctionPositions,
@@ -132,6 +154,23 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     tlsPositions,
     tlsEntries: msg.tls_entries,
   };
+}
+
+function geoViewportBounds(vs: MapViewState): [number, number, number, number] {
+  const vp = new WebMercatorViewport({
+    width: window.innerWidth, height: window.innerHeight,
+    longitude: vs.longitude, latitude: vs.latitude, zoom: vs.zoom,
+    pitch: vs.pitch ?? 0, bearing: vs.bearing ?? 0,
+  });
+  const [west, south, east, north] = vp.getBounds();
+  return [west, south, east, north];
+}
+
+function orthoViewportBounds(vs: OrthographicViewState): [number, number, number, number] {
+  const [cx, cy] = vs.target as [number, number];
+  const scale = Math.pow(2, vs.zoom ?? 0);
+  const hw = window.innerWidth / 2 / scale, hh = window.innerHeight / 2 / scale;
+  return [cx - hw, cy - hh, cx + hw, cy + hh];
 }
 
 export default function App() {
@@ -208,6 +247,13 @@ export default function App() {
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
+  // Auto-select the first available edge attribute when the config arrives or changes
+  useEffect(() => {
+    const keys = attributeConfig?.edge_enabled ?? [];
+    if (keys.length > 0)
+      setEdgeColorAttr(prev => keys.includes(prev) ? prev : keys[0]);
+  }, [attributeConfig]);
+
   const [selectedObject, setSelectedObject] = useState<SelectedObject | null>(null);
   const [following, setFollowing] = useState(false);
 
@@ -270,13 +316,26 @@ export default function App() {
     [parsed],
   );
 
+  // Edge data layer — only lanes whose bounding box intersects the current viewport are
+  // included, so tessellation and accessor cost scale with visible lanes not total lanes.
+  // activeView is read from the closure (not a dep): viewport is sampled at the moment
+  // edge data changes rather than on every pan/zoom frame.
+  // edgeValueMap is a stable ref; edgeValueVersion is the change signal.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const edgeDataLayer = useMemo(() => {
+    if (!parsed || !visibility.edgeData || !edgeColorAttr || edgeValueMap.size === 0 || !activeView) return null;
+    const vpBounds = parsed.geoReferenced
+      ? geoViewportBounds(activeView as MapViewState)
+      : orthoViewportBounds(activeView as OrthographicViewState);
+    return buildEdgeDataLayer(parsed, edgeValueMap, edgeColorAttr, vpBounds);
+  }, [parsed, edgeValueVersion, edgeColorAttr, visibility.edgeData]);
+
   const layers = useMemo(() => {
     if (!parsed) return [];
     const result = [];
     if (visibility.junctions && junctionLayer) result.push(junctionLayer);
     if (visibility.edges     && edgeLayer)     result.push(edgeLayer);
-    if (visibility.edgeData && edgeColorAttr && edgeValueMap.size > 0)
-      result.push(buildEdgeDataLayer(parsed, edgeValueMap, edgeColorAttr));
+    if (edgeDataLayer)                         result.push(edgeDataLayer);
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
@@ -287,7 +346,7 @@ export default function App() {
     if (visibility.containers)
       result.push(buildContainerLayer(simStep?.containers ?? []));
     return result;
-  }, [edgeLayer, junctionLayer, parsed, simStep, tlsUpdate, edgeValueVersion, visibility, vehicleColorAttr, edgeColorAttr]);
+  }, [edgeLayer, junctionLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr]);
 
   if (!parsed || !activeView) {
     return (

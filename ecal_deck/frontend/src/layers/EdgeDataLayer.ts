@@ -7,46 +7,86 @@ export function buildEdgeDataLayer(
   parsed: ParsedNetwork,
   valueMap: EdgeValueMap,
   colorAttr: string,
+  vpBounds: [number, number, number, number],  // [minX, minY, maxX, maxY] in network coords
 ) {
+  const [vpX0, vpY0, vpX1, vpY1] = vpBounds;
+  const bboxes = parsed.laneBBoxes;
+  const totalSrcPts = parsed.lanePositions.length / 2;
+
+  // Single pass over valueMap (occupied edges only after delta updates) → collect
+  // viewport-visible lane indices and compute min/max in one loop.
   let min = Infinity, max = -Infinity;
-  for (const attrs of valueMap.values()) {
+  const visLanes: number[] = [];
+  const visVals: number[]  = [];
+
+  for (const [edgeId, attrs] of valueMap) {
     const val = attrs[colorAttr];
-    if (val !== undefined) {
-      if (val < min) min = val;
-      if (val > max) max = val;
+    if (val === undefined) continue;
+    if (val < min) min = val;
+    if (val > max) max = val;
+
+    const lanes = parsed.edgeLaneIndices.get(edgeId);
+    if (!lanes) continue;
+    for (const li of lanes) {
+      const b = li * 4;
+      if (bboxes[b + 2] >= vpX0 && bboxes[b] <= vpX1 &&
+          bboxes[b + 3] >= vpY0 && bboxes[b + 1] <= vpY1) {
+        visLanes.push(li);
+        visVals.push(val);
+      }
     }
   }
+
+  if (visLanes.length === 0) return null;
   const range = max - min || 1;
 
-  // one colour entry per lane, looked up via lane→edge index
-  const colors = new Uint8Array(parsed.laneCount * 4);
-  for (let i = 0; i < parsed.laneCount; i++) {
-    const edgeId = parsed.edgeIds[parsed.laneEdgeIndices[i]];
-    const val = valueMap.get(edgeId)?.[colorAttr];
-    if (val === undefined) {
-      colors[i * 4] = 144; colors[i * 4 + 1] = 144; colors[i * 4 + 2] = 144; colors[i * 4 + 3] = 80;
-    } else {
-      const [r, g, b, a] = colormap(Math.max(0, Math.min(1, (val - min) / range)));
-      colors[i * 4] = r; colors[i * 4 + 1] = g; colors[i * 4 + 2] = b; colors[i * 4 + 3] = a;
-    }
+  // Count total positions for the visible subset
+  let visPts = 0;
+  for (const li of visLanes) {
+    visPts += (li + 1 < parsed.laneCount ? parsed.laneStarts[li + 1] : totalSrcPts)
+              - parsed.laneStarts[li];
+  }
+
+  // Build filtered typed arrays
+  const starts    = new Uint32Array(visLanes.length);
+  const positions = new Float64Array(visPts * 2);
+  const widths    = new Float32Array(visLanes.length);
+  const colors    = new Uint8Array(visLanes.length * 4);
+
+  let posOff = 0;
+  for (let j = 0; j < visLanes.length; j++) {
+    const li  = visLanes[j];
+    const ptS = parsed.laneStarts[li];
+    const ptE = li + 1 < parsed.laneCount ? parsed.laneStarts[li + 1] : totalSrcPts;
+    const nPts = ptE - ptS;
+
+    starts[j] = posOff;
+    positions.set(parsed.lanePositions.subarray(ptS * 2, ptE * 2), posOff * 2);
+    widths[j] = parsed.laneWidths[li];
+    posOff += nPts;
+
+    const [r, g, b, a] = colormap(Math.max(0, Math.min(1, (visVals[j] - min) / range)));
+    colors[j * 4] = r; colors[j * 4 + 1] = g; colors[j * 4 + 2] = b; colors[j * 4 + 3] = a;
   }
 
   return new PathLayer({
     id: 'edgedata',
     data: {
-      length: parsed.laneCount,
-      startIndices: parsed.laneStarts,
-      attributes: {
-        getPath:  { value: parsed.lanePositions, size: 2 },
-        getColor: { value: colors, size: 4 },
-      },
+      length: visLanes.length,
+      startIndices: starts,
+      attributes: { getPath: { value: positions, size: 2 } },
     },
     _pathType: 'open',
     widthUnits: 'meters',
     widthScale: 1,
     widthMinPixels: 2,
-    getWidth: (_: unknown, { index }: { index: number }) => parsed.laneWidths[index],
-    updateTriggers: { getColor: [colors] },
+    getColor: (_: unknown, { index, target }: { index: number; target: number[] }) => {
+      const off = index * 4;
+      target[0] = colors[off]; target[1] = colors[off + 1];
+      target[2] = colors[off + 2]; target[3] = colors[off + 3];
+      return target;
+    },
+    getWidth: (_: unknown, { index }: { index: number }) => widths[index],
     pickable: false,
   });
 }
