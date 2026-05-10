@@ -3,6 +3,16 @@ import { PathStyleExtension } from '@deck.gl/extensions';
 import type { ParsedNetwork } from '../App';
 import { ARROW_ATLAS, ARROW_MAPPING, directionBitsToIcons } from './arrowShapes';
 
+// Lane permission class colour lookup
+// 0 = pedestrian/other  →  medium grey (unchanged)
+// 1 = bicycle only      →  red-ish
+// 2 = motorised         →  dark grey
+const LANE_PERM_COLORS: [number, number, number, number][] = [
+  [160, 160, 160, 255], // 0 pedestrian
+  [192,  66,  44, 255], // 1 bike
+  [100, 100, 100, 255], // 2 motorised
+];
+
 export function buildNetworkLayer(parsed: ParsedNetwork) {
   const lanePaths = new PathLayer({
     id: 'lanes',
@@ -21,7 +31,8 @@ export function buildNetworkLayer(parsed: ParsedNetwork) {
     // PathLayer instances internally at the segment level (N-1 segments per path),
     // so a binary Float32Array in data.attributes would need one value per segment.
     getWidth: (_: unknown, { index }: { index: number }) => parsed.laneWidths[index],
-    getColor: [160, 160, 160],
+    getColor: (_: unknown, { index }: { index: number }) =>
+      LANE_PERM_COLORS[parsed.lanePermClass?.[index] ?? 2],
     pickable: true,
   });
 

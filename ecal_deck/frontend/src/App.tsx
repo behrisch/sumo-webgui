@@ -61,6 +61,8 @@ export interface ParsedNetwork {
   dashedMarkingPositions: Float64Array;
   // turning arrows — one byte per lane, direction bitmask
   laneArrowDirs: Uint8Array;
+  // permission class — one byte per lane: 0=pedestrian, 1=bike, 2=motorised
+  lanePermClass: Uint8Array;
 }
 
 // ts-proto decodes bytes fields as Uint8Array with a potentially non-zero byteOffset
@@ -106,6 +108,11 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const laneArrowDirs = msg.lane_arrow_directions instanceof Uint8Array
     ? msg.lane_arrow_directions
     : new Uint8Array(msg.lane_arrow_directions);
+
+  // Permission class — one byte per lane
+  const lanePermClass = msg.lane_perm_class instanceof Uint8Array
+    ? msg.lane_perm_class
+    : new Uint8Array(msg.lane_perm_class);
 
   // Per-lane bounding boxes for viewport culling, plus overall network bbox.
   const laneCount0 = msg.lane_ids.length;
@@ -178,6 +185,7 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     dashedMarkingStarts,
     dashedMarkingPositions,
     laneArrowDirs,
+    lanePermClass,
   };
 }
 
@@ -369,11 +377,14 @@ export default function App() {
   const layers = useMemo(() => {
     if (!parsed) return [];
     const result = [];
-    if (visibility.junctions && junctionLayer) result.push(junctionLayer);
-    if (visibility.edges     && edgeLayer)     result.push(edgeLayer);
-    if (visibility.edges)                      result.push(...markingLayers);
-    if (edgeDataLayer)                         result.push(edgeDataLayer);
-    if (visibility.edges && arrowLayer)        result.push(arrowLayer);
+    // Static layers (memoized instances) must always stay in the array — removing and
+    // re-adding the same instance causes deck.gl to skip re-initialisation because
+    // layer.state already exists from the previous mount. Use the `visible` prop instead.
+    if (junctionLayer) result.push(junctionLayer.clone({ visible: visibility.junctions }));
+    if (edgeLayer)     result.push(edgeLayer.clone({ visible: visibility.edges }));
+    for (const ml of markingLayers) result.push(ml.clone({ visible: visibility.edges }));
+    if (edgeDataLayer) result.push(edgeDataLayer);
+    if (arrowLayer)    result.push(arrowLayer.clone({ visible: visibility.edges }));
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)

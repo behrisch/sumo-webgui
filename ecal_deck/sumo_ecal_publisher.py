@@ -94,7 +94,7 @@ def _net_file_from_cfg(sumocfg_path: str) -> str:
 
 
 
-_CACHE_VERSION = 3  # increment on any incompatible NetworkGeometry format change
+_CACHE_VERSION = 4  # increment on any incompatible NetworkGeometry format change
 
 
 def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
@@ -131,6 +131,11 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
     # turning arrows: one byte per lane, bitmask of allowed directions
     _DIR_BIT = {'s': 1, 'l': 2, 'r': 4, 't': 8, 'L': 16, 'R': 32}
     lane_arrow_dirs = _array.array('B')  # uint8 LE
+
+    # permission class: 0=pedestrian/other, 1=bicycle-only, 2=motorised
+    _MOTORISED = frozenset({'passenger', 'private', 'emergency', 'authority', 'army', 'vip',
+                            'bus', 'truck', 'trailer', 'motorcycle', 'moped', 'taxi', 'evehicle'})
+    lane_perm_cls = _array.array('B')  # uint8 LE
 
     for ei, edge in enumerate(net.getEdges()):
         edge_ids.append(edge.getID())
@@ -185,6 +190,19 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
             for conn in outgoing:
                 dirs |= _DIR_BIT.get(conn.getDirection(), 0)
             lane_arrow_dirs.append(dirs)
+
+            # --- permission class ---
+            try:
+                perms = frozenset(lane.getPermissions() or [])
+            except Exception:
+                perms = frozenset()
+            if not perms or perms & _MOTORISED:
+                perm_cls = 2  # motorised (or unrestricted)
+            elif 'bicycle' in perms:
+                perm_cls = 1  # bicycle only
+            else:
+                perm_cls = 0  # pedestrian / other
+            lane_perm_cls.append(perm_cls)
 
             # --- TLS bars ---
             if include_tls:
@@ -254,6 +272,7 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
         dashed_marking_starts=dashed_mark_starts.tobytes(),
         dashed_marking_positions=dashed_mark_pos.tobytes(),
         lane_arrow_directions=lane_arrow_dirs.tobytes(),
+        lane_perm_class=lane_perm_cls.tobytes(),
     )
     data = ng.SerializeToString()
     with open(cache_path, 'wb') as f:

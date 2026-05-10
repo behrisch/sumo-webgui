@@ -78,6 +78,10 @@ message NetworkGeometry {
   //   bit 2 (4)  = right (r)       bit 3 (8)  = u-turn (t)
   //   bit 4 (16) = partial-left (L) bit 5 (32) = partial-right (R)
   bytes           lane_arrow_directions    = 22; // u8[]  LE — one byte per lane
+
+  // Lane permission class — one byte per lane:
+  //   0 = pedestrian/other  1 = bicycle only  2 = motorised (passenger/bus/truck/…)
+  bytes           lane_perm_class          = 23; // u8[]  LE — one byte per lane
 }
 
 message EdgeData {
