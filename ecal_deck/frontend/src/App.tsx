@@ -8,7 +8,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
-import { buildNetworkLayer } from './layers/NetworkLayer';
+import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer } from './layers/NetworkLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
 import { buildPersonLayer, buildContainerLayer } from './layers/PersonLayer';
@@ -54,6 +54,13 @@ export interface ParsedNetwork {
   // tls
   tlsPositions: Float64Array;
   tlsEntries: TlsEntry[];
+  // lane markings
+  solidMarkingStarts: Uint32Array;
+  solidMarkingPositions: Float64Array;
+  dashedMarkingStarts: Uint32Array;
+  dashedMarkingPositions: Float64Array;
+  // turning arrows — one byte per lane, direction bitmask
+  laneArrowDirs: Uint8Array;
 }
 
 // ts-proto decodes bytes fields as Uint8Array with a potentially non-zero byteOffset
@@ -87,6 +94,18 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const junctionStarts   = toUint32(msg.junction_starts);
   const junctionPositions = toFloat64(msg.junction_positions);
   const tlsPositions     = toFloat64(msg.tls_positions);
+
+  // Lane markings
+  const solidMarkingStarts    = toUint32(msg.solid_marking_starts);
+  const solidMarkingPositions = toFloat64(msg.solid_marking_positions);
+  const dashedMarkingStarts    = toUint32(msg.dashed_marking_starts);
+  const dashedMarkingPositions = toFloat64(msg.dashed_marking_positions);
+
+
+  // Arrow directions — raw Uint8Array (already one byte per lane, no alignment issue)
+  const laneArrowDirs = msg.lane_arrow_directions instanceof Uint8Array
+    ? msg.lane_arrow_directions
+    : new Uint8Array(msg.lane_arrow_directions);
 
   // Per-lane bounding boxes for viewport culling, plus overall network bbox.
   const laneCount0 = msg.lane_ids.length;
@@ -154,6 +173,11 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     junctionIds: msg.junction_ids,
     tlsPositions,
     tlsEntries: msg.tls_entries,
+    solidMarkingStarts,
+    solidMarkingPositions,
+    dashedMarkingStarts,
+    dashedMarkingPositions,
+    laneArrowDirs,
   };
 }
 
@@ -318,6 +342,16 @@ export default function App() {
     [parsed],
   );
 
+  // Lane markings and turning arrows — also static, memoized on parsed.
+  const markingLayers = useMemo(
+    () => parsed ? buildMarkingLayer(parsed) : [],
+    [parsed],
+  );
+  const arrowLayer = useMemo(
+    () => parsed ? buildArrowLayer(parsed) : null,
+    [parsed],
+  );
+
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // included, so tessellation and accessor cost scale with visible lanes not total lanes.
   // activeView is read from the closure (not a dep): viewport is sampled at the moment
@@ -337,7 +371,9 @@ export default function App() {
     const result = [];
     if (visibility.junctions && junctionLayer) result.push(junctionLayer);
     if (visibility.edges     && edgeLayer)     result.push(edgeLayer);
+    if (visibility.edges)                      result.push(...markingLayers);
     if (edgeDataLayer)                         result.push(edgeDataLayer);
+    if (visibility.edges && arrowLayer)        result.push(arrowLayer);
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
@@ -348,7 +384,7 @@ export default function App() {
     if (visibility.containers)
       result.push(buildContainerLayer(simStep?.containers ?? []));
     return result;
-  }, [edgeLayer, junctionLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape]);
 
   if (!parsed || !activeView) {
     return (

@@ -94,7 +94,7 @@ def _net_file_from_cfg(sumocfg_path: str) -> str:
 
 
 
-_CACHE_VERSION = 2  # increment on any incompatible NetworkGeometry format change
+_CACHE_VERSION = 3  # increment on any incompatible NetworkGeometry format change
 
 
 def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
@@ -103,18 +103,6 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
     Skips regeneration if the cache is newer than the net file and the version matches.
     """
     cache_path = net_file + '.ecaldeck'
-    try:
-        if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
-            ng = sumo_pb2.NetworkGeometry()
-            with open(cache_path, 'rb') as f:
-                ng.ParseFromString(f.read())
-            if ng.version == _CACHE_VERSION:
-                print("Using cached network binary: %s" % cache_path)
-                return cache_path, ng
-            print("Cache version mismatch (%d != %d), rebuilding: %s" % (
-                ng.version, _CACHE_VERSION, cache_path))
-    except OSError:
-        pass
 
     geo_ref = net.hasGeoProj()
 
@@ -131,12 +119,29 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
     lane_cur    = 0
     tls_pos     = _array.array('d')
     tls_entries = []
+
+    # lane markings: solid outer edges + dashed dividers between adjacent lanes
+    solid_mark_starts = _array.array('I')  # uint32 LE
+    solid_mark_pos    = _array.array('d')  # float64 LE
+    solid_cur         = 0
+    dashed_mark_starts = _array.array('I')  # uint32 LE
+    dashed_mark_pos    = _array.array('d')  # float64 LE
+    dashed_cur         = 0
+
+    # turning arrows: one byte per lane, bitmask of allowed directions
+    _DIR_BIT = {'s': 1, 'l': 2, 'r': 4, 't': 8, 'L': 16, 'R': 32}
+    lane_arrow_dirs = _array.array('B')  # uint8 LE
+
     for ei, edge in enumerate(net.getEdges()):
         edge_ids.append(edge.getID())
-        for lane in edge.getLanes():
+        lanes = edge.getLanes()
+        n_lanes = len(lanes)
+        is_internal = edge.getID().startswith(':')
+        for li, lane in enumerate(lanes):
             lane_ids.append(lane.getID())
             lane_edge_idx.append(ei)
-            lane_widths.append(lane.getWidth())
+            w = lane.getWidth()
+            lane_widths.append(w)
             lane_starts.append(lane_cur)
             shape = lane.getShape()
             for x, y in shape:
@@ -144,8 +149,45 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                 lane_pos.append(lx)
                 lane_pos.append(ly)
             lane_cur += len(shape)
+
+            # --- lane markings (skip internal junction edges) ---
+            if not is_internal and len(shape) >= 2:
+                # Right boundary of rightmost lane → solid outer edge
+                if li == 0:
+                    rb = [(_xy(x, y)) for x, y in gh.move2side(shape, w / 2)]
+                    if len(rb) >= 2:
+                        solid_mark_starts.append(solid_cur)
+                        for x, y in rb:
+                            solid_mark_pos.append(x)
+                            solid_mark_pos.append(y)
+                        solid_cur += len(rb)
+                # Left boundary of each lane
+                lb = [(_xy(x, y)) for x, y in gh.move2side(shape, -w / 2)]
+                if len(lb) >= 2:
+                    if li == n_lanes - 1:
+                        # Leftmost lane → solid outer edge
+                        solid_mark_starts.append(solid_cur)
+                        for x, y in lb:
+                            solid_mark_pos.append(x)
+                            solid_mark_pos.append(y)
+                        solid_cur += len(lb)
+                    else:
+                        # Interior divider → dashed
+                        dashed_mark_starts.append(dashed_cur)
+                        for x, y in lb:
+                            dashed_mark_pos.append(x)
+                            dashed_mark_pos.append(y)
+                        dashed_cur += len(lb)
+
+            # --- arrow direction bitmask ---
+            outgoing = lane.getOutgoing()
+            dirs = 0
+            for conn in outgoing:
+                dirs |= _DIR_BIT.get(conn.getDirection(), 0)
+            lane_arrow_dirs.append(dirs)
+
+            # --- TLS bars ---
             if include_tls:
-                outgoing = lane.getOutgoing()
                 n = len(outgoing)
                 if n > 0:
                     for i, con in enumerate(outgoing):
@@ -165,6 +207,8 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                             tl_index=con.getTLLinkIndex(),
                         ))
     lane_starts.append(lane_cur)  # sentinel
+    solid_mark_starts.append(solid_cur)    # sentinel
+    dashed_mark_starts.append(dashed_cur)  # sentinel
 
     # junctions — full polygon vertices
     junc_starts = _array.array('I')  # uint32 LE
@@ -205,12 +249,19 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
         lane_widths=lane_widths.tobytes(),
         lane_edge_indices=lane_edge_idx.tobytes(),
         lane_ids=lane_ids,
+        solid_marking_starts=solid_mark_starts.tobytes(),
+        solid_marking_positions=solid_mark_pos.tobytes(),
+        dashed_marking_starts=dashed_mark_starts.tobytes(),
+        dashed_marking_positions=dashed_mark_pos.tobytes(),
+        lane_arrow_directions=lane_arrow_dirs.tobytes(),
     )
     data = ng.SerializeToString()
     with open(cache_path, 'wb') as f:
         f.write(data)
-    print("Built network binary: %d edges, %d lanes, %d junctions, %d tls, %d bytes" % (
-        len(edge_ids), len(lane_ids), len(junc_ids), len(tls_entries), len(data)))
+    print("Built network binary: %d edges, %d lanes, %d junctions, %d tls, "
+          "%d solid markings, %d dashed markings, %d bytes" % (
+              len(edge_ids), len(lane_ids), len(junc_ids), len(tls_entries),
+              len(solid_mark_starts) - 1, len(dashed_mark_starts) - 1, len(data)))
     return cache_path, ng
 
 
@@ -516,7 +567,15 @@ def main():
             cache_path = net_file + '.ecaldeck'
             cache_valid = False
             try:
-                cache_valid = os.path.getmtime(cache_path) >= os.path.getmtime(net_file)
+                if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
+                    ng = sumo_pb2.NetworkGeometry()
+                    with open(cache_path, 'rb') as f:
+                        ng.ParseFromString(f.read())
+                    if ng.version == _CACHE_VERSION:
+                        print("Using cached network binary: %s (version %d)" % (cache_path, ng.version))
+                        cache_valid = True
+                    print("Cache version mismatch (%d != %d), rebuilding: %s" % (
+                        ng.version, _CACHE_VERSION, cache_path))
             except OSError:
                 pass
 

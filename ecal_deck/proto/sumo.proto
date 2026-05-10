@@ -66,6 +66,18 @@ message NetworkGeometry {
   bytes           lane_widths        = 14; // f32[] LE — width in metres per lane
   bytes           lane_edge_indices  = 15; // u32[] LE — index into edge_ids per lane
   repeated string lane_ids           = 16;
+
+  // Lane markings (computed from sumolib geometry, already converted to final coords)
+  bytes           solid_marking_starts     = 18; // u32[] LE — cumulative vertex index per solid line
+  bytes           solid_marking_positions  = 19; // f64[] LE — [x0,y0,...] solid marking vertices
+  bytes           dashed_marking_starts    = 20; // u32[] LE — cumulative vertex index per dashed line
+  bytes           dashed_marking_positions = 21; // f64[] LE — [x0,y0,...] dashed marking vertices
+
+  // Turning arrows — one byte per lane, bit-field of allowed directions:
+  //   bit 0 (1)  = straight (s)    bit 1 (2)  = left (l)
+  //   bit 2 (4)  = right (r)       bit 3 (8)  = u-turn (t)
+  //   bit 4 (16) = partial-left (L) bit 5 (32) = partial-right (R)
+  bytes           lane_arrow_directions    = 22; // u8[]  LE — one byte per lane
 }
 
 message EdgeData {
