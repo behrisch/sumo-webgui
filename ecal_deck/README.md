@@ -8,52 +8,28 @@ Real-time SUMO simulation visualizer using deck.gl and MapLibre, communicating v
 |------------|---------|-------|-------|---------|
 | SUMO | built from source | — | — | — |
 | Python | 3.12 | system / pyenv | `brew install python@3.12` | python.org installer |
-| eclipse-ecal | any | `pip install eclipse-ecal` | `pip install eclipse-ecal` | `pip install eclipse-ecal` |
-| websockets | 16+ | `pip install websockets` | `pip install websockets` | `pip install websockets` |
-| protobuf | **6.x** | `pip install "protobuf<7"` | `pip install "protobuf<7"` | `pip install "protobuf<7"` |
-| libsumo | same as SUMO | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* | `pip install libsumo` *(optional)* |
-| protoc | 33.x | `apt install protobuf-compiler` | `brew install protobuf@6` | `winget install Google.Protobuf --version 33.4` |
+| Python packages | see `requirements.txt` | `pip install -r requirements.txt` | same | same |
+| protoc | 33.x | `apt install protobuf-compiler` | `brew install protobuf@6` | `winget install Google.Protobuf --version 33.5` |
 | Node.js | 18+ | `apt install nodejs` | `brew install node` | `winget install OpenJS.NodeJS` |
 | npm | 9+ | `apt install npm` | bundled with Node | bundled with Node |
 
 `$SUMO_HOME` must point to the SUMO repo root on all platforms.
 
-`libsumo` is optional but strongly recommended — it runs the simulation in-process (no socket
-overhead) and is significantly faster than the TraCI fallback. If `libsumo` is not available
-the publisher falls back to TraCI automatically. When SUMO is built from source, `libsumo` may
-already be available on the Python path via `$SUMO_HOME/tools`; `pip install libsumo` installs
-a pre-built standalone version.
+`libsumo` (listed in `requirements.txt`) is optional but strongly recommended — it runs the
+simulation in-process (no socket overhead) and is significantly faster than the TraCI fallback.
+If not available the publisher falls back to TraCI automatically.
 
 ## Platform notes
-
-### macOS
-
-The setup is nearly identical to Linux. One difference:
-
-**Python environment:** `tests/sumo_test_env/` was created on Linux and will not work on macOS.
-Create your own:
-```bash
-python3.12 -m venv ecal_deck/.venv
-source ecal_deck/.venv/bin/activate
-pip install eclipse-ecal websockets "protobuf<7" libsumo
-```
-Then update `PYTHON` in `run.sh` to `ecal_deck/.venv/bin/python`.
 
 ### Windows
 
 **Activate the Python environment (Command Prompt):**
 ```bat
-tests\sumo_test_env\Scripts\activate.bat
+..\ecal_env\Scripts\activate.bat
 ```
 or PowerShell:
 ```powershell
-tests\sumo_test_env\Scripts\Activate.ps1
-```
-As with macOS, `tests/sumo_test_env/` is Linux-specific. Create your own:
-```powershell
-python -m venv ecal_deck\.venv
-ecal_deck\.venv\Scripts\Activate.ps1
-pip install eclipse-ecal websockets "protobuf<7" libsumo
+..\ecal_env\Scripts\Activate.ps1
 ```
 
 **Set SUMO_HOME (Command Prompt):**
@@ -84,42 +60,39 @@ winget install Google.Protobuf --version 33.4
 
 ## One-time setup
 
-All commands are run from the SUMO repo root (`$SUMO_HOME`).
+All commands are run from the directory containing `ecal_deck/` (the repo root).
 
-**1. Activate the Python environment and set SUMO_HOME:**
+**1. Create the Python environment:**
 
 Linux / macOS:
 ```bash
-source tests/sumo_test_env/bin/activate   # or ecal_deck/.venv/bin/activate on macOS
-export SUMO_HOME=$PWD
+python3 -m venv ecal_env
+source ecal_env/bin/activate
+pip install -r ecal_deck/requirements.txt
 ```
 Windows (PowerShell):
 ```powershell
-ecal_deck\.venv\Scripts\Activate.ps1
-$env:SUMO_HOME = (Get-Location).Path
+python -m venv ecal_env
+ecal_env\Scripts\Activate.ps1
+pip install -r ecal_deck\requirements.txt
 ```
 
-**2. Generate Python protobuf bindings:**
+**2. Install frontend dependencies:**
 ```bash
-protoc -I ecal_deck/proto --python_out=ecal_deck/proto ecal_deck/proto/sumo.proto
+cd ecal_deck/frontend && npm install && cd ../..
 ```
+(This step is optional since it is also executed by run.sh.)
 
-**3. Install frontend dependencies and generate TypeScript types:**
-```bash
-cd ecal_deck/frontend
-npm install       # installs deck.gl, MapLibre, React, Vite, ts-proto, …
-npm run generate  # generates src/generated/sumo.ts from proto/sumo.proto (via generate.ts + tsx)
-cd ../..
-```
-
-> `npm run generate` is also called automatically by `npm run dev` and `npm run build`,
-> so after the initial run you only need to re-run it manually if you change `sumo.proto`
-> without starting the dev server.
+Protobuf bindings (both Python and TypeScript) are generated automatically by `run.sh` on every
+start via `npm run generate`. No manual `protoc` invocation is needed.
 
 ## Running
 
+The easiest way is to just start run.sh but sometimes you need to start processes
+separately for debugging purposes. If this is the case, see below.
+
 Three processes are required, each in its own terminal. All assume you have activated the
-Python environment and set `SUMO_HOME` as above.
+Python environment or use the python executable from the environment.
 
 **Terminal 1 — Publisher** (starts SUMO and publishes to eCAL):
 ```bash
@@ -150,12 +123,10 @@ Open http://localhost:5173 in a browser.
 
 ## Re-generating after proto changes
 
-If you modify `proto/sumo.proto`:
+If you modify `proto/sumo.proto`, both Python and TypeScript bindings are regenerated
+automatically the next time you run `./run.sh`. To regenerate manually without starting the
+full stack:
 ```bash
-# Python bindings
-protoc -I ecal_deck/proto --python_out=ecal_deck/proto ecal_deck/proto/sumo.proto
-
-# TypeScript types (or just run npm run dev / npm run build)
 cd ecal_deck/frontend && npm run generate
 ```
 

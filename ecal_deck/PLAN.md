@@ -465,6 +465,16 @@ uncached: [traci.start ~30s                              ]
 
 ### Near-term
 
+- **Edge coloring broken + slow on large networks**: selecting an edge attribute for coloring
+  does not visually work, and on large networks enabling edge data coloring makes the simulation
+  very slow. Two separate problems to investigate: (1) the color mapping in `EdgeDataLayer.ts`
+  — verify that `edgeValueMap` is populated for the selected attribute, that the per-frame
+  min/max normalisation produces a sensible range (not 0–0), and that the color array is
+  actually being read by the `PathLayer` `getColor` accessor; (2) the per-frame cost of
+  rebuilding the color array for all lanes on large networks — the rebuild iterates every lane
+  every frame even when values haven't changed; add a dirty flag or version check so the array
+  is only rebuilt when `edgeValueVersion` changes.
+
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
 
