@@ -302,6 +302,7 @@ def main():
     args = parse_args()
     if args.sumo_cfg and not os.path.exists(args.sumo_cfg):
         print("Cannot find --sumo-cfg '%s'. Use the GUI or send a 'load' service command to start a simulation." % args.sumo_cfg)
+        args.sumo_cfg = None
     sumo_bin = os.path.join(SUMO_HOME, "bin", "sumo")
 
     # --- init eCAL and publishers ---
