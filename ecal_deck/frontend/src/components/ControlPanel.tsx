@@ -62,8 +62,8 @@ const sel: React.CSSProperties = {
 };
 
 export function ControlPanel(p: Props) {
-  const t = ((p.simStep?.time_ms ?? 0) / 1000).toFixed(1);
-  const n = p.simStep?.vehicles?.length ?? 0;
+  const t = p.simStep != null ? ((p.simStep.time_ms ?? 0) / 1000).toFixed(1) : null;
+  const n = p.simStep != null ? (p.simStep.vehicles?.length ?? 0) : null;
 
   const cfgName = p.cfgPath ? p.cfgPath.split('/').pop() : null;
 
@@ -93,7 +93,9 @@ export function ControlPanel(p: Props) {
         <button style={{ ...btn, opacity: p.cfgPath ? 1 : 0.4 }} title="Reload current simulation"
           onClick={p.onReload} disabled={!p.cfgPath}>↺</button>
         <span style={{ opacity: p.connected ? 1 : 0.5, flex: 1 }}>
-          {p.connected ? `t=${t}s  ${n}v` : '⚠ disconnected'}
+          {p.connected
+            ? (t != null ? `t=${t}s  ${n}v` : 't=–  –v')
+            : '⚠ disconnected'}
         </span>
       </div>
 

@@ -667,8 +667,8 @@ def main():
             # network_cache_path already set by bg_thread when cache was ready
             _log("INFO", "Published network (cache: %s)" % cp)
 
-            # reset per-sim state
-            ctrl["paused"] = False
+            # reset per-sim state — start paused so the user can inspect before running
+            ctrl["paused"] = True
             ctrl["interval_current"] = ctrl["interval_min"]
             ctrl["at_min_bound"] = False
             ctrl["at_max_bound"] = False

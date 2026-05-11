@@ -152,6 +152,8 @@ export function useSimSocket(url: string): SimState {
           }
           case TYPE_NETWORK:
             edgeValueMapRef.current.clear();
+            latestSimStep.current = null;
+            setSimStep(null);
             setNetwork(NetworkGeometry.decode(payload));
             break;
         }

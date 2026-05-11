@@ -246,6 +246,7 @@ export default function App() {
     setCfgPath(path);
     if (loadingToastId.current) toast.dismiss(loadingToastId.current);
     loadingToastId.current = toast.loading('Loading simulation…') as string;
+    setPaused(true); // server always starts paused after load
     sendCommand('load', { sumocfg_path: path }, (resp) => {
       if (!resp.ok) {
         toast.dismiss(loadingToastId.current ?? undefined);
@@ -259,6 +260,8 @@ export default function App() {
     if (network && loadingToastId.current) {
       toast.success('Simulation loaded', { id: loadingToastId.current });
       loadingToastId.current = null;
+      // Sync paused/delay state from server — simulation starts paused after load.
+      sendCommand('get_state');
     }
   }, [network]);
 
