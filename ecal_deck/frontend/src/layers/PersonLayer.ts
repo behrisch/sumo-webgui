@@ -33,7 +33,7 @@ function buildAgentLayer(
       length: N,
       attributes: {
         getPosition: { value: positions, size: 2 },
-        getColor:    { value: colors,    size: 4 },
+        getColor:    { value: colors,    size: 4, normalized: true },
         getAngle:    { value: angles,    size: 1 },
       },
     } as unknown as object[],

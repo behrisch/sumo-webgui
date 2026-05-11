@@ -716,3 +716,63 @@ No "More info" service call needed initially (persons have fewer queryable attri
 2. Publisher — person + container collection in step loop
 3. `PersonLayer.ts` — binary ScatterplotLayer for persons + containers
 4. `App.tsx` / `useSimSocket` — consume `simStep.persons` / `simStep.containers`; visibility toggle; picking
+
+---
+
+## Network Load Delay Investigation — Findings (2026-05-11)
+
+### Problem
+Network took 50–90 s to appear in the browser after page load. Second loads (via the Load
+button) were completely broken and never delivered the new network.
+
+### Root Causes Found
+
+**1. WebSocket `write_limit` throttling**
+`websockets.serve` defaults to a 32 KB write-limit high-water mark. Sending a 225 MB binary
+frame at 32 KB per asyncio iteration requires ~7 000 loop iterations, adding several seconds
+of latency even on loopback. Fixed: `write_limit=256*1024*1024`.
+
+**2. eCAL pub/sub discovery delay**
+`pub_network.get_subscriber_count()` returns 0 for 30+ seconds after the bridge subscriber
+connects — eCAL peer-discovery is slow. Mitigated by adding a `_network_poller` coroutine in
+the bridge that polls the `get_state` service every second and reads the cache file directly,
+independent of eCAL pub/sub timing.
+
+**3. libsumo GIL hold — the main bottleneck**
+`libsumo.load()` (inside `traci.start()`) holds the Python GIL for the entire network-loading
+phase (~60 s for Berlin). `bg_thread` — which builds the cache and sends the eCAL message —
+was completely blocked for that entire duration.
+
+Fix: join `bg_thread` (cache read + eCAL publish) **before** calling `traci.start()`, while
+the GIL is free. Then `time.sleep(1.0)` to let the bridge receive the eCAL message and read
+the 225 MB file into `_network_frame` before libsumo locks the GIL.
+
+**4. Second-load broken — wrong service name check**
+The bridge cleared `_network_frame` only when `service == "load_simulation"`, but the frontend
+sends `service == "load"`. The frame was never cleared, so both the eCAL callback and the
+poller short-circuited on the stale first-sim frame. Fix: check `"load"`.
+
+### Result
+- First load: ~20–22 s (down from 50–90 s). Remaining delay is SUMO's own startup — unavoidable.
+- Second load: works correctly within the same window.
+- No duplicate frame deliveries.
+
+
+---
+
+## TypeScript Status
+
+`npx tsc --noEmit` passes with **zero errors** as of 2026-05-11.
+The 5 type errors previously noted in `EdgeDataLayer.ts`, `PersonLayer.ts`, `VehicleLayer.ts`, and `App.tsx` are resolved.
+
+---
+
+## Console Warning Cleanup (2026-05-11)
+
+Three browser console warnings were addressed:
+
+| Warning | Source | Fix |
+|---|---|---|
+| `deck: Attribute instanceColors is normalized` | deck.gl binary attribute without explicit `normalized` flag | Added `normalized: true` to `getColor: { value: colors, size: 4 }` in `VehicleLayer.ts` and `PersonLayer.ts` |
+| `WEBGL_debug_renderer_info is deprecated` | luma.gl reading a Firefox-deprecated WebGL extension | **Not fixable**: Firefox emits this as a native browser warning (not via `console.warn`), so JS-level filtering doesn't work. Would require patching `WebGLRenderingContext.prototype.getExtension` — deemed not worth the effort. |
+| `Expected value to be of type number, but found null` | MapLibre basemap tile data has null values for numeric style expressions | Left visible — may be useful to detect style/data issues |

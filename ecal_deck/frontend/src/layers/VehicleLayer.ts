@@ -42,7 +42,7 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
       id: 'vehicles',
       data: { length: N, attributes: {
         getPosition: { value: positions, size: 2 },
-        getColor:    { value: colors,    size: 4 },
+        getColor:    { value: colors,    size: 4, normalized: true },
         getAngle:    { value: angles,    size: 1 },
         getSize:     { value: sizes,     size: 1 },
       } } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -62,7 +62,7 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
     id: 'vehicles',
     data: { length: N, attributes: {
       getPosition: { value: positions, size: 2 },
-      getColor:    { value: colors,    size: 4 },
+      getColor:    { value: colors,    size: 4, normalized: true },
       getAngle:    { value: angles,    size: 1 },
     } } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     iconAtlas:     cfg.atlas,
