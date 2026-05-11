@@ -116,6 +116,7 @@ message GetStateResponse {
   int32  step_interval_current = 4;
   bool   step_at_min_bound     = 5;
   bool   step_at_max_bound     = 6;
+  string network_cache_path    = 7; // path to .ecaldeck file; empty if no network loaded
 }
 
 message GetAttributesRequest  {}

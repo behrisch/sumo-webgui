@@ -11,7 +11,7 @@ Binary frame layout: [u8 msg_type][protobuf payload bytes]
 Commands and responses remain JSON text frames (unchanged).
 
 Usage:
-  python ecal_ws_bridge.py [--ws-port 8765] [--no-compress]
+  python ecal_ws_bridge.py [--ws-port 8765] [--compress]
 """
 
 import argparse
@@ -19,7 +19,6 @@ import asyncio
 import json
 import os
 import sys
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 import websockets
@@ -67,6 +66,7 @@ _connected: set = set()
 _network_frame: bytes | None = None           # cached type-5 frame for late joiners
 _edgedata_snapshot_frame: bytes | None = None # cached type-3 full-snapshot frame for late joiners
 _loop: asyncio.AbstractEventLoop | None = None
+_poller_task: asyncio.Task | None = None      # current _network_poller task
 
 # Latest-value semantics for high-frequency topics: callback overwrites; flush loop sends once.
 # Log messages are low-frequency and must not be dropped.
@@ -166,19 +166,70 @@ async def _flush_loop() -> None:
             )
 
 
+async def _network_poller() -> None:
+    """Poll get_state every second until network_cache_path is available.
+
+    This is the primary delivery path for the initial network frame. It does not
+    depend on eCAL pub/sub discovery timing: the publisher sets network_cache_path
+    via the ctrl dict as soon as the cache is ready (while SUMO is still loading),
+    and the service call reads it back reliably even if eCAL pub/sub hasn't
+    propagated the subscription yet.
+    """
+    global _network_frame
+    while True:
+        await asyncio.sleep(1.0)
+        if _network_frame is not None:
+            return  # eCAL pub/sub already delivered it; nothing to do
+        loop = asyncio.get_running_loop()
+        state = await loop.run_in_executor(None, _call_service, "get_state", {})
+        if _network_frame is not None:
+            return  # _make_callback delivered it while we were waiting on get_state
+        cache_path = state.get("network_cache_path", "")
+        if not cache_path:
+            continue
+        try:
+            with open(cache_path, 'rb') as f:
+                ng_bytes = f.read()
+            frame = bytes([_TYPE_NETWORK]) + ng_bytes
+            _network_frame = frame
+            _reliable_send_bytes(frame)
+            return
+        except OSError as exc:
+            print("bridge poller: failed to read %r: %s" % (cache_path, exc))
+
+
 # ---------------------------------------------------------------------------
 # asyncio: WebSocket handler
 # ---------------------------------------------------------------------------
 async def _handler(websocket) -> None:
+    global _network_frame, _edgedata_snapshot_frame, _poller_task
     try:
-        if _network_frame is not None:
-            await websocket.send(_network_frame)
+        # Send network frame: prefer the cached eCAL-delivered frame; fall back to
+        # reading the cache file via get_state if eCAL topic delivery hasn't fired yet
+        # (happens when the bridge missed the publish due to slow eCAL discovery).
+        net_frame = _network_frame
+        if net_frame is None:
+            loop = asyncio.get_running_loop()
+            state = await loop.run_in_executor(None, _call_service, "get_state", {})
+            cache_path = state.get("network_cache_path", "")
+            if cache_path:
+                try:
+                    with open(cache_path, 'rb') as f:
+                        ng_bytes = f.read()
+                    net_frame = bytes([_TYPE_NETWORK]) + ng_bytes
+                except OSError:
+                    pass
+            await websocket.send(json.dumps({"type": "state", "data": state}))
+        else:
+            loop = asyncio.get_running_loop()
+            state = await loop.run_in_executor(None, _call_service, "get_state", {})
+            await websocket.send(json.dumps({"type": "state", "data": state}))
+
+        if net_frame is not None:
+            await websocket.send(net_frame)
         if _edgedata_snapshot_frame is not None:
             await websocket.send(_edgedata_snapshot_frame)
 
-        loop = asyncio.get_running_loop()
-        state = await loop.run_in_executor(None, _call_service, "get_state", {})
-        await websocket.send(json.dumps({"type": "state", "data": state}))
         attrs = await loop.run_in_executor(None, _call_service, "get_attributes", {})
         await websocket.send(json.dumps({"type": "attributes", "data": attrs}))
     except Exception:
@@ -193,8 +244,18 @@ async def _handler(websocket) -> None:
                 continue
 
             if msg.get("type") == "command":
+                service = msg.get("service")
+                # A new load invalidates the cached network frame.  Clear it now so
+                # _make_callback and _network_poller don't short-circuit on the stale
+                # frame from the previous simulation.
+                if service == "load":
+                    _network_frame = None
+                    _edgedata_snapshot_frame = None
+                    if _poller_task and not _poller_task.done():
+                        _poller_task.cancel()
+                    _poller_task = asyncio.create_task(_network_poller())
                 response = await asyncio.get_running_loop().run_in_executor(
-                    None, _call_service, msg.get("service"), msg.get("request", {})
+                    None, _call_service, service, msg.get("request", {})
                 )
                 await websocket.send(json.dumps({
                     "type": "response",
@@ -211,7 +272,7 @@ async def _handler(websocket) -> None:
 # main
 # ---------------------------------------------------------------------------
 async def _run(ws_port: int, compress: bool) -> None:
-    global _loop, _svc_client
+    global _loop, _svc_client, _poller_task
     _loop = asyncio.get_running_loop()
 
     ecal_core.initialize("sumo_ecal_bridge")
@@ -224,9 +285,16 @@ async def _run(ws_port: int, compress: bool) -> None:
         subscribers.append(sub)
 
     asyncio.create_task(_flush_loop())
+    _poller_task = asyncio.create_task(_network_poller())
 
     compression = 'deflate' if compress else None
-    async with websockets.serve(_handler, "0.0.0.0", ws_port, compression=compression):
+    # write_limit: raise asyncio flow-control high-water mark to 256 MB.
+    # With the default 32 KB write_limit, sending a 225 MB binary frame requires
+    # ~7000 asyncio iterations, each stalling the event loop — adding ~7 s of latency
+    # even on loopback. A 256 MB limit lets the OS socket buffer drain independently.
+    async with websockets.serve(_handler, "0.0.0.0", ws_port,
+                                compression=compression,
+                                write_limit=256 * 1024 * 1024):
         print("Bridge listening on ws://0.0.0.0:%d (compression=%s)" % (
             ws_port, 'deflate' if compress else 'off'))
         await asyncio.Future()
@@ -235,11 +303,11 @@ async def _run(ws_port: int, compress: bool) -> None:
 def main():
     p = argparse.ArgumentParser(description="eCAL → WebSocket bridge for SUMO")
     p.add_argument("--ws-port", type=int, default=8765)
-    p.add_argument("--no-compress", action="store_true",
-                   help="Disable permessage-deflate WebSocket compression")
+    p.add_argument("--compress", action="store_true",
+                   help="Enable permessage-deflate WebSocket compression (not recommended: slow for large binary frames)")
     args = p.parse_args()
     try:
-        asyncio.run(_run(args.ws_port, compress=not args.no_compress))
+        asyncio.run(_run(args.ws_port, compress=args.compress))
     except KeyboardInterrupt:
         pass
     finally:

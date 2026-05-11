@@ -108,7 +108,11 @@ export function useSimSocket(url: string): SimState {
         if (ws.readyState === WebSocket.CONNECTING) ws.close();
       }, 3000);
 
-      ws.onopen = () => { clearTimeout(connTimeout); setConnected(true); setReconnectAttempt(0); };
+      ws.onopen = () => {
+        clearTimeout(connTimeout);
+        setConnected(true);
+        setReconnectAttempt(0);
+      };
 
       const dispatchBinary = (buf: ArrayBuffer) => {
         const bytes = new Uint8Array(buf);

@@ -42,7 +42,7 @@ export interface ParsedNetwork {
   laneEdgeIndices: Uint32Array;
   laneIds: string[];
   laneBBoxes: Float32Array;       // [minX, minY, maxX, maxY] per lane, for viewport culling
-  edgeLaneIndices: Map<string, number[]>;  // edge ID → lane indices (reverse of laneEdgeIndices)
+  edgeLanesByIdx: number[][];     // edge integer index → lane indices (replaces string-keyed Map)
   // edges — used for data queries and lane→edge resolution
   edgeIds: string[];
   edgeIdToIndex: Map<string, number>;
@@ -154,11 +154,12 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const edgeIdToIndex = new Map<string, number>();
   msg.edge_ids.forEach((id, i) => edgeIdToIndex.set(id, i));
 
-  const edgeLaneIndices = new Map<string, number[]>();
+  // Integer-indexed: avoids 728K string-key Map insertions (saves ~400 ms on large networks)
+  const edgeLanesByIdx: number[][] = new Array(msg.edge_ids.length);
   for (let li = 0; li < msg.lane_ids.length; li++) {
-    const eid = msg.edge_ids[laneEdgeIndices[li]];
-    const arr = edgeLaneIndices.get(eid);
-    if (arr) arr.push(li); else edgeLaneIndices.set(eid, [li]);
+    const ei = laneEdgeIndices[li];
+    if (edgeLanesByIdx[ei]) edgeLanesByIdx[ei].push(li);
+    else edgeLanesByIdx[ei] = [li];
   }
 
   return {
@@ -173,7 +174,7 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     laneBBoxes,
     edgeIds: msg.edge_ids,
     edgeIdToIndex,
-    edgeLaneIndices,
+    edgeLanesByIdx,
     junctionCount: msg.junction_ids.length,
     junctionStarts,
     junctionPositions,
@@ -345,20 +346,20 @@ export default function App() {
   // Static network layers — memoized on parsed only so the layer instances are stable
   // across frames. deck.gl skips GPU re-upload and junction re-tessellation when the
   // same instance is passed again.
-  const [edgeLayer, junctionLayer] = useMemo(
-    () => parsed ? buildNetworkLayer(parsed) : [null, null],
-    [parsed],
-  );
+  const [edgeLayer, junctionLayer] = useMemo(() => {
+    if (!parsed) return [null, null];
+    return buildNetworkLayer(parsed);
+  }, [parsed]);
 
   // Lane markings and turning arrows — also static, memoized on parsed.
-  const markingLayers = useMemo(
-    () => parsed ? buildMarkingLayer(parsed) : [],
-    [parsed],
-  );
-  const arrowLayer = useMemo(
-    () => parsed ? buildArrowLayer(parsed) : null,
-    [parsed],
-  );
+  const markingLayers = useMemo(() => {
+    if (!parsed) return [];
+    return buildMarkingLayer(parsed);
+  }, [parsed]);
+  const arrowLayer = useMemo(() => {
+    if (!parsed) return null;
+    return buildArrowLayer(parsed);
+  }, [parsed]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // included, so tessellation and accessor cost scale with visible lanes not total lanes.

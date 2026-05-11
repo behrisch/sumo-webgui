@@ -25,7 +25,9 @@ export function buildEdgeDataLayer(
     if (val < min) min = val;
     if (val > max) max = val;
 
-    const lanes = parsed.edgeLaneIndices.get(edgeId);
+    const ei = parsed.edgeIdToIndex.get(edgeId);
+    if (ei === undefined) continue;
+    const lanes = parsed.edgeLanesByIdx[ei];
     if (!lanes) continue;
     for (const li of lanes) {
       const b = li * 4;

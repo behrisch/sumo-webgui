@@ -56,13 +56,6 @@ def _make_publisher(topic: str, proto_type_name: str) -> ecal_core.Publisher:
     return ecal_core.Publisher(topic, dti)
 
 
-def _wait_for_subscriber(pub: ecal_core.Publisher, timeout: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout
-    while pub.get_subscriber_count() == 0:
-        if time.monotonic() > deadline:
-            print("Warning: no subscriber after %.0f s -- still waiting" % timeout)
-        time.sleep(0.1)
-
 
 def _make_geo_converter(proj_parameter: str, net_offset: str):
     """Build an (x, y) → (lon, lat) converter using sumolib's own implementation.
@@ -382,6 +375,7 @@ def main():
         "vehicle_attributes":   [],
         "edge_attributes":      [],
         "sumocfg_path":         args.sumo_cfg or "",
+        "network_cache_path":   "",
         "interval_min":         1,
         "interval_max":         10,
         "autotune":             True,
@@ -587,58 +581,77 @@ def main():
 
             net_file   = _net_file_from_cfg(sumocfg_path)
             cache_path = net_file + '.ecaldeck'
-            cache_valid = False
-            try:
-                if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
-                    ng = sumo_pb2.NetworkGeometry()
-                    with open(cache_path, 'rb') as f:
-                        ng.ParseFromString(f.read())
-                    if ng.version == _CACHE_VERSION:
-                        print("Using cached network binary: %s (version %d)" % (cache_path, ng.version))
-                        cache_valid = True
-                    print("Cache version mismatch (%d != %d), rebuilding: %s" % (
-                        ng.version, _CACHE_VERSION, cache_path))
-            except OSError:
-                pass
 
-            # Both branches start a background thread that runs concurrently with
+            # Start a background thread that runs concurrently with
             # traci.start() so neither readNet nor proto-read nor subscriber-wait
             # adds to the wall-clock load time.
-            _bg_ng: list = []   # filled with NetworkGeometry by whichever thread runs
+            _bg_ng: list = []   # filled with (cache_path, NetworkGeometry) by bg thread
 
-            if cache_valid:
-                # Read + publish the cached proto while SUMO loads.
-                def _read_and_publish_cache():
-                    try:
-                        ng = sumo_pb2.NetworkGeometry()
+            # readNet + build cache + publish, all while SUMO loads.
+            def _readnet_build_publish():
+                cached_geometry = None
+                try:
+                    if os.path.getmtime(cache_path) >= os.path.getmtime(net_file):
+                        cached_geometry = sumo_pb2.NetworkGeometry()
                         with open(cache_path, 'rb') as f:
-                            ng.ParseFromString(f.read())
-                        _bg_ng.append(ng)
-                        _wait_for_subscriber(pub_network)
-                        nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced,
-                                                  cache_path=cache_path)
-                        pub_network.send(nd.SerializeToString())
-                    except Exception as exc:
-                        print("ERROR in _read_and_publish_cache: %s" % exc)
-                        traceback.print_exc()
-                bg_thread = threading.Thread(target=_read_and_publish_cache, daemon=True)
-            else:
-                # readNet + build cache + publish, all while SUMO loads.
-                def _readnet_build_publish():
-                    try:
+                            cached_geometry.ParseFromString(f.read())
+                        if cached_geometry.version == _CACHE_VERSION:
+                            print("Using cached network binary: %s (version %d)"
+                                  % (cache_path, cached_geometry.version))
+                        else:
+                            print("Cache version mismatch (%d != %d), rebuilding: %s"
+                                % (cached_geometry.version, _CACHE_VERSION, cache_path))
+                            cached_geometry = None
+                except OSError:
+                    cached_geometry = None
+                try:
+                    if cached_geometry:
+                        cp, ng = cache_path, cached_geometry
+                    else:
                         net = sumolib.net.readNet(net_file, withInternal=False)
                         cp, ng = _build_network_binary(net, net_file,
                                                        include_tls=len(net.getTrafficLights()) > 0)
-                        _bg_ng.append(ng)
-                        _wait_for_subscriber(pub_network)
-                        nd = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp)
-                        pub_network.send(nd.SerializeToString())
-                    except Exception as exc:
-                        print("ERROR in _readnet_build_publish: %s" % exc)
-                        traceback.print_exc()
-                bg_thread = threading.Thread(target=_readnet_build_publish, daemon=True)
-
+                    _bg_ng.append((cp, ng))
+                    # Set cache path immediately so get_state can return it while SUMO loads.
+                    # The bridge polls get_state and can serve the network file via service
+                    # without depending on eCAL pub/sub discovery timing.
+                    ctrl["network_cache_path"] = cp
+                    nd_bytes = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp).SerializeToString()
+                    # Initial synchronous send: triggers bridge _make_callback while GIL is available.
+                    # bg_thread.join() in _do_load won't return until after this, giving the bridge
+                    # time to receive the eCAL message and read the cache file before traci.start()
+                    # locks the GIL for ~60 seconds.
+                    pub_network.send(nd_bytes)
+                    sc = pub_network.get_subscriber_count()
+                    if sc == 0:
+                        # Bridge subscriber not yet discovered by eCAL; retry until it appears.
+                        # This daemon thread will be blocked by libsumo's GIL during traci.start()
+                        # but will fire once SUMO finishes loading (GIL released).
+                        def _publish_until_delivered():
+                            for i in range(60):
+                                time.sleep(1.0)
+                                if pub_network.get_subscriber_count() > 0:
+                                    pub_network.send(nd_bytes)
+                                    break
+                        threading.Thread(target=_publish_until_delivered, daemon=True).start()
+                except Exception as exc:
+                    print("ERROR in _readnet_build_publish: %s" % exc)
+                    traceback.print_exc()
+            bg_thread = threading.Thread(target=_readnet_build_publish, daemon=True)
             bg_thread.start()
+            # Join BEFORE traci.start(): libsumo holds the Python GIL for the entire
+            # network-load phase (~60s for large nets), so bg_thread cannot run at all
+            # while traci.start() is executing.  By joining first, the network is built,
+            # ctrl["network_cache_path"] is set, and the initial eCAL send has fired —
+            # all while the GIL is still available.
+            bg_thread.join()
+            if not _bg_ng:
+                _log("ERROR", "Network build/load failed — step loop not started. Check output above.")
+                return
+            cp, ng = _bg_ng[0]
+            # Sleep briefly so the bridge has time to receive the eCAL message and read
+            # the 225 MB cache file into _network_frame before traci.start() locks the GIL.
+            time.sleep(1.0)
 
             # start SUMO — log socket uses SUMO's "host:port" file syntax
             cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
@@ -646,18 +659,13 @@ def main():
             traci.start(cmd)
             _log("INFO", "SUMO started: %s" % sumocfg_path)
 
-            bg_thread.join()  # brief or free: SUMO startup dominates
-            if not _bg_ng:
-                _log("ERROR", "Network build/load failed — step loop not started. Check output above.")
-                return
-            ng = _bg_ng[0]
-
             sim["geo_referenced"] = ng.geo_referenced
             sim["converter"]      = _make_geo_converter(ng.proj_parameter, ng.net_offset)
             sim["all_edges"]      = list(ng.edge_ids)
             sim["has_tls"]        = bool(ng.tls_entries)
             ctrl["sumocfg_path"]  = sumocfg_path
-            _log("INFO", "Published network (cache: %s)" % cache_path)
+            # network_cache_path already set by bg_thread when cache was ready
+            _log("INFO", "Published network (cache: %s)" % cp)
 
             # reset per-sim state
             ctrl["paused"] = False
@@ -727,6 +735,7 @@ def main():
         resp = sumo_pb2.GetStateResponse(
             delay_ms=ctrl["delay_ms"], paused=ctrl["paused"],
             sumocfg_path=ctrl["sumocfg_path"],
+            network_cache_path=ctrl["network_cache_path"],
             step_interval_current=ctrl["interval_current"],
             step_at_min_bound=ctrl["at_min_bound"],
             step_at_max_bound=ctrl["at_max_bound"])
