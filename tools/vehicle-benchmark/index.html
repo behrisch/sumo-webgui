@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Vehicle Render Benchmark</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #fff; font-family: monospace; overflow: hidden; }
+    #canvas-container { width: 100vw; height: 100vh; }
+    #ui {
+      position: absolute; top: 12px; left: 12px;
+      background: rgba(0,0,0,0.7); padding: 12px 16px;
+      border-radius: 6px; display: flex; flex-direction: column; gap: 8px;
+      min-width: 240px; font-size: 13px;
+    }
+    #ui h2 { font-size: 14px; opacity: 0.8; margin-bottom: 2px; }
+    .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+    button {
+      background: #333; color: #fff; border: 1px solid #555;
+      border-radius: 3px; padding: 4px 10px; cursor: pointer; font-family: monospace;
+    }
+    button.active { background: #0078d4; border-color: #0078d4; }
+    #stats { opacity: 0.75; line-height: 1.7; }
+    label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    input[type=range] { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="ui">
+    <h2>Vehicle Render Benchmark</h2>
+
+    <div>
+      <div style="opacity:0.6;font-size:11px;margin-bottom:4px">RENDERER</div>
+      <div class="btn-group">
+        <button id="btn-icon"    class="active">IconLayer</button>
+        <button id="btn-mesh">SimpleMesh</button>
+        <button id="btn-poly">PolygonLayer</button>
+      </div>
+    </div>
+
+    <div>
+      <div style="opacity:0.6;font-size:11px;margin-bottom:4px">OPTIONS</div>
+      <label>
+        <input type="checkbox" id="chk-animate" checked />
+        Animate (recolor each frame)
+      </label>
+      <label style="margin-top:4px">
+        <span style="white-space:nowrap">Count</span>
+        <input type="range" id="sld-count" min="1000" max="50000" step="1000" value="10000" />
+        <span id="lbl-count">10000</span>
+      </label>
+    </div>
+
+    <div id="stats">
+      fps: –<br/>
+      frame: –<br/>
+      vehicles: –<br/>
+      layer: –
+    </div>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

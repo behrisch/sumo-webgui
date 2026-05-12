@@ -1,0 +1,19 @@
+{
+  "name": "vehicle-benchmark",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.3.1",
+    "@deck.gl/layers": "^9.3.1",
+    "@deck.gl/mesh-layers": "^9.3.1",
+    "@luma.gl/engine": "^9.3.1"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
