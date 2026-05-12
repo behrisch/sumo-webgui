@@ -39,7 +39,7 @@ function buildAgentLayer(
     } as unknown as object[],
     iconAtlas:   atlas,
     iconMapping: mapping,
-    getIcon:     icon,
+    getIcon:     icon as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     getSize:     10,
     sizeMinPixels: 3,
     sizeMaxPixels: 14,

@@ -92,7 +92,7 @@ export function buildMarkingLayer(parsed: ParsedNetwork) {
     pickable: false,
   }) : null;
 
-  return [solidLayer, dashedLayer].filter(Boolean);
+  return [solidLayer, dashedLayer].filter((x) => x !== null) as PathLayer[];
 }
 
 // ---------------------------------------------------------------------------

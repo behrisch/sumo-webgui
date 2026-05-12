@@ -7,7 +7,7 @@ import {
   type VehicleShape,
 } from './vehicleShapes';
 
-export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape: VehicleShape = 'triangle') {
+export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape: VehicleShape = 'triangle', sizeMinPixels = 3) {
   performance.mark('vehicle-build-start');
   const N = vehicles.length;
   const positions = new Float64Array(N * 2);
@@ -50,7 +50,7 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
       iconMapping:   MULTI_SHAPE_ATLAS.mapping,
       getIcon:       (_, { index }: { index: number }) => ICON_NAMES[iconIndices[index]],
       sizeUnits:     'meters' as const,
-      sizeMinPixels: 3,
+      sizeMinPixels,
       sizeMaxPixels: 200,
       pickable: true,
     });
@@ -67,10 +67,10 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
     } } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     iconAtlas:     cfg.atlas,
     iconMapping:   cfg.mapping,
-    getIcon:       cfg.icon,
+    getIcon:       cfg.icon as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     sizeUnits:     'meters' as const,
     getSize:       5,
-    sizeMinPixels: 3,
+    sizeMinPixels,
     sizeMaxPixels: 120,
     pickable: true,
   });

@@ -202,7 +202,8 @@ function geoViewportBounds(vs: MapViewState): [number, number, number, number] {
 
 function orthoViewportBounds(vs: OrthographicViewState): [number, number, number, number] {
   const [cx, cy] = vs.target as [number, number];
-  const scale = Math.pow(2, vs.zoom ?? 0);
+  const z = Array.isArray(vs.zoom) ? vs.zoom[0] : (vs.zoom ?? 0);
+  const scale = Math.pow(2, z);
   const hw = window.innerWidth / 2 / scale, hh = window.innerHeight / 2 / scale;
   return [cx - hw, cy - hh, cx + hw, cy + hh];
 }
@@ -283,6 +284,7 @@ export default function App() {
 
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
   const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('triangle');
+  const [vehicleMinPixels, setVehicleMinPixels] = useState(3);
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
   // Auto-select the first available edge attribute when the config arrives or changes
@@ -393,13 +395,13 @@ export default function App() {
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
       result.push(buildVehicleLayer(simStep?.vehicles ?? [],
-        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape));
+        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape, vehicleMinPixels));
     if (visibility.persons)
       result.push(buildPersonLayer(simStep?.persons ?? []));
     if (visibility.containers)
       result.push(buildContainerLayer(simStep?.containers ?? []));
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape, vehicleMinPixels]);
 
   if (!parsed || !activeView) {
     return (
@@ -442,6 +444,7 @@ export default function App() {
       visibility={visibility} onVisibility={patchVisibility}
       vehicleColorAttr={vehicleColorAttr} vehicleKeys={vehicleKeys} onVehicleColorAttr={setVehicleColorAttr}
       vehicleShape={vehicleShape} onVehicleShape={setVehicleShape} vehicleShapes={VEHICLE_SHAPES}
+      vehicleMinPixels={vehicleMinPixels} onVehicleMinPixels={setVehicleMinPixels}
       edgeColorAttr={edgeColorAttr} edgeKeys={edgeKeys} onEdgeColorAttr={setEdgeColorAttr}
       attributeConfig={attributeConfig} onSetAttributes={handleAttributes}
       intervalMin={intervalMin} intervalMax={intervalMax} autotune={autotune}

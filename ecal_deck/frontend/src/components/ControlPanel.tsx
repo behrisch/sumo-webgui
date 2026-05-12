@@ -34,6 +34,8 @@ interface Props {
   vehicleShape: VehicleShape;
   vehicleShapes: VehicleShape[];
   onVehicleShape: (s: VehicleShape) => void;
+  vehicleMinPixels: number;
+  onVehicleMinPixels: (n: number) => void;
   edgeColorAttr: string;
   edgeKeys: string[];
   onEdgeColorAttr: (v: string) => void;
@@ -155,6 +157,12 @@ export function ControlPanel(p: Props) {
         <select value={p.vehicleShape} onChange={(e) => p.onVehicleShape(e.target.value as VehicleShape)} style={sel}>
           {p.vehicleShapes.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
+      </div>
+      <div style={row}>
+        <span style={{ whiteSpace: 'nowrap' }}>Min size (px)</span>
+        <input type="number" min={1} max={50} value={p.vehicleMinPixels}
+          onChange={(e) => p.onVehicleMinPixels(Math.max(1, Number(e.target.value)))}
+          style={{ width: 44, background: '#111', color: '#fff', border: '1px solid #555', borderRadius: 3, padding: '1px 4px' }} />
       </div>
       {p.edgeKeys.length > 0 && (
         <div style={row}>

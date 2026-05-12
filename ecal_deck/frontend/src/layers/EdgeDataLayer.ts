@@ -82,12 +82,12 @@ export function buildEdgeDataLayer(
     widthUnits: 'meters',
     widthScale: 1,
     widthMinPixels: 2,
-    getColor: (_: unknown, { index, target }: { index: number; target: number[] }) => {
+    getColor: ((_: unknown, { index, target }: { index: number; target: number[] }) => {
       const off = index * 4;
       target[0] = colors[off]; target[1] = colors[off + 1];
       target[2] = colors[off + 2]; target[3] = colors[off + 3];
       return target;
-    },
+    }) as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     getWidth: (_: unknown, { index }: { index: number }) => widths[index],
     pickable: false,
   });
