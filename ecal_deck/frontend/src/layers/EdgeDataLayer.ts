@@ -5,7 +5,8 @@ import { colormap } from '../utils/colormap';
 
 export function buildEdgeDataLayer(
   parsed: ParsedNetwork,
-  valueMap: EdgeValueMap,
+  baselineMap: EdgeValueMap,  // all edges from last full snapshot
+  deltaMap: EdgeValueMap,     // currently-occupied edges (overrides baseline)
   colorAttr: string,
   vpBounds: [number, number, number, number],  // [minX, minY, maxX, maxY] in network coords
 ) {
@@ -13,13 +14,15 @@ export function buildEdgeDataLayer(
   const bboxes = parsed.laneBBoxes;
   const totalSrcPts = parsed.lanePositions.length / 2;
 
-  // Single pass over valueMap (occupied edges only after delta updates) → collect
-  // viewport-visible lane indices and compute min/max in one loop.
+  // Merge: iterate baseline (all edges), override with delta where present.
+  // This means unoccupied edges show their last-known baseline values while
+  // currently-occupied edges show live values — no stale colors linger.
   let min = Infinity, max = -Infinity;
   const visLanes: number[] = [];
   const visVals: number[]  = [];
 
-  for (const [edgeId, attrs] of valueMap) {
+  for (const [edgeId, baseAttrs] of baselineMap) {
+    const attrs = deltaMap.get(edgeId) ?? baseAttrs;
     const val = attrs[colorAttr];
     if (val === undefined) continue;
     if (val < min) min = val;

@@ -101,8 +101,17 @@ def _make_callback(topic: str, type_byte: int):
             if type_byte == _TYPE_EDGEDATA:
                 # full_snapshot (field 3, bool=true) serialises as tag 0x18, value 0x01
                 # at the end of the buffer (Python protobuf writes fields in order).
-                if buf[-2:] == _FULL_SNAPSHOT_TAIL:
+                is_snapshot = buf[-2:] == _FULL_SNAPSHOT_TAIL
+                if is_snapshot:
                     _edgedata_snapshot_frame = frame
+                # Send snapshots reliably (not via latest-value queue) so a delta
+                # arriving within the same 60 fps window cannot overwrite it.
+                if _loop is not None:
+                    if is_snapshot:
+                        _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
+                    else:
+                        _loop.call_soon_threadsafe(_pending.__setitem__, type_byte, frame)
+                return
 
             if _loop is not None:
                 if type_byte in _LATEST_VALUE:

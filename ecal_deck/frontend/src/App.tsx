@@ -209,7 +209,7 @@ function orthoViewportBounds(vs: OrthographicViewState): [number, number, number
 }
 
 export default function App() {
-  const { connected, reconnectAttempt, network, simStep, tlsUpdate, edgeValueMap, edgeValueVersion,
+  const { connected, reconnectAttempt, network, simStep, tlsUpdate, edgeValueMap, edgeBaselineMap, edgeValueVersion,
           logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const perf = usePerfStats();
 
@@ -380,13 +380,13 @@ export default function App() {
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // activeView is read from the closure (not a dep): viewport is sampled at the moment
   // edge data changes rather than on every pan/zoom frame.
-  // edgeValueMap is a stable ref; edgeValueVersion is the change signal.
+  // edgeBaselineMap/edgeValueMap are stable refs; edgeValueVersion is the change signal.
   const edgeDataLayer = useMemo(() => {
-    if (!parsed || !visibility.edgeData || !edgeColorAttr || edgeValueMap.size === 0 || !activeView) return null;
+    if (!parsed || !visibility.edgeData || !edgeColorAttr || edgeBaselineMap.size === 0 || !activeView) return null;
     const vpBounds = parsed.geoReferenced
       ? geoViewportBounds(activeView as MapViewState)
       : orthoViewportBounds(activeView as OrthographicViewState);
-    return buildEdgeDataLayer(parsed, edgeValueMap, edgeColorAttr, vpBounds);
+    return buildEdgeDataLayer(parsed, edgeBaselineMap, edgeValueMap, edgeColorAttr, vpBounds);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parsed, edgeValueVersion, edgeColorAttr, visibility.edgeData]);
 

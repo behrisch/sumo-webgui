@@ -30,6 +30,7 @@ export interface SimState {
   simStep: SimStep | null;
   tlsUpdate: TLSUpdate | null;
   edgeValueMap: EdgeValueMap;
+  edgeBaselineMap: EdgeValueMap;
   edgeValueVersion: number;
   logMessages: LogMessage[];
   controlState: SimControlState | null;
@@ -47,7 +48,8 @@ export function useSimSocket(url: string): SimState {
   const [controlState, setControlState]       = useState<SimControlState | null>(null);
   const [attributeConfig, setAttributeConfig] = useState<GetAttributesResponse | null>(null);
 
-  const edgeValueMapRef    = useRef<EdgeValueMap>(new Map());
+  const edgeValueMapRef    = useRef<EdgeValueMap>(new Map()); // current delta (occupied edges)
+  const edgeBaselineMapRef = useRef<EdgeValueMap>(new Map()); // last full snapshot (all edges)
   const [edgeValueVersion, setEdgeValueVersion] = useState(0);
   const [logMessages, setLogMessages]           = useState<LogMessage[]>([]);
   const recentLogTexts                          = useRef(new Set<string>());
@@ -129,11 +131,17 @@ export function useSimSocket(url: string): SimState {
             break;
           case TYPE_EDGEDATA: {
             const ed = EdgeDataUpdate.decode(payload);
-            // Always replace so the map only holds the latest batch — deltas
-            // contain only occupied edges, keeping the map small between snapshots.
+            // Always replace delta map with this update's edges (each delta is a
+            // self-contained snapshot of all currently-occupied edges).
             edgeValueMapRef.current.clear();
             for (const e of ed.edges) {
               edgeValueMapRef.current.set(e.id, { ...e.attributes });
+            }
+            // Full snapshot: also update the baseline so unoccupied edges show
+            // their initial values. buildEdgeDataLayer merges baseline + delta:
+            // occupied edges use delta values, all others use baseline values.
+            if (ed.full_snapshot) {
+              edgeBaselineMapRef.current = new Map(edgeValueMapRef.current);
             }
             edgeDataDirty.current = true;
             break;
@@ -152,6 +160,7 @@ export function useSimSocket(url: string): SimState {
           }
           case TYPE_NETWORK:
             edgeValueMapRef.current.clear();
+            edgeBaselineMapRef.current.clear();
             latestSimStep.current = null;
             setSimStep(null);
             setNetwork(NetworkGeometry.decode(payload));
@@ -220,6 +229,6 @@ export function useSimSocket(url: string): SimState {
   }, [url]);
 
   return { connected, reconnectAttempt, network, simStep, tlsUpdate,
-    edgeValueMap: edgeValueMapRef.current, edgeValueVersion,
+    edgeValueMap: edgeValueMapRef.current, edgeBaselineMap: edgeBaselineMapRef.current, edgeValueVersion,
     logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand };
 }
