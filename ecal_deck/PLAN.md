@@ -566,6 +566,23 @@ uncached: [traci.start ~30s                              ]
 
 ### Future
 
+- **Screen recording to video**: use the browser `MediaRecorder` API to capture the deck.gl
+  WebGL canvas stream (`canvas.captureStream(30)`) into a `.webm` blob, then trigger a download.
+  A Record/Stop button in the control panel starts and stops recording. No server-side component
+  needed. Optionally add in-browser ffmpeg.wasm conversion to `.mp4` for wider compatibility
+  (~30 MB extra dependency). Frame rate is bounded by the simulation step rate and GPU throughput.
+
+- **3D view**: deck.gl supports tilted/pitched cameras natively.
+  - **Geo-referenced networks**: expose a pitch slider in the control panel (0–60°) that feeds
+    `MapViewState.pitch`. Junctions and road outlines can be extruded with `PolygonLayer`
+    `extruded: true` and `getElevation`. MapLibre 3D terrain tiles can be added via `TerrainLayer`.
+  - **Non-geo networks**: replace `OrthographicView` with an orbit camera (`MapView` with pitch, or
+    `FirstPersonView`) so the user can tilt the view.
+  - **3D vehicle meshes**: replace the flat `SimpleMeshLayer` polygon with a box or OBJ mesh with
+    proper height (e.g. 1.5 m for cars). `getScale: [width, length, height]` already works.
+  - **Layer Z-ordering**: markings, arrows, and edge data would need `getElevation` offsets to sit
+    on top of extruded geometry without z-fighting.
+
 - **Tauri desktop packaging**: see `TAURI.md`. Frontend is Vite/React and needs no changes.
   Rust backend will spawn publisher + bridge as subprocesses and expose native file dialogs.
 - **Co-simulation** (JuPedSim etc.): architecture is ready. Each simulator gets its own
