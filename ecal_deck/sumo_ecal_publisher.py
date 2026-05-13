@@ -432,6 +432,7 @@ def main():
         geo_ref       = sim["geo_referenced"]
         all_edges     = sim["all_edges"]
         _t_report     = time.monotonic()
+        total_sleep   = 0
         # auto-tuner: rolling average of data-collection time (excludes sleep + SUMO compute)
         _collect_times: list[float] = []
 
@@ -458,6 +459,7 @@ def main():
                 # simstep
                 ss = sumo_pb2.SimStep()
                 ss.time_ms = time_ms
+                active_edges = set()
                 for vid in traci.vehicle.getIDList():
                     x, y = traci.vehicle.getPosition(vid)
                     if geo_ref and converter:
@@ -468,6 +470,8 @@ def main():
                     v.angle = traci.vehicle.getAngle(vid)
                     v.type_id = traci.vehicle.getTypeID(vid)
                     v.length, v.width, v.gui_shape = _get_type_props(v.type_id)
+                    lane = traci.vehicle.getLaneID(vid)
+                    active_edges.add(lane[:lane.rfind("_")])
                     for attr in ctrl["vehicle_attributes"]:
                         getter = vehicle_attr_getters.get(attr)
                         if getter:
@@ -506,9 +510,7 @@ def main():
                     edu = sumo_pb2.EdgeDataUpdate()
                     edu.time_ms = time_ms
                     edu.full_snapshot = False
-                    for eid in all_edges:
-                        if traci.edge.getLastStepVehicleNumber(eid) == 0:
-                            continue
+                    for eid in active_edges:
                         ed = edu.edges.add()
                         ed.id = eid
                         for attr in ctrl["edge_attributes"]:
@@ -526,7 +528,7 @@ def main():
                 # auto-tuner: adjust interval so data collection <= 25% of non-sleep step time
                 if ctrl["autotune"] and len(_collect_times) >= 5:
                     avg_collect = sum(_collect_times) / len(_collect_times)
-                    step_time_ms = (time.monotonic() - _t_report) * 1000 / max(steps_since, 1) - ctrl["delay_ms"]
+                    step_time_ms = ((time.monotonic() - _t_report) * 1000 - total_sleep) / max(steps_since, 1)
                     target_budget = max(step_time_ms * 0.25, 1.0)
                     new_interval = max(ctrl["interval_min"],
                                        min(ctrl["interval_max"],
@@ -537,9 +539,10 @@ def main():
 
             step        += 1
             steps_since += 1
+            total_sleep += max(0, ctrl["delay_ms"] - collect_ms)
             # sleep(0) is intentional: even with no delay it yields the GIL so the eCAL
             # service callback thread can set ctrl["paused"] before the next iteration
-            time.sleep(ctrl["delay_ms"] / 1000.0)
+            time.sleep(max(0, ctrl["delay_ms"] - collect_ms) / 1000.0)
 
             # print step rate every 5 s to help distinguish backend vs frontend bottleneck
             now = time.monotonic()
@@ -552,6 +555,7 @@ def main():
                     " [AT MAX]" if ctrl["at_max_bound"] else ""))
                 steps_since = 0
                 _t_report   = now
+                total_sleep = 0
 
         try:
             traci.close()
