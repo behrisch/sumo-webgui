@@ -6,10 +6,14 @@ import {
   type VehicleShape,
 } from './vehicleShapes';
 
-// sizeMinPixels is accepted for API compatibility but not forwarded to SimpleMeshLayer,
-// which does not support it natively.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape: VehicleShape = 'triangle', _sizeMinPixels?: number) {
+// sizeMinPixels emulation: clamp getScale so vehicles are never smaller than minPixels on screen.
+export function buildVehicleLayer(
+  vehicles: Vehicle[],
+  colorAttr?: string,
+  shape: VehicleShape = 'triangle',
+  sizeMinPixels = 0,
+  metersPerPixel = 1,
+) {
   performance.mark('vehicle-build-start');
   const N = vehicles.length;
 
@@ -37,11 +41,16 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
     // negating gives CCW-from-north = deck.gl yaw. yaw=0 → pointing north (+Y world).
     getOrientation: (v) => [0, -v.angle, 0],
     getScale: (v) => {
-      const w = v.width > 0 ? v.width : 1.8;
+      const minM = sizeMinPixels * metersPerPixel;
+      const w = Math.max(v.width > 0 ? v.width : 1.8, minM);
       if (shape === 'circle') {
         return [w, w, 1];
       }
-      return [w, v.length > 0 ? v.length : 5.0, 1];
+      const l = Math.max(v.length > 0 ? v.length : 5.0, minM);
+      return [w, l, 1];
+    },
+    updateTriggers: {
+      getScale: [sizeMinPixels, metersPerPixel, shape],
     },
     getPosition: (v) => [v.x, v.y, 0],
     getColor: (_, { index }: { index: number }) => [

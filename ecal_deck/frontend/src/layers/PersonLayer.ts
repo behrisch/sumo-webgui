@@ -1,56 +1,44 @@
-import { IconLayer } from '@deck.gl/layers';
+import { SimpleMeshLayer } from '@deck.gl/mesh-layers';
 import type { MobileAgent } from '../generated/sumo';
-import { VEHICLE_ICON_SHAPES } from './vehicleShapes';
+import { CIRCLE_MESH, TRIANGLE_MESH } from './vehicleShapes';
 
 const PERSON_COLOR:    [number, number, number, number] = [0,   210, 210, 220];
 const CONTAINER_COLOR: [number, number, number, number] = [255, 140,  0,  220];
 
-const { atlas, mapping, icon } = VEHICLE_ICON_SHAPES.triangle;
+// Persons render as small circles; containers as small triangles.
+// Fixed size of 1.5 m — small enough to distinguish from vehicles.
+const AGENT_SIZE = 1.5;
 
 function buildAgentLayer(
   id: string,
   agents: MobileAgent[],
   color: [number, number, number, number],
+  mesh: typeof CIRCLE_MESH,
+  sizeMinPixels = 0,
+  metersPerPixel = 1,
 ) {
-  const N = agents.length;
-  const positions = new Float64Array(N * 2);
-  const angles    = new Float32Array(N);
-  const colors    = new Uint8Array(N * 4);
-
-  for (let i = 0; i < N; i++) {
-    positions[i * 2]     = agents[i].x;
-    positions[i * 2 + 1] = agents[i].y;
-    angles[i] = -agents[i].angle;
-    colors[i * 4]     = color[0];
-    colors[i * 4 + 1] = color[1];
-    colors[i * 4 + 2] = color[2];
-    colors[i * 4 + 3] = color[3];
-  }
-
-  return new IconLayer({
+  const size = Math.max(AGENT_SIZE, sizeMinPixels * metersPerPixel);
+  return new SimpleMeshLayer<MobileAgent>({
     id,
-    data: {
-      length: N,
-      attributes: {
-        getPosition: { value: positions, size: 2 },
-        getColor:    { value: colors,    size: 4, normalized: true },
-        getAngle:    { value: angles,    size: 1 },
-      },
-    } as unknown as object[],
-    iconAtlas:   atlas,
-    iconMapping: mapping,
-    getIcon:     icon as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    getSize:     10,
-    sizeMinPixels: 3,
-    sizeMaxPixels: 14,
+    data: agents,
+    mesh: mesh as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+    getPosition:    (a) => [a.x, a.y, 0],
+    getOrientation: (a) => [0, -a.angle, 0],
+    getScale:       () => [size, size, 1],
+    updateTriggers: {
+      getScale: [sizeMinPixels, metersPerPixel],
+    },
+    getColor:       () => color,
+    sizeScale: 1,
     pickable: true,
   });
 }
 
-export function buildPersonLayer(persons: MobileAgent[]) {
-  return buildAgentLayer('persons', persons, PERSON_COLOR);
+export function buildPersonLayer(persons: MobileAgent[], sizeMinPixels = 0, metersPerPixel = 1) {
+  return buildAgentLayer('persons', persons, PERSON_COLOR, CIRCLE_MESH, sizeMinPixels, metersPerPixel);
 }
 
-export function buildContainerLayer(containers: MobileAgent[]) {
-  return buildAgentLayer('containers', containers, CONTAINER_COLOR);
+export function buildContainerLayer(containers: MobileAgent[], sizeMinPixels = 0, metersPerPixel = 1) {
+  return buildAgentLayer('containers', containers, CONTAINER_COLOR, TRIANGLE_MESH, sizeMinPixels, metersPerPixel);
 }
+

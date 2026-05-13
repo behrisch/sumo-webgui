@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SimStep, TLSUpdate, EdgeDataUpdate, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
 
 export type EdgeValueMap = Map<string, Record<string, number>>;
@@ -85,13 +85,13 @@ export function useSimSocket(url: string): SimState {
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  const sendCommand = (service: string, request: Record<string, unknown> = {}, onResponse?: (r: CommandResponse) => void) => {
+  const sendCommand = useCallback((service: string, request: Record<string, unknown> = {}, onResponse?: (r: CommandResponse) => void) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const id = crypto.randomUUID();
     if (onResponse) pendingRef.current.set(id, onResponse);
     ws.send(JSON.stringify({ type: 'command', service, request, id }));
-  };
+  }, []);
 
   useEffect(() => {
     unmounted.current = false;

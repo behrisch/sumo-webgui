@@ -65,7 +65,8 @@ const sel: React.CSSProperties = {
 
 export function ControlPanel(p: Props) {
   const t = p.simStep != null ? ((p.simStep.time_ms ?? 0) / 1000).toFixed(1) : null;
-  const n = p.simStep != null ? (p.simStep.vehicles?.length ?? 0) : null;
+  const nv = p.simStep != null ? (p.simStep.vehicles?.length ?? 0) : null;
+  const np = p.simStep != null ? (p.simStep.persons?.length ?? 0) : null;
 
   const cfgName = p.cfgPath ? p.cfgPath.split('/').pop() : null;
 
@@ -96,7 +97,7 @@ export function ControlPanel(p: Props) {
           onClick={p.onReload} disabled={!p.cfgPath}>↺</button>
         <span style={{ opacity: p.connected ? 1 : 0.5, flex: 1 }}>
           {p.connected
-            ? (t != null ? `t=${t}s  ${n}v` : 't=–  –v')
+            ? (t != null ? `t=${t}s  ${nv}v  ${np}p` : 't=–  –v  –p')
             : '⚠ disconnected'}
         </span>
       </div>

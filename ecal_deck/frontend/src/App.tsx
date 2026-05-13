@@ -264,7 +264,7 @@ export default function App() {
       // Sync paused/delay state from server — simulation starts paused after load.
       sendCommand('get_state');
     }
-  }, [network]);
+  }, [network, sendCommand]);
 
   const handlePause  = () => { sendCommand('pause');  setPaused(true);  };
   const handleResume = () => { sendCommand('resume'); setPaused(false); };
@@ -286,6 +286,17 @@ export default function App() {
   const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('triangle');
   const [vehicleMinPixels, setVehicleMinPixels] = useState(3);
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
+
+  // Compute meters-per-pixel from current viewport for sizeMinPixels emulation.
+  const metersPerPixel = useMemo(() => {
+    if (!activeView) return 1;
+    const z = Number(activeView.zoom ?? 0);
+    if ('latitude' in activeView) {
+      const lat = (activeView as MapViewState).latitude ?? 0;
+      return (40075016.68 / (256 * Math.pow(2, z))) * Math.cos(lat * Math.PI / 180);
+    }
+    return 1 / Math.pow(2, z);
+  }, [activeView]);
 
   // Auto-select the first available edge attribute when the config arrives or changes
   useEffect(() => {
@@ -367,17 +378,16 @@ export default function App() {
   }, [parsed]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
-  // included, so tessellation and accessor cost scale with visible lanes not total lanes.
   // activeView is read from the closure (not a dep): viewport is sampled at the moment
   // edge data changes rather than on every pan/zoom frame.
   // edgeValueMap is a stable ref; edgeValueVersion is the change signal.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const edgeDataLayer = useMemo(() => {
     if (!parsed || !visibility.edgeData || !edgeColorAttr || edgeValueMap.size === 0 || !activeView) return null;
     const vpBounds = parsed.geoReferenced
       ? geoViewportBounds(activeView as MapViewState)
       : orthoViewportBounds(activeView as OrthographicViewState);
     return buildEdgeDataLayer(parsed, edgeValueMap, edgeColorAttr, vpBounds);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parsed, edgeValueVersion, edgeColorAttr, visibility.edgeData]);
 
   const layers = useMemo(() => {
@@ -395,13 +405,13 @@ export default function App() {
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles)
       result.push(buildVehicleLayer(simStep?.vehicles ?? [],
-        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape, vehicleMinPixels));
+        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel));
     if (visibility.persons)
-      result.push(buildPersonLayer(simStep?.persons ?? []));
+      result.push(buildPersonLayer(simStep?.persons ?? [], vehicleMinPixels, metersPerPixel));
     if (visibility.containers)
-      result.push(buildContainerLayer(simStep?.containers ?? []));
+      result.push(buildContainerLayer(simStep?.containers ?? [], vehicleMinPixels, metersPerPixel));
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape, vehicleMinPixels]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (

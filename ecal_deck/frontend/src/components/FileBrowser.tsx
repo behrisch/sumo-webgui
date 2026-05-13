@@ -52,6 +52,7 @@ export function FileBrowser({ sendCommand, onSelect, onCancel }: Props) {
     });
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- navigate is stable (react-router guarantee)
   useEffect(() => { navigate(''); }, []);
 
   if (!listing) return null;
