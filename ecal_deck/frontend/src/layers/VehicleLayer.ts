@@ -1,24 +1,22 @@
-import { IconLayer } from '@deck.gl/layers';
+import { SimpleMeshLayer } from '@deck.gl/mesh-layers';
 import type { Vehicle } from '../generated/sumo';
 import { colormap } from '../utils/colormap';
 import {
-  MULTI_SHAPE_ATLAS, VEHICLE_ICON_SHAPES,
-  ICON_NAMES, guiShapeToIconIndex, SIZE_SCALE,
+  CAR_MESH, CIRCLE_MESH, TRIANGLE_MESH,
   type VehicleShape,
 } from './vehicleShapes';
 
-export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape: VehicleShape = 'triangle', sizeMinPixels = 3) {
+// sizeMinPixels is accepted for API compatibility but not forwarded to SimpleMeshLayer,
+// which does not support it natively.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape: VehicleShape = 'triangle', _sizeMinPixels?: number) {
   performance.mark('vehicle-build-start');
   const N = vehicles.length;
-  const positions = new Float64Array(N * 2);
-  const colors    = new Uint8Array(N * 4);
-  const angles    = new Float32Array(N);
 
+  // Build per-vehicle RGBA color array (referenced by index in the accessors).
+  const colors = new Uint8Array(N * 4);
   for (let i = 0; i < N; i++) {
     const v = vehicles[i];
-    positions[i * 2]     = v.x;
-    positions[i * 2 + 1] = v.y;
-    angles[i] = -v.angle; // SUMO CW from north → deck.gl CCW
     const [r, g, b] = colorAttr ? attrColor(v, colorAttr) : speedColor(v.speed);
     colors[i * 4]     = r;
     colors[i * 4 + 1] = g;
@@ -29,49 +27,30 @@ export function buildVehicleLayer(vehicles: Vehicle[], colorAttr?: string, shape
   performance.mark('vehicle-build-end');
   performance.measure('vehicle-build', 'vehicle-build-start', 'vehicle-build-end');
 
-  // 'car' mode: per-vehicle shape from gui_shape + per-vehicle size from length
-  if (shape === 'car') {
-    const sizes       = new Float32Array(N);
-    const iconIndices = new Uint8Array(N);
-    for (let i = 0; i < N; i++) {
-      const v = vehicles[i];
-      sizes[i]       = (v.length > 0 ? v.length : 5.0) * SIZE_SCALE;
-      iconIndices[i] = guiShapeToIconIndex(v.gui_shape);
-    }
-    return new IconLayer({
-      id: 'vehicles',
-      data: { length: N, attributes: {
-        getPosition: { value: positions, size: 2 },
-        getColor:    { value: colors,    size: 4, normalized: true },
-        getAngle:    { value: angles,    size: 1 },
-        getSize:     { value: sizes,     size: 1 },
-      } } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-      iconAtlas:     MULTI_SHAPE_ATLAS.atlas,
-      iconMapping:   MULTI_SHAPE_ATLAS.mapping,
-      getIcon:       (_, { index }: { index: number }) => ICON_NAMES[iconIndices[index]],
-      sizeUnits:     'meters' as const,
-      sizeMinPixels,
-      sizeMaxPixels: 200,
-      pickable: true,
-    });
-  }
+  const mesh = shape === 'car' ? CAR_MESH : shape === 'circle' ? CIRCLE_MESH : TRIANGLE_MESH;
 
-  // 'circle' / 'triangle' modes: uniform shape + constant size
-  const cfg = VEHICLE_ICON_SHAPES[shape];
-  return new IconLayer({
+  return new SimpleMeshLayer<Vehicle>({
     id: 'vehicles',
-    data: { length: N, attributes: {
-      getPosition: { value: positions, size: 2 },
-      getColor:    { value: colors,    size: 4, normalized: true },
-      getAngle:    { value: angles,    size: 1 },
-    } } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    iconAtlas:     cfg.atlas,
-    iconMapping:   cfg.mapping,
-    getIcon:       cfg.icon as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    sizeUnits:     'meters' as const,
-    getSize:       5,
-    sizeMinPixels,
-    sizeMaxPixels: 120,
+    data: vehicles,
+    mesh: mesh as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+    // getOrientation: [pitch, yaw, roll]. SUMO angle is CW from north (deg);
+    // negating gives CCW-from-north = deck.gl yaw. yaw=0 → pointing north (+Y world).
+    getOrientation: (v) => [0, -v.angle, 0],
+    getScale: (v) => {
+      const w = v.width > 0 ? v.width : 1.8;
+      if (shape === 'circle') {
+        return [w, w, 1];
+      }
+      return [w, v.length > 0 ? v.length : 5.0, 1];
+    },
+    getPosition: (v) => [v.x, v.y, 0],
+    getColor: (_, { index }: { index: number }) => [
+      colors[index * 4],
+      colors[index * 4 + 1],
+      colors[index * 4 + 2],
+      colors[index * 4 + 3],
+    ],
+    sizeScale: 1,
     pickable: true,
   });
 }
