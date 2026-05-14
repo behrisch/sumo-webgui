@@ -383,94 +383,13 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 
 ---
 
-## ~~Phase B: Binary WebSocket transport + binary network cache~~ — implemented
-
-### What was built
-
-**Wire protocol** — binary WebSocket frames (`ArrayBuffer` in browser) for all simulation data;
-JSON text frames retained for commands/responses only.
-
-```
-[u8 msg_type] [protobuf payload bytes...]
-```
-
-| `msg_type` | Proto message | Bridge action |
-|---|---|---|
-| 1 | `SimStep` | raw eCAL bytes forwarded — no re-encoding |
-| 2 | `TLSUpdate` | raw eCAL bytes forwarded |
-| 3 | `EdgeDataUpdate` | raw eCAL bytes forwarded |
-| 4 | `LogMessage` | raw eCAL bytes forwarded |
-| 5 | `NetworkGeometry` | read from `.ecaldeck` cache once; forwarded thereafter |
-
-**`NetworkGeometry` proto** (replaces `NetworkData.geojson`):
-```protobuf
-message TlsEntry { string id = 1; string tls = 2; int32 tl_index = 3; }
-
-message NetworkGeometry {
-  bool            geo_referenced     = 1;
-  bytes           edge_starts        = 2;  // u32[] LE — path start indices per edge
-  bytes           edge_positions     = 3;  // f64[] LE — [x,y,...] all edge vertices
-  bytes           junction_starts    = 4;  // u32[] LE — polygon start indices per junction
-  bytes           junction_positions = 9;  // f64[] LE — [x,y,...] all junction polygon vertices
-  bytes           tls_positions      = 5;  // f64[] LE — [x1,y1,x2,y2] per TLS bar
-  repeated string edge_ids           = 6;
-  repeated string junction_ids       = 7;
-  repeated TlsEntry tls_entries      = 8;
-  string          proj_parameter     = 10; // proj4 string; empty/! if not geo-referenced
-  string          net_offset         = 11; // "x,y" from <location> netOffset
-}
-```
-
-`bytes` fields for typed arrays avoids protobuf's expensive `repeated double` varint encoding.
-`proj_parameter` + `net_offset` stored so cached loads need no net file access at all.
-Junctions are full polygon rings (for `SolidPolygonLayer`), not centroids.
-Cache file = `NetworkGeometry.SerializeToString()` → `<net_file>.ecaldeck`.
-
-**Network loading parallelism** — a single background thread starts before `traci.start()` and
-runs concurrently with it:
-
-- *Cached path*: reads + deserializes `.ecaldeck`, waits for subscriber, sends `NetworkData`.
-  After join: `all_edges` from `ng.edge_ids`, `has_tls` from `bool(ng.tls_entries)`,
-  `converter` from `_make_geo_converter(ng.proj_parameter, ng.net_offset)` — zero TraCI calls.
-- *Uncached path*: `readNet` → `_build_network_binary` (uses `net.getTrafficLights()` for
-  `has_tls`, no TraCI) → reads cache → subscriber wait → send. All parallel with `traci.start()`.
-
-```
-cached:   [traci.start ~30s                                   ]
-          [deserialize proto + wait-for-subscriber + send ~5s ]  → join (free)
-
-uncached: [traci.start ~30s                              ]
-          [readNet + build cache + wait + send  ~30-40s  ]  → join (waits for remainder)
-```
-
-`_make_geo_converter` implements sumolib's `Geo.__call__(inverse=True)` directly with pyproj:
-`lon, lat = proj(x + offset_x, y + offset_y, inverse=True)` — no empty `Net` object.
-
-**Frontend layer changes**:
-- `useSimSocket`: `onmessage` branches on `ArrayBuffer` vs string; all binary decoded with ts-proto
-- `ParsedNetwork`: `edgeStarts/Positions`, `junctionStarts/Positions`, `tlsPositions/Entries`;
-  `toFloat64/toUint32` helpers handle ts-proto's non-zero `byteOffset` on decoded `bytes` fields
-- `NetworkLayer`: `PathLayer` (binary) for edges + `SolidPolygonLayer` (binary) for junctions
-- `EdgeDataLayer`: `PathLayer` binary — shares `edgeStarts`/`edgePositions` from `ParsedNetwork`
-- `TLSLayer`: `LineLayer` with `tlsEntries` + `tlsPositions`
-- Network layers memoized separately from dynamic layers so `SolidPolygonLayer` tessellation
-  is not repeated on every `simStep` update (was causing 250ms frame time on large networks)
-- JSON batch removed from bridge; each pending type sent as its own binary frame — RAF sync
-  already coalesces React renders, so batching adds no value
-- `permessage-deflate` compression on by default; `--no-compress` flag for benchmarking
-- `ts-proto` switched to `onlyTypes=false` for encode/decode functions; `@bufbuild/protobuf`
-  added as direct dependency
-
----
-
 ## Open Items
 
 ### Near-term
 
-- ~~**Edge coloring broken + slow on large networks**~~: fixed — see performance section step 10.
-
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
+
 
 - **Person/container following + detailed info**: persons and containers are rendered and
   pickable but the follow camera and InfoPanel "More info" deep query only work for vehicles.
@@ -479,81 +398,6 @@ uncached: [traci.start ~30s                              ]
   `InfoPanel` for these types. Consider adding a `get_person_info` service method in the
   publisher and bridge for richer on-demand queries (current lane, stage, waiting time).
 
-- ~~**eCAL time-sync warning**~~: fixed — `ecal_deck/ecal.yaml` added with `time: rt: ""`.
-  eCAL loads `$PWD/ecal.yaml` at priority 2 (before user/system config), so both processes
-  pick it up automatically. This also eliminated the secondary "yaml configuration path not
-  valid" warning that appeared when no config file was found at all.
-
-- **Directional vehicle/person shapes**: implemented — `VehicleLayer` uses `IconLayer` with
-  SVG atlas data-URLs, `sizeUnits:'meters'`, `getAngle` from a `Float32Array`. Three modes
-  selectable in the UI: circle, triangle, car (auto per-type).
-
-  **Car mode (per-vehicle shape + size)**:
-  - Proto fields `length` (f8), `width` (f9), `gui_shape` (f10) added to `Vehicle` message.
-  - Publisher caches per-type properties (`_type_cache` dict, `_get_type_props()` helper) using
-    `traci.vehicletype.getLength/getWidth/getShapeClass`; cache cleared on each load.
-  - `vehicleShapes.ts`: 64×256 multi-shape SVG atlas with four 64×64 cells stacked vertically —
-    cell 0 `car` (passenger), cell 1 `truck` (bus/rail/delivery), cell 2 `cyclist`, cell 3 `pedestrian`.
-    Car and truck shapes derived from SUMO's `GUIBaseVehicleHelper` polygons; windshield punched
-    out via `fill-rule="evenodd"` (the only way to create an alpha=0 hole with a single masked icon).
-  - `guiShapeToIconIndex()` maps `traci.vehicletype.getShapeClass()` strings to the 0–3 index.
-  - `VehicleLayer.ts` car mode: `Float32Array sizes` per vehicle (`length × SIZE_SCALE`),
-    `Uint8Array iconIndices` per vehicle; `getSize` and `getIcon` use these typed arrays.
-  - `SIZE_SCALE = 64/56`: car body occupies 56 of 64 cell pixels; this factor makes the
-    rendered body height exactly equal the vehicle's `length` in metres.
-
-  **Front-bumper anchor**: SUMO TraCI reports positions at the centre of the front bumper.
-  - `anchorY = 4` (cell-relative pixels from the top of each 64×64 cell), where y=4 is where
-    the body's front edge sits in the SVG. The body extends from y=4 downward to y=60, so the
-    body trails behind (south of) the anchor for a north-heading vehicle — correct behaviour.
-  - **Gotcha — cell-relative, not atlas-absolute**: deck.gl icon mapping `anchorX`/`anchorY`
-    are relative to the icon's own cell top-left (0,0), **not** the atlas origin. The default
-    is `width/2`, `height/2`. Setting `anchorY = y_offset + 4` is correct only for cell 0
-    (y_offset=0); for truck (y_offset=64), cyclist (128), pedestrian (192) it placed the anchor
-    deep inside or past the cell bottom. Fix: always use `anchorY = 4` regardless of cell offset.
-    Verified from deck.gl 9 source: `[width/2 − anchorX, height/2 − anchorY, x, y, w, h, mask]`.
-
-  **Multi-color icon research**: SUMO draws cars with 3 layers (body at vehicle color, front
-  hood at +51 brightness, windshield black). Replicating all three tones in one IconLayer is
-  not possible: `mask: true` uses only the alpha channel (not luminance), so all filled SVG
-  regions render as the same vehicle color regardless of their fill color. Options evaluated:
-  - **2–3 stacked IconLayers** (body + lighter front + dark windshield): simplest to implement,
-    near-zero extra GPU cost (instanced rendering; extra draw calls don't scale with N). The
-    lighter front uses `getColor` with per-vehicle `color + 51` brightness; the windshield layer
-    uses a fixed dark `getColor` constant.
-  - **Custom shader extension**: encode body mask in atlas red channel, window mask in green
-    channel; combine in GLSL with two different colors. One draw call, one atlas, elegant — but
-    requires writing a deck.gl shader extension.
-  - **SolidPolygonLayer**: pixel-perfect edges, natural color boundaries. Requires CPU-side
-    vertex transform (rotate + translate each polygon vertex per vehicle per frame, ~84k trig
-    ops/frame for N=1000). Works cleanly in orthographic mode; geo-referenced mode requires
-    additional metric→lon/lat conversion per vertex. Viable but significantly more code.
-  Current implementation keeps the single-layer evenodd approach (body + windshield cutout).
-
-- ~~**Loading feedback**~~: implemented — `toast.loading` shown on `load` command, transitions
-  to `toast.success` when network arrives, `toast.error` on failure.
-
-- ~~**Control panel load UX cleanup**~~: implemented — filename shown read-only at top of panel
-  (basename, full path on hover); redundant text input + Load + `…` row removed; transport
-  `[Load]` and `[↺]` buttons remain as the sole controls.
-
-- ~~**README: Windows and macOS setup**~~: implemented — platform notes section added covering
-  venv activation, SUMO_HOME, protoc, Node, libsumo, websockets, and `run.sh` limitations
-  (`ss` → `lsof` on macOS; Git Bash / WSL on Windows). `generate.ts` (via `tsx`) replaces the
-  inline `protoc` shell command to handle `.cmd` plugin extension on Windows. All Python deps
-  (`eclipse-ecal`, `websockets`, `protobuf`, `libsumo`) documented. Needs verification on
-  target platforms.
-
-- ~~**SUMO log capture and frontend message pane**~~: implemented.
-  - **Proto**: `LogMessage { time_ms, level, text }` + `sumo/log` topic
-  - **Publisher**: two TCP servers on ephemeral ports; passed to SUMO as
-    `--message-log localhost:PORT1 --error-log localhost:PORT2`. SUMO's `host:port`
-    OutputDevice syntax works cross-platform. Two reader threads accept one connection each,
-    read lines, classify as INFO/WARNING/ERROR, and call `_log()`. Publisher's own status
-    messages (step rate, network publish, etc.) also routed through `_log()`.
-  - **Bridge**: `sumo/log` in `TOPICS`; delivered via `_reliable_send` (not batched, not dropped).
-  - **Frontend**: `LogPane.tsx` — fixed bottom-left overlay, scrolls to latest, colour-coded by
-    level, capped at 200 lines. `logMessages` accumulated in `useSimSocket` state.
 
 - **SUMO log duplicate investigation**: info messages currently appear twice in the log pane
   despite deduplication in the frontend. Both `--message-log` and `--error-log` point to the
@@ -564,33 +408,6 @@ uncached: [traci.start ~30s                              ]
   SUMO's `MsgHandler` source to understand which streams receive which message types; consider
   whether this is a SUMO bug.
 
-### Future
-
-- **Screen recording to video**: use the browser `MediaRecorder` API to capture the deck.gl
-  WebGL canvas stream (`canvas.captureStream(30)`) into a `.webm` blob, then trigger a download.
-  A Record/Stop button in the control panel starts and stops recording. No server-side component
-  needed. Optionally add in-browser ffmpeg.wasm conversion to `.mp4` for wider compatibility
-  (~30 MB extra dependency). Frame rate is bounded by the simulation step rate and GPU throughput.
-
-- **3D view**: deck.gl supports tilted/pitched cameras natively.
-  - **Geo-referenced networks**: expose a pitch slider in the control panel (0–60°) that feeds
-    `MapViewState.pitch`. Junctions and road outlines can be extruded with `PolygonLayer`
-    `extruded: true` and `getElevation`. MapLibre 3D terrain tiles can be added via `TerrainLayer`.
-  - **Non-geo networks**: replace `OrthographicView` with an orbit camera (`MapView` with pitch, or
-    `FirstPersonView`) so the user can tilt the view.
-  - **3D vehicle meshes**: replace the flat `SimpleMeshLayer` polygon with a box or OBJ mesh with
-    proper height (e.g. 1.5 m for cars). `getScale: [width, length, height]` already works.
-  - **Layer Z-ordering**: markings, arrows, and edge data would need `getElevation` offsets to sit
-    on top of extruded geometry without z-fighting.
-
-- **Tauri desktop packaging**: see `TAURI.md`. Frontend is Vite/React and needs no changes.
-  Rust backend will spawn publisher + bridge as subprocesses and expose native file dialogs.
-- **Co-simulation** (JuPedSim etc.): architecture is ready. Each simulator gets its own
-  `<name>/` topic namespace and proto file. No shared Agent supertype.
-- **Time synchronization**: for coupled simulators, eCAL services or a `sync/tick` topic barrier.
-- **eCAL service commands** from other simulators back to SUMO: `ServiceServer` foundation exists.
-- **Simulation speed control**: currently delay-based. True real-time stepping would track
-  wall-clock time and sleep the remainder of each step interval.
 
 ---
 
@@ -642,154 +459,181 @@ All licenses are permissive (no GPL). See `TAURI.md` for full license table.
 
 ---
 
-## ~~Lane-based network rendering~~ — implemented
+## Publisher-side Viewport Culling for Edge Data (Planned)
 
-`NetworkGeometry` fields 2/3 (`edge_starts`/`edge_positions`) removed; lane fields 12–16
-added (`lane_starts`, `lane_positions`, `lane_widths`, `lane_edge_indices`, `lane_ids`).
-`edge_ids` kept for TraCI data queries. `_CACHE_VERSION` bumped to 2; old caches auto-rebuild.
+### Problem
+The publisher queries TraCI for **all** active edges and transmits everything. The frontend
+culls to the viewport after receiving the data. For large networks this wastes TraCI query
+time and WebSocket bandwidth for off-screen edges.
 
-`_build_network_binary` iterates `net.getEdges()` → `edge.getLanes()` → `lane.getShape()` +
-`lane.getWidth()`. `lane_edge_indices[i]` maps lane i to its parent edge index.
+### Approach
 
-`NetworkLayer.ts`: `PathLayer` with `widthUnits: 'meters'` and per-path `getWidth` accessor
-(not binary attribute — PathLayer instances at segment level, not path level).
-`EdgeDataLayer.ts`: iterates `edgeValueMap` (occupied edges only) via `edgeLaneIndices` reverse
-map; bbox-tests each candidate lane against the current viewport; builds filtered typed arrays
-(positions, widths, colors) for the visible occupied subset only. `SolidPolygonLayer` for
-junctions keeps `_normalize: false`.
+**R-tree in publisher** (shapely `STRtree`, already in `requirements.txt`) + `set_viewport` service call.
 
-`_make_geo_converter` uses a minimal `sumolib.net.Net` with `setLocation` so the conversion
-is byte-for-byte identical to `net.convertXY2LonLat` (custom pyproj call gave wrong results
-due to axis-ordering differences in pyproj 2.x).
+**Coordinate system**: R-tree is built in the same coordinate space as published lane positions:
+- Geo networks → lon/lat (positions already converted by `_xy()` in `_build_network_binary`)
+- Ortho networks → SUMO XY metres
+
+The frontend's `geoViewportBounds`/`orthoViewportBounds` already return bounds in this same
+space, so no conversion is needed.
+
+**Data flow**:
+1. After `ng` is loaded (fresh build or cache), publisher builds edge R-tree from
+   `ng.lane_positions` + `ng.lane_edge_indices` using numpy (available via shapely).
+   Stored in `sim["edge_rtree"]` and `sim["edge_rtree_ids"]`.
+2. `ctrl["viewport_bounds"] = None` initially → no culling (backward-compatible).
+3. Frontend sends `set_viewport {min_x, min_y, max_x, max_y}` on viewport change (debounced 150 ms).
+4. `_on_set_viewport` stores bounds in `ctrl` and sets `needs_edgedata_snapshot = True`.
+5. Both snapshot and delta publishing filter through the R-tree before making TraCI calls.
+
+**On viewport change**: new snapshot queued → arrives within 1 step. The existing frontend
+`laneBBoxes` culling handles the brief transition window.
+
+### Files to change
+
+| File | Change |
+|------|--------|
+| `proto/sumo.proto` | Add `SetViewportRequest { double min_x/min_y/max_x/max_y }` |
+| `sumo_ecal_publisher.py` | `_build_edge_rtree(ng)`, update snapshot + delta filter, `_on_set_viewport` |
+| `ecal_ws_bridge.py` | Add `set_viewport` → `(SetViewportRequest, CommandAck)` to `_SERVICE_REGISTRY` |
+| `App.tsx` | Debounced `sendCommand('set_viewport', ...)` on `onViewChange` + initial send when edge data enabled |
+| (generated) | `npm run generate` after proto change |
+
+### Non-goals
+- Not removing frontend `laneBBoxes` culling (cheap safety net during transition)
+- Not supporting multi-viewport
 
 ---
 
-## Person and container layer
+## C++ eCAL Publisher (Performance Architecture)
 
 ### Motivation
 
-SUMO simulates pedestrians (`person`) and freight units (`container`) as well as vehicles.
-Both have position, angle, and type. Adding them completes the moving-object picture and is
-straightforward — same binary SimStep path, same ScatterplotLayer approach as vehicles.
+With libsumo in Python, every `traci.edge.getLastStepMeanSpeed(eid)` call incurs Python
+C-binding overhead. For large networks (thousands of active edges × multiple attributes per
+step), this accumulates to tens or hundreds of milliseconds per step — directly limiting
+simulation throughput. TraCI subscriptions do not help because with libsumo (in-process, no
+socket) individual getters are direct C++ calls, while subscriptions force SUMO to build
+intermediate Python dicts, potentially making things slower.
 
-### Proto changes
+A C++ publisher eliminates all Python overhead from the hot path:
+- `libsumo::Edge::getLastStepMeanSpeed(id)` is a direct C++ function call into SUMO's
+  already-computed internal data — no binding layer, no GIL, no dict allocation
+- The step loop (N vehicles × 5 attributes + M edges × K attributes) runs in native C++
+- protobuf C++ serialization is significantly faster than the Python library
+- No GIL means the step loop and service callbacks can run concurrently
 
-Add a shared `MobileAgent` message and extend `SimStep`:
+**The bridge and frontend are completely unchanged** — same eCAL topics, same proto messages,
+same WebSocket protocol. Only the publisher process is replaced.
 
-```protobuf
-message MobileAgent {
-  string id      = 1;
-  double x       = 2;
-  double y       = 3;
-  float  angle   = 4;
-  string type_id = 5;
-}
+### Architecture
 
-message SimStep {
-  int64                  time_ms    = 1;
-  repeated Vehicle       vehicles   = 2;
-  repeated MobileAgent   persons    = 3;
-  repeated MobileAgent   containers = 4;
-}
+```
+SUMO (C++ inside libsumo)
+    ↓ libsumo C++ API — direct calls, no socket, no Python binding overhead
+C++ eCAL publisher  ← hot path: SimStep, EdgeDataUpdate, TLSUpdate, NetworkGeometry
+    ↓ eCAL pub/sub + ServiceServer (protobuf)
+ecal_ws_bridge.py   ← unchanged
+    ↓ WebSocket (binary protobuf / JSON commands)
+Browser             ← unchanged
 ```
 
-`Vehicle` is kept as-is (it has `attributes` and `speed`). `MobileAgent` is lighter — persons
-and containers rarely need per-step attribute data.
+### Implementation plan
 
-### Publisher (`_step_loop`)
+**Build system**: CMake. SUMO ships a `SUMOConfig.cmake` / `find_package(SUMO)`. eCAL provides
+`eCALConfig.cmake`. Protobuf has first-class CMake support (`protobuf_generate`).
 
-After the existing vehicle loop, add:
+**What moves to C++** (hot path):
+- Step loop: `libsumo::Simulation::step()`, vehicle/person/edge data collection, protobuf
+  serialization, eCAL publish
+- Network geometry building: use SUMO's C++ `MSNet`, `MSEdge`, `MSLane` directly — same data
+  as `sumolib` but no file re-parse; or keep the Python cache-builder (runs once, result
+  reused) and load the `.ecaldeck` cache in C++ via protobuf `ParseFromArray`
+- eCAL `CServiceServer` with handlers for all service methods
 
-```python
-for pid in traci.person.getIDList():
-    x, y = traci.person.getPosition(pid)
-    if geo_ref and converter: x, y = converter(x, y)
-    p = ss.persons.add()
-    p.id = pid; p.x = x; p.y = y
-    p.angle = traci.person.getAngle(pid)
-    p.type_id = traci.person.getType(pid)
+**What can stay Python (optional hybrid)**:
+- Service handlers (load, pause, set_delay, etc.) are infrequent — Python overhead is
+  negligible. A thin Python process could own the service layer and delegate step execution
+  to the C++ component via a local socket or shared memory. Or port everything to C++.
 
-for cid in traci.container.getIDList():
-    x, y = traci.container.getPosition(cid)
-    if geo_ref and converter: x, y = converter(x, y)
-    c = ss.containers.add()
-    c.id = cid; c.x = x; c.y = y
-    c.angle = traci.container.getAngle(cid)
-    c.type_id = traci.container.getType(cid)
+**Key libsumo C++ calls** (replaces the Python equivalents 1:1):
+```cpp
+libsumo::Simulation::step(0);
+auto vids = libsumo::Vehicle::getIDList();
+auto pos  = libsumo::Vehicle::getPosition(vid);   // libsumo::TraCIPosition {x, y, z}
+auto spd  = libsumo::Vehicle::getSpeed(vid);       // double
+auto lane = libsumo::Vehicle::getLaneID(vid);      // std::string
+auto eids = libsumo::Edge::getIDList();
+auto spd  = libsumo::Edge::getLastStepMeanSpeed(eid); // double
+auto occ  = libsumo::Edge::getLastStepOccupancy(eid); // double
 ```
 
-### Frontend
+**Network geometry in C++** (alternative to sumolib):
+```cpp
+MSNet::getInstance()->getEdgeControl().getEdges()  // all MSEdge*
+edge->getLanes()                                    // std::vector<MSLane*>
+lane->getShape()                                    // PositionVector
+```
+Or simply load the `.ecaldeck` protobuf cache (built once by the existing Python script or
+on first run) — avoids reimplementing the full geometry builder in C++.
 
-New `PersonLayer.ts` — binary ScatterplotLayer similar to `VehicleLayer` but without speed
-colouring; persons in one colour (e.g. cyan), containers in another (e.g. orange). Visibility
-controlled by existing `LayerVisibility` toggle.
+### Incremental migration path
 
-Picking: persons and containers can be clicked to show an InfoPanel entry with id, type, angle.
-No "More info" service call needed initially (persons have fewer queryable attributes).
+1. **C++ step-loop publisher** — ports only the hot path (`_step_loop`); service handlers
+   remain in a Python sidecar connected via a local socket or env var handoff
+2. **C++ service handlers** — port load/pause/resume/set_attributes; eliminates Python entirely
+3. **C++ geometry builder** — port `_build_network_binary` using MSNet; removes sumolib dep
 
-### Implementation order
+Starting with step 1 delivers 90% of the performance benefit with moderate C++ scope.
 
-1. `sumo.proto` — add `MobileAgent`, extend `SimStep`; regenerate
-2. Publisher — person + container collection in step loop
-3. `PersonLayer.ts` — binary ScatterplotLayer for persons + containers
-4. `App.tsx` / `useSimSocket` — consume `simStep.persons` / `simStep.containers`; visibility toggle; picking
+### Considerations
 
----
-
-## Network Load Delay Investigation — Findings (2026-05-11)
-
-### Problem
-Network took 50–90 s to appear in the browser after page load. Second loads (via the Load
-button) were completely broken and never delivered the new network.
-
-### Root Causes Found
-
-**1. WebSocket `write_limit` throttling**
-`websockets.serve` defaults to a 32 KB write-limit high-water mark. Sending a 225 MB binary
-frame at 32 KB per asyncio iteration requires ~7 000 loop iterations, adding several seconds
-of latency even on loopback. Fixed: `write_limit=256*1024*1024`.
-
-**2. eCAL pub/sub discovery delay**
-`pub_network.get_subscriber_count()` returns 0 for 30+ seconds after the bridge subscriber
-connects — eCAL peer-discovery is slow. Mitigated by adding a `_network_poller` coroutine in
-the bridge that polls the `get_state` service every second and reads the cache file directly,
-independent of eCAL pub/sub timing.
-
-**3. libsumo GIL hold — the main bottleneck**
-`libsumo.load()` (inside `traci.start()`) holds the Python GIL for the entire network-loading
-phase (~60 s for Berlin). `bg_thread` — which builds the cache and sends the eCAL message —
-was completely blocked for that entire duration.
-
-Fix: join `bg_thread` (cache read + eCAL publish) **before** calling `traci.start()`, while
-the GIL is free. Then `time.sleep(1.0)` to let the bridge receive the eCAL message and read
-the 225 MB file into `_network_frame` before libsumo locks the GIL.
-
-**4. Second-load broken — wrong service name check**
-The bridge cleared `_network_frame` only when `service == "load_simulation"`, but the frontend
-sends `service == "load"`. The frame was never cleared, so both the eCAL callback and the
-poller short-circuited on the stale first-sim frame. Fix: check `"load"`.
-
-### Result
-- First load: ~20–22 s (down from 50–90 s). Remaining delay is SUMO's own startup — unavoidable.
-- Second load: works correctly within the same window.
-- No duplicate frame deliveries.
-
+- **Network geometry**: sumolib uses the net XML file and does its own parsing. The C++
+  equivalent reads the same data via SUMO's MSNet after `Simulation::loadFiles()`. Alternatively,
+  keep the Python cache-builder as a one-time preprocessing step — the C++ publisher just
+  reads the `.ecaldeck` binary.
+- **pyproj geo conversion**: replace with PROJ C++ API (`proj_trans`) or the same sumolib
+  `net.convertXY2LonLat` logic ported to C++ using SUMO's `GeoConvHelper`.
+- **eCAL C++ service API**: `eCAL::CServiceServer::SetMethodCallback` takes a
+  `std::function<int(const std::string&, const std::string&, std::string&)>` — clean to use.
+- **Bridge-side viewport culling**: keeps publisher topology-neutral (multiple frontends).
+  The R-tree (shapely `STRtree`) lives in the bridge; publisher always sends all active edges.
+  With C++ speed, querying all active edges is no longer a bottleneck, making bridge-side
+  culling the right long-term choice over publisher-side.
 
 ---
 
-## TypeScript Status
+## Future
 
-`npx tsc --noEmit` passes with **zero errors** as of 2026-05-11.
-The 5 type errors previously noted in `EdgeDataLayer.ts`, `PersonLayer.ts`, `VehicleLayer.ts`, and `App.tsx` are resolved.
+### Screen recording to video
+**Feasibility**: High. deck.gl renders into a `<canvas>` element; `canvas.captureStream(30)` returns
+a `MediaStream` that can be fed directly to `MediaRecorder` with `video/webm` or `video/mp4` codec.
+Recording start/stop can be a button in the ControlPanel.
+
+**Implementation sketch**:
+1. Add a "Record" button to `ControlPanel.tsx`.
+2. On start: `canvas.captureStream(30)` → `new MediaRecorder(stream, { mimeType: 'video/webm' })` →
+   collect `ondataavailable` chunks.
+3. On stop: assemble `Blob` → `URL.createObjectURL` → trigger `<a download>` click.
+4. No server-side changes needed — pure browser API.
+
+**Limitations**: Frame rate is capped by the browser's rendering pipeline. Audio is not captured.
+`video/mp4` support varies by browser; `video/webm` is universally supported in Chrome/Firefox.
 
 ---
 
-## Console Warning Cleanup (2026-05-11)
+### 3D view
+**Feasibility**: High. deck.gl natively supports 3D via `MapViewState.pitch` (tilt the camera).
 
-Three browser console warnings were addressed:
+**Implementation sketch**:
+1. Add a "3D" toggle to `ControlPanel.tsx` that sets `pitch: 45` (and optionally `bearing`).
+2. Road network: replace `PathLayer` with `PolygonLayer` using lane center + width → extruded
+   polygons with a small height (e.g. 0.2 m for road surface).
+3. Buildings: add a `GeoJsonLayer` sourced from the MapLibre basemap's building layer
+   (OpenFreemap has 3D building data) with `extruded: true, getElevation: f => f.properties.height`.
+4. Vehicles: `SimpleMeshLayer` already renders 3D meshes — replace flat rectangles with OBJ
+   models (car.obj, bus.obj, etc.) loaded via `@loaders.gl/obj`.
+5. Camera: expose pitch/bearing sliders in the UI, or use mouse right-drag (deck.gl default).
 
-| Warning | Source | Fix |
-|---|---|---|
-| `deck: Attribute instanceColors is normalized` | deck.gl binary attribute without explicit `normalized` flag | Added `normalized: true` to `getColor: { value: colors, size: 4 }` in `VehicleLayer.ts` and `PersonLayer.ts` |
-| `WEBGL_debug_renderer_info is deprecated` | luma.gl reading a Firefox-deprecated WebGL extension | **Not fixable**: Firefox emits this as a native browser warning (not via `console.warn`), so JS-level filtering doesn't work. Would require patching `WebGLRenderingContext.prototype.getExtension` — deemed not worth the effort. |
-| `Expected value to be of type number, but found null` | MapLibre basemap tile data has null values for numeric style expressions | Left visible — may be useful to detect style/data issues |
+**Limitations**: Orthographic networks (non-geo-referenced) don't have elevation data for buildings.
+OBJ model loading adds bundle size; start with extruded `SimpleMeshLayer` boxes as placeholders.
