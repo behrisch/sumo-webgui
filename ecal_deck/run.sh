@@ -21,7 +21,7 @@ npm --prefix frontend run generate
 $PYTHON ecal_ws_bridge.py --ws-port $WS_PORT &
 BRIDGE_PID=$!
 
-$PYTHON sumo_ecal_publisher.py --sumo-cfg ~/sumo/tests/_mitte_plain/test/osm.sumocfg --delay 1000 &
+$PYTHON sumo_ecal_publisher.py --sumo-cfg ../doe/view.sumocfg --delay 0 &
 PUBLISHER_PID=$!
 
 npm --prefix frontend run dev

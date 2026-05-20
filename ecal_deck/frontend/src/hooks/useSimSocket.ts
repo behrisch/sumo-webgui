@@ -18,6 +18,7 @@ export interface SimControlState {
   step_interval_current: number;
   step_at_min_bound: boolean;
   step_at_max_bound: boolean;
+  simulation_ready: boolean;
 }
 
 export type CommandResponse = Record<string, unknown> & { ok?: boolean; error?: string };
@@ -330,12 +331,14 @@ export function useSimSocket(url: string): SimState {
         switch (msg.type) {
           case 'state': {
             const d = msg.data as { delay_ms?: number; paused?: boolean; sumocfg_path?: string; error?: string;
-              step_interval_current?: number; step_at_min_bound?: boolean; step_at_max_bound?: boolean };
+              step_interval_current?: number; step_at_min_bound?: boolean; step_at_max_bound?: boolean;
+              simulation_ready?: boolean };
             if (!d?.error && d?.delay_ms !== undefined)
               setControlState({ delayMs: d.delay_ms, paused: d.paused ?? false, sumocfg_path: d.sumocfg_path ?? '',
                 step_interval_current: d.step_interval_current ?? 1,
                 step_at_min_bound: d.step_at_min_bound ?? false,
-                step_at_max_bound: d.step_at_max_bound ?? false });
+                step_at_max_bound: d.step_at_max_bound ?? false,
+                simulation_ready: d.simulation_ready ?? false });
             break;
           }
           case 'attributes': {

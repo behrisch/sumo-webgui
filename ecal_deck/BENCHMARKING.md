@@ -11,12 +11,18 @@
 | Frontend, memory stability | JS heap after 5 min | < 200 MB |
 
 ### Doe 6-7
+whole network in full screen mode
 full hour:
 - sumo plain: 88s
 - sumo-gui: 134s
 - web-gui: 159s (without auto interval, color vehicles by speed, no edge coloring)
 
-Benchmark scenario: Doe 6:00-6:10
+Benchmark scenario: Doe 6:00-6:10 (best of 3)
+- sumo plain: 10.6s
+- sumo-gui: 17.2s
+- web-gui 26.0s (with update interval 1)
+- web-gui 10.0s (with auto interval <= 10)
+
 
 ---
 

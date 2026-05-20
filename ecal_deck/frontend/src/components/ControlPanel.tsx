@@ -51,6 +51,8 @@ interface Props {
   atMaxBound: boolean;
   onStepConfig: (min: number, max: number, autotune: boolean) => void;
   perf: PerfStats;
+  watchMs: number | null;      // null = not started; number = elapsed ms (ticking or frozen)
+  watchRunning: boolean;       // true while ticking, false when frozen at sim end
   cfgPath: string;
   onBrowse: () => void;
   onReload: () => void;
@@ -208,6 +210,14 @@ export function ControlPanel(p: Props) {
       <div style={{ borderTop: '1px solid #444', paddingTop: 4, opacity: 0.6, fontSize: 11, lineHeight: 1.6 }}>
         <div>msg/s {p.perf.msgPerSec}  frame {p.perf.frameMs.toFixed(1)}ms</div>
         <div>parse {p.perf.parseMs.toFixed(2)}ms  veh-build {p.perf.vehicleBuildMs.toFixed(2)}ms</div>
+        {p.watchMs !== null && (
+          <div style={{ opacity: p.watchRunning ? 1 : 0.5 }}>
+            ⏱ {p.watchMs >= 3600000
+              ? new Date(p.watchMs).toISOString().slice(11, 19)
+              : (p.watchMs / 1000).toFixed(1) + ' s'}
+            {!p.watchRunning && ' (done)'}
+          </div>
+        )}
       </div>
 
       {p.attributeConfig && (

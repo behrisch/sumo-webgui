@@ -78,6 +78,26 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
         return None
 
 
+def _end_time_ms_from_cfg(sumocfg_path: str) -> int | None:
+    """Return the configured <time><end> value in milliseconds, or None if absent.
+
+    SUMO supports both plain-seconds ("3600") and HH:MM:SS ("1:00:00") formats;
+    sumolib.miscutils.parseTime handles both.
+    """
+    try:
+        import xml.etree.ElementTree as _ET
+        root = _ET.parse(sumocfg_path).getroot()
+        el   = root.find('.//time/end')
+        if el is not None:
+            val = el.get('value', '').strip()
+            if val:
+                from sumolib.miscutils import parseTime as _parseTime
+                return round(_parseTime(val) * 1000)
+    except Exception:
+        pass
+    return None
+
+
 def _net_file_from_cfg(sumocfg_path: str) -> str:
     cfg_dir = os.path.dirname(os.path.abspath(sumocfg_path))
     for inp in sumolib.xml.parse(sumocfg_path, "input"):
@@ -391,7 +411,7 @@ def main():
 
     # per-simulation state (replaced on each load)
     sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False,
-           "edge_id_to_idx": {}}
+           "edge_id_to_idx": {}, "end_time_ms": None}
 
     # type-level property cache: type_id → (length, width, gui_shape)
     # cleared on each load so stale type data from a previous simulation doesn't leak
@@ -504,6 +524,11 @@ def main():
 
             traci.simulationStep()
             time_ms = round(traci.simulation.getTime() * 1000)
+
+            end_ms = sim["end_time_ms"]
+            if end_ms is not None and time_ms >= end_ms:
+                _log("INFO", "Simulation reached end time (%.1f s)" % (time_ms / 1000))
+                break
 
             # --- full edgebin snapshot if requested (outside normal interval) ---
             if ctrl["needs_edgebin_snapshot"] and ctrl["edge_attributes"]:
@@ -678,6 +703,7 @@ def main():
                 _t_report   = now
                 total_sleep = 0
 
+        ctrl["simulation_ready"] = False
         try:
             traci.close()
         except Exception:
@@ -772,8 +798,13 @@ def main():
             sim["all_edges"]       = list(ng.edge_ids)
             sim["has_tls"]         = bool(ng.tls_entries)
             sim["edge_id_to_idx"]  = {eid: i for i, eid in enumerate(ng.edge_ids)}
+            sim["end_time_ms"]     = _end_time_ms_from_cfg(sumocfg_path)
             ctrl["sumocfg_path"]   = sumocfg_path
-            _log("INFO", "Published network (cache: %s)" % cp)
+            if sim["end_time_ms"] is not None:
+                _log("INFO", "Published network (cache: %s, end time: %.1f s)"
+                     % (cp, sim["end_time_ms"] / 1000))
+            else:
+                _log("INFO", "Published network (cache: %s, no end time configured)" % cp)
 
             # reset per-sim state — start paused so the user can inspect before running
             ctrl["paused"] = True

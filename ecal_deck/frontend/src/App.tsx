@@ -231,9 +231,15 @@ export default function App() {
   useEffect(() => { setViewState(null); }, [network]);
   const activeView = viewState ?? parsed?.initialViewState ?? null;
 
-  const [paused, setPaused]   = useState(false);
+  const [paused, setPaused]     = useState(false);
   const [simReady, setSimReady] = useState(false);
   const readyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Wall-clock stopwatch: starts on ▶, freezes when simulation ends.
+  const watchStartRef    = useRef<number | null>(null); // Date.now() when ▶ pressed
+  const [watchMs, setWatchMs] = useState<number | null>(null); // null = not started yet
+  const watchTickRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const watchEndPollRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const [delayMs, setDelayMs] = useState(0);
   const [basemapStyle, setBasemapStyle] = useState('positron');
 
@@ -243,6 +249,8 @@ export default function App() {
       setPaused(controlState.paused);
       if (controlState.sumocfg_path) setCfgPath(controlState.sumocfg_path);
       setIntervalMin(controlState.step_interval_current);
+      // Activate controls when already-running sim is detected (e.g. loaded via CLI arg).
+      if (controlState.simulation_ready) setSimReady(true);
     }
   }, [controlState]);
 
@@ -260,6 +268,11 @@ export default function App() {
     loadingToastId.current = toast.loading('Loading simulation…') as string;
     setSimReady(false);
     setPaused(true);
+    // Reset stopwatch.
+    if (watchTickRef.current)    { clearInterval(watchTickRef.current);    watchTickRef.current    = null; }
+    if (watchEndPollRef.current) { clearInterval(watchEndPollRef.current); watchEndPollRef.current = null; }
+    watchStartRef.current = null;
+    setWatchMs(null);
     sendCommand('load', { sumocfg_path: path }, (resp) => {
       if (!resp.ok) {
         toast.dismiss(loadingToastId.current ?? undefined);
@@ -269,27 +282,28 @@ export default function App() {
     });
   };
 
-  // When the network frame arrives the .ecaldeck cache is ready but libsumo may still be
-  // loading. Poll get_state every second until simulation_ready=true, then show the toast
-  // and enable controls.
+  // Poll get_state every second after the network frame arrives, until simulation_ready=true.
+  // This handles three cases uniformly:
+  //   - manual load: toast is shown when ready, paused=true enforced
+  //   - CLI pre-load: no toast, but paused/simReady set from the actual server state
+  //   - reconnect to ready sim: poll fires once immediately, idempotent
+  // Using resp.paused (not assuming true) correctly handles reconnects to running sims.
   useEffect(() => {
     if (!network) return;
-    if (!loadingToastId.current) {
-      // Reconnect while already loaded — just sync state once.
-      sendCommand('get_state');
-      return;
-    }
     if (readyPollRef.current) clearInterval(readyPollRef.current);
     readyPollRef.current = setInterval(() => {
       sendCommand('get_state', {}, (resp) => {
         if (resp.simulation_ready) {
           clearInterval(readyPollRef.current!);
           readyPollRef.current = null;
-          toast.success('Simulation loaded', { id: loadingToastId.current ?? undefined });
-          loadingToastId.current = null;
+          if (loadingToastId.current) {
+            toast.success('Simulation loaded', { id: loadingToastId.current });
+            loadingToastId.current = null;
+          }
           setSimReady(true);
           setDelayMs((resp.delay_ms as number) ?? 0);
-          setPaused(true);
+          setPaused((resp.paused as boolean) ?? true);
+          if (resp.sumocfg_path) setCfgPath(resp.sumocfg_path as string);
         }
       });
     }, 1000);
@@ -298,7 +312,30 @@ export default function App() {
   }, [network]);
 
   const handlePause  = () => { sendCommand('pause');  setPaused(true);  };
-  const handleResume = () => { sendCommand('resume'); setPaused(false); };
+  const handleResume = () => {
+    sendCommand('resume');
+    setPaused(false);
+    // Start (or restart) the stopwatch when ▶ is pressed.
+    if (watchTickRef.current) clearInterval(watchTickRef.current);
+    if (watchEndPollRef.current) clearInterval(watchEndPollRef.current);
+    watchStartRef.current = Date.now();
+    setWatchMs(0);
+    watchTickRef.current = setInterval(
+      () => { if (watchStartRef.current) setWatchMs(Date.now() - watchStartRef.current); },
+      200,
+    );
+    // Poll get_state every 2 s to detect simulation end (simulation_ready → false).
+    watchEndPollRef.current = setInterval(() => {
+      sendCommand('get_state', {}, (resp) => {
+        if (!resp.simulation_ready) {
+          clearInterval(watchEndPollRef.current!); watchEndPollRef.current = null;
+          clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
+          if (watchStartRef.current) { setWatchMs(Date.now() - watchStartRef.current); watchStartRef.current = null; }
+          setSimReady(false);
+        }
+      });
+    }, 2000);
+  };
   const handleStep   = () => { sendCommand('step'); };
   const handleDelay      = (ms: number) => { setDelayMs(ms); sendCommand('set_delay', { delay_ms: ms }); };
   const handleAttributes = (vehicle: string[], edge: string[]) => {
@@ -510,6 +547,8 @@ export default function App() {
       cfgPath={cfgPath} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
       perf={perf}
+      watchMs={watchMs}
+      watchRunning={watchStartRef.current !== null}
     />
   );
 
