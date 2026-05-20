@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import type { Vehicle, MobileAgent, TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse } from '../generated/sumo';
-import type { EdgeValueMap, CommandResponse } from '../hooks/useSimSocket';
+import type { TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse, GetAttributesResponse } from '../generated/sumo';
+import type { VehicleSnapshot, EdgeAttrState, CommandResponse } from '../hooks/useSimSocket';
 
 export type SelectedObject =
   | { type: 'vehicle';   id: string }
@@ -12,10 +12,10 @@ export type SelectedObject =
 
 interface Props {
   selected: SelectedObject;
-  vehicles: Vehicle[];
-  persons: MobileAgent[];
-  containers: MobileAgent[];
-  edgeValueMap: EdgeValueMap;
+  snapshot: VehicleSnapshot | null;
+  edgeAttr: EdgeAttrState | null;
+  edgeIdToIndex: Map<string, number>;
+  attrConfig: GetAttributesResponse | null;
   tlsLights: TLSPhase[];
   following: boolean;
   onFollow: () => void;
@@ -44,45 +44,47 @@ const row = (label: string, value: string | number) => (
   </div>
 );
 
-function VehicleInfo({ id, vehicles }: { id: string; vehicles: Vehicle[] }) {
-  const v = vehicles.find(v => v.id === id);
-  if (!v) return <div style={{ opacity: 0.5 }}>Vehicle no longer present</div>;
-  // protobuf omits default (0) values — guard with ?? 0
-  const speed = v.speed ?? 0;
-  const angle = v.angle ?? 0;
+function VehicleInfo({ id, snapshot, attrConfig }: { id: string; snapshot: VehicleSnapshot | null; attrConfig: GetAttributesResponse | null }) {
+  const idx = snapshot?.vehicle_ids.indexOf(id) ?? -1;
+  if (idx < 0) return <div style={{ opacity: 0.5 }}>Vehicle no longer present</div>;
+  const speed     = snapshot!.veh_speeds[idx] ?? 0;
+  const angle     = snapshot!.veh_angles[idx] ?? 0;
+  const attrNames = attrConfig?.vehicle_enabled ?? [];
   return (
     <>
-      {row('id',    v.id ?? '?')}
-      {row('type',  v.type_id ?? '?')}
+      {row('id',    id)}
       {row('speed', speed.toFixed(1) + ' m/s (' + (speed * 3.6).toFixed(0) + ' km/h)')}
       {row('angle', angle.toFixed(0) + '°')}
-      {Object.entries(v.attributes ?? {}).map(([k, val]) =>
-        row(k, typeof val === 'number' ? val.toFixed(3) : String(val))
-      )}
+      {attrNames.map((name, k) => {
+        const vals = snapshot!.veh_attr_vals[k];
+        return vals ? row(name, vals[idx].toFixed(3)) : null;
+      })}
     </>
   );
 }
 
-function EdgeInfo({ id, edgeValueMap }: { id: string; edgeValueMap: EdgeValueMap }) {
-  const attrs = edgeValueMap.get(id);
-  if (!attrs || Object.keys(attrs).length === 0)
-    return <div style={{ opacity: 0.5 }}>No edge data collected</div>;
+function AgentInfo({ id, snapshot }: { id: string; snapshot: VehicleSnapshot | null }) {
+  const idx = snapshot?.agent_ids.indexOf(id) ?? -1;
+  if (idx < 0) return <div style={{ opacity: 0.5 }}>No longer present</div>;
+  return (
+    <>
+      {row('id',    id)}
+      {row('angle', (snapshot!.agent_angles[idx] ?? 0).toFixed(0) + '°')}
+    </>
+  );
+}
+
+function EdgeInfo({ id, edgeAttr, edgeIdToIndex }: { id: string; edgeAttr: EdgeAttrState | null; edgeIdToIndex: Map<string, number> }) {
+  const ei = edgeIdToIndex.get(id);
+  if (ei === undefined || !edgeAttr || edgeAttr.values.length === 0)
+    return <>{row('id', id)}<div style={{ opacity: 0.5 }}>No edge data collected</div></>;
   return (
     <>
       {row('id', id)}
-      {Object.entries(attrs).map(([k, val]) => row(k, val.toFixed(3)))}
-    </>
-  );
-}
-
-function AgentInfo({ id, agents }: { id: string; agents: MobileAgent[] }) {
-  const a = agents.find(a => a.id === id);
-  if (!a) return <div style={{ opacity: 0.5 }}>No longer present</div>;
-  return (
-    <>
-      {row('id',    a.id)}
-      {row('type',  a.type_id ?? '?')}
-      {row('angle', (a.angle ?? 0).toFixed(0) + '°')}
+      {edgeAttr.attrNames.map((name, k) => {
+        const val = edgeAttr.values[k][ei];
+        return isNaN(val) ? null : row(name, val.toFixed(3));
+      })}
     </>
   );
 }
@@ -97,7 +99,7 @@ function TLSInfo({ id, tlIndex, tlsLights }: { id: string; tlIndex: number; tlsL
   const colors: Record<string, string> = { G: '#0c0', g: '#0a0', Y: '#fc0', y: '#fa0', R: '#f00', r: '#800' };
   return (
     <>
-      {row('tls id',  id)}
+      {row('tls id',   id)}
       {row('link idx', tlIndex)}
       <div style={{ display: 'flex', gap: 8 }}>
         <span style={{ opacity: 0.5, minWidth: 90 }}>signal</span>
@@ -110,7 +112,7 @@ function TLSInfo({ id, tlIndex, tlsLights }: { id: string; tlIndex: number; tlsL
   );
 }
 
-export function InfoPanel({ selected, vehicles, persons, containers, edgeValueMap, tlsLights, following, onFollow, onClose, sendCommand }: Props) {
+export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrConfig, tlsLights, following, onFollow, onClose, sendCommand }: Props) {
   const [extraVehicle, setExtraVehicle] = useState<GetVehicleInfoResponse | null>(null);
   const [extraEdge,    setExtraEdge]    = useState<GetEdgeInfoResponse    | null>(null);
   const [loading, setLoading] = useState(false);
@@ -153,10 +155,10 @@ export function InfoPanel({ selected, vehicles, persons, containers, edgeValueMa
         </div>
       </div>
 
-      {selected.type === 'vehicle'   && <VehicleInfo id={selected.id} vehicles={vehicles} />}
-      {selected.type === 'person'    && <AgentInfo id={selected.id} agents={persons} />}
-      {selected.type === 'container' && <AgentInfo id={selected.id} agents={containers} />}
-      {selected.type === 'edge'      && <EdgeInfo id={selected.id} edgeValueMap={edgeValueMap} />}
+      {selected.type === 'vehicle'   && <VehicleInfo id={selected.id} snapshot={snapshot} attrConfig={attrConfig} />}
+      {selected.type === 'person'    && <AgentInfo id={selected.id} snapshot={snapshot} />}
+      {selected.type === 'container' && <AgentInfo id={selected.id} snapshot={snapshot} />}
+      {selected.type === 'edge'      && <EdgeInfo id={selected.id} edgeAttr={edgeAttr} edgeIdToIndex={edgeIdToIndex} />}
       {selected.type === 'junction'  && row('id', selected.id)}
       {selected.type === 'tls' && (
         <TLSInfo id={selected.id} tlIndex={selected.tlIndex} tlsLights={tlsLights} />

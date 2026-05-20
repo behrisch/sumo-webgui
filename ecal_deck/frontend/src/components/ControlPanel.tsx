@@ -1,4 +1,5 @@
-import type { SimStep, GetAttributesResponse } from '../generated/sumo';
+import type { GetAttributesResponse } from '../generated/sumo';
+import type { VehicleSnapshot } from '../hooks/useSimSocket';
 import type { PerfStats } from '../hooks/usePerfStats';
 import type { VehicleShape } from '../layers/vehicleShapes';
 
@@ -21,7 +22,7 @@ interface Props {
   onStep: () => void;
   delayMs: number;
   onSetDelay: (ms: number) => void;
-  simStep: SimStep | null;
+  snapshot: VehicleSnapshot | null;
   geoReferenced: boolean;
   basemapStyle: string;
   basemapStyles: string[];
@@ -64,9 +65,9 @@ const sel: React.CSSProperties = {
 };
 
 export function ControlPanel(p: Props) {
-  const t = p.simStep != null ? ((p.simStep.time_ms ?? 0) / 1000).toFixed(1) : null;
-  const nv = p.simStep != null ? (p.simStep.vehicles?.length ?? 0) : null;
-  const np = p.simStep != null ? (p.simStep.persons?.length ?? 0) : null;
+  const t  = p.snapshot != null ? (p.snapshot.time_ms / 1000).toFixed(1) : null;
+  const nv = p.snapshot != null ? p.snapshot.veh_count : null;
+  const np = p.snapshot != null ? p.snapshot.agent_count : null;
 
   const cfgName = p.cfgPath ? p.cfgPath.split('/').pop() : null;
 

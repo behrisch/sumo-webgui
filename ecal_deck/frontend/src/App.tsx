@@ -11,7 +11,7 @@ import { usePerfStats } from './hooks/usePerfStats';
 import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer } from './layers/NetworkLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
-import { buildPersonLayer, buildContainerLayer } from './layers/PersonLayer';
+import { buildAgentLayer } from './layers/PersonLayer';
 import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
 import { ControlPanel } from './components/ControlPanel';
@@ -209,7 +209,8 @@ function orthoViewportBounds(vs: OrthographicViewState): [number, number, number
 }
 
 export default function App() {
-  const { connected, reconnectAttempt, network, simStep, tlsUpdate, edgeValueMap, edgeBaselineMap, edgeValueVersion,
+  const { connected, reconnectAttempt, network, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
+          edgeAttr, edgeAttrVersion,
           logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const perf = usePerfStats();
 
@@ -310,34 +311,39 @@ export default function App() {
 
   useEffect(() => {
     if (!following || selectedObject?.type !== 'vehicle' || !parsed) return;
-    const v = simStep?.vehicles?.find(v => v.id === selectedObject.id);
-    if (!v) {
+    const idx = vehicleSnapshot?.vehicle_ids.indexOf(selectedObject.id) ?? -1;
+    if (idx < 0) {
       setFollowing(false);
       setSelectedObject(null);
       return;
     }
-    const x = v.x ?? 0, y = v.y ?? 0;
+    const x = vehicleSnapshot!.veh_positions[idx * 2];
+    const y = vehicleSnapshot!.veh_positions[idx * 2 + 1];
     setViewState(prev => {
       if (!prev) return prev;
       return parsed.geoReferenced
         ? { ...(prev as MapViewState), longitude: x, latitude: y }
         : { ...(prev as OrthographicViewState), target: [x, y, 0] };
     });
-  }, [simStep, following, selectedObject, parsed]);
+  }, [vehicleSnapshot, following, selectedObject, parsed]);
 
   const handleClick = useCallback((info: PickingInfo) => {
     const layerId = info.layer?.id;
     if (!layerId || !info.picked) { setSelectedObject(null); return; }
 
     if (layerId === 'vehicles') {
-      const v = simStep?.vehicles?.[info.index];
-      if (v) { setSelectedObject({ type: 'vehicle', id: v.id }); setFollowing(false); }
+      const id = vehicleSnapshot?.vehicle_ids[info.index];
+      if (id) { setSelectedObject({ type: 'vehicle', id }); setFollowing(false); }
     } else if (layerId === 'persons') {
-      const p = simStep?.persons?.[info.index];
-      if (p) setSelectedObject({ type: 'person', id: p.id });
+      // info.index is index within the persons sub-array built by buildAgentLayer
+      // agent_ids contains all agents; persons come first (before containers in the ordering
+      // used by buildAgentLayer — but those are filtered by class, so we can't directly map).
+      // Best-effort: look up in agent_ids linearly for now.
+      const id = vehicleSnapshot?.agent_ids[info.index];
+      if (id) setSelectedObject({ type: 'person', id });
     } else if (layerId === 'containers') {
-      const c = simStep?.containers?.[info.index];
-      if (c) setSelectedObject({ type: 'container', id: c.id });
+      const id = vehicleSnapshot?.agent_ids[info.index];
+      if (id) setSelectedObject({ type: 'container', id });
     } else if (layerId === 'lanes' || layerId === 'edgedata') {
       const edgeIdx = parsed?.laneEdgeIndices[info.index];
       const id = edgeIdx !== undefined ? parsed?.edgeIds[edgeIdx] : undefined;
@@ -351,7 +357,7 @@ export default function App() {
     } else {
       setSelectedObject(null);
     }
-  }, [simStep, parsed]);
+  }, [vehicleSnapshot, parsed]);
 
   const [intervalMin, setIntervalMin]   = useState(1);
   const [intervalMax, setIntervalMax]   = useState(10);
@@ -378,17 +384,18 @@ export default function App() {
   }, [parsed]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
-  // activeView is read from the closure (not a dep): viewport is sampled at the moment
-  // edge data changes rather than on every pan/zoom frame.
-  // edgeBaselineMap/edgeValueMap are stable refs; edgeValueVersion is the change signal.
+  // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
+  // moment edge data changes rather than on every pan/zoom frame.
+  // edgeAttr is a stable ref; edgeAttrVersion is the change signal.
   const edgeDataLayer = useMemo(() => {
-    if (!parsed || !visibility.edgeData || !edgeColorAttr || edgeBaselineMap.size === 0 || !activeView) return null;
+    if (!parsed || !visibility.edgeData || !edgeColorAttr || !edgeAttr ||
+        !edgeAttr.attrNames.includes(edgeColorAttr) || !activeView) return null;
     const vpBounds = parsed.geoReferenced
       ? geoViewportBounds(activeView as MapViewState)
       : orthoViewportBounds(activeView as OrthographicViewState);
-    return buildEdgeDataLayer(parsed, edgeBaselineMap, edgeValueMap, edgeColorAttr, vpBounds);
+    return buildEdgeDataLayer(parsed, edgeAttr, edgeColorAttr, vpBounds);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parsed, edgeValueVersion, edgeColorAttr, visibility.edgeData]);
+  }, [parsed, edgeAttrVersion, edgeColorAttr, visibility.edgeData]);
 
   const layers = useMemo(() => {
     if (!parsed) return [];
@@ -403,15 +410,23 @@ export default function App() {
     if (arrowLayer)    result.push(arrowLayer.clone({ visible: visibility.edges }));
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
-    if (visibility.vehicles)
-      result.push(buildVehicleLayer(simStep?.vehicles ?? [],
-        vehicleColorAttr === 'speed' ? undefined : vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel));
-    if (visibility.persons)
-      result.push(buildPersonLayer(simStep?.persons ?? [], vehicleMinPixels, metersPerPixel));
-    if (visibility.containers)
-      result.push(buildContainerLayer(simStep?.containers ?? [], vehicleMinPixels, metersPerPixel));
+    if (visibility.vehicles) {
+      const colorAttrIdx = vehicleColorAttr === 'speed'
+        ? -1
+        : (attributeConfig?.vehicle_enabled.indexOf(vehicleColorAttr) ?? -1);
+      const vl = buildVehicleLayer(vehicleSnapshot, vehicleTypeTable, colorAttrIdx, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel);
+      if (vl) result.push(vl);
+    }
+    if (visibility.persons || visibility.containers) {
+      const agentLayers = buildAgentLayer(vehicleSnapshot, vehicleTypeTable, vehicleMinPixels, metersPerPixel);
+      for (const al of agentLayers) {
+        if (al.id === 'persons'    && !visibility.persons)    continue;
+        if (al.id === 'containers' && !visibility.containers) continue;
+        result.push(al);
+      }
+    }
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, simStep, tlsUpdate, visibility, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (
@@ -449,7 +464,7 @@ export default function App() {
       connected={connected} paused={paused}
       onPause={handlePause} onResume={handleResume} onStep={handleStep}
       delayMs={delayMs} onSetDelay={handleDelay}
-      simStep={simStep} geoReferenced={parsed.geoReferenced}
+      snapshot={vehicleSnapshot} geoReferenced={parsed.geoReferenced}
       basemapStyle={basemapStyle} basemapStyles={Object.keys(BASEMAP_STYLES)} onBasemapStyle={setBasemapStyle}
       visibility={visibility} onVisibility={patchVisibility}
       vehicleColorAttr={vehicleColorAttr} vehicleKeys={vehicleKeys} onVehicleColorAttr={setVehicleColorAttr}
@@ -480,10 +495,10 @@ export default function App() {
   const infoPanel = selectedObject && (
     <InfoPanel
       selected={selectedObject}
-      vehicles={simStep?.vehicles ?? []}
-      persons={simStep?.persons ?? []}
-      containers={simStep?.containers ?? []}
-      edgeValueMap={edgeValueMap}
+      snapshot={vehicleSnapshot}
+      edgeAttr={edgeAttr}
+      edgeIdToIndex={parsed?.edgeIdToIndex ?? new Map()}
+      attrConfig={attributeConfig}
       tlsLights={tlsUpdate?.lights ?? []}
       following={following}
       onFollow={() => setFollowing(f => !f)}

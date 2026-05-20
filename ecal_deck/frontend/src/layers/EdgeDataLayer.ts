@@ -1,43 +1,42 @@
 import { PathLayer } from '@deck.gl/layers';
 import type { ParsedNetwork } from '../App';
-import type { EdgeValueMap } from '../hooks/useSimSocket';
+import type { EdgeAttrState } from '../hooks/useSimSocket';
 import { colormap } from '../utils/colormap';
 
 export function buildEdgeDataLayer(
   parsed: ParsedNetwork,
-  baselineMap: EdgeValueMap,  // all edges from last full snapshot
-  deltaMap: EdgeValueMap,     // currently-occupied edges (overrides baseline)
+  edgeAttr: EdgeAttrState,
   colorAttr: string,
-  vpBounds: [number, number, number, number],  // [minX, minY, maxX, maxY] in network coords
+  vpBounds: [number, number, number, number],
 ) {
-  const [vpX0, vpY0, vpX1, vpY1] = vpBounds;
-  const bboxes = parsed.laneBBoxes;
-  const totalSrcPts = parsed.lanePositions.length / 2;
+  const colorAttrIdx = edgeAttr.attrNames.indexOf(colorAttr);
+  if (colorAttrIdx < 0) return null;
 
-  // Merge: iterate baseline (all edges), override with delta where present.
-  // This means unoccupied edges show their last-known baseline values while
-  // currently-occupied edges show live values — no stale colors linger.
+  const colorVals    = edgeAttr.values[colorAttrIdx];
+  const N_edges      = colorVals.length;
+  const [vpX0, vpY0, vpX1, vpY1] = vpBounds;
+  const bboxes       = parsed.laneBBoxes;
+  const totalSrcPts  = parsed.lanePositions.length / 2;
+
   let min = Infinity, max = -Infinity;
   const visLanes: number[] = [];
   const visVals: number[]  = [];
 
-  for (const [edgeId, baseAttrs] of baselineMap) {
-    const attrs = deltaMap.get(edgeId) ?? baseAttrs;
-    const val = attrs[colorAttr];
-    if (val === undefined) continue;
-    if (val < min) min = val;
-    if (val > max) max = val;
+  for (let ei = 0; ei < N_edges; ei++) {
+    const val = colorVals[ei];
+    if (!isFinite(val)) continue; // NaN = no data yet
 
-    const ei = parsed.edgeIdToIndex.get(edgeId);
-    if (ei === undefined) continue;
     const lanes = parsed.edgeLanesByIdx[ei];
     if (!lanes) continue;
+
     for (const li of lanes) {
       const b = li * 4;
       if (bboxes[b + 2] >= vpX0 && bboxes[b] <= vpX1 &&
           bboxes[b + 3] >= vpY0 && bboxes[b + 1] <= vpY1) {
         visLanes.push(li);
         visVals.push(val);
+        if (val < min) min = val;
+        if (val > max) max = val;
       }
     }
   }

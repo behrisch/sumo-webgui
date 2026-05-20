@@ -3,10 +3,11 @@
 SUMO eCAL publisher -- starts SUMO and publishes simulation state as eCAL protobuf messages.
 
 Topics:
-  sumo/network    NetworkData     once per load
-  sumo/simstep    SimStep         every simulation step
-  sumo/tls        TLSUpdate       every step when TLS present
-  sumo/edgedata   EdgeDataUpdate  every N steps when edge attributes configured
+  sumo/network      NetworkData       once per load
+  sumo/simbin       SimBin            every simulation step (binary typed arrays)
+  sumo/tls          TLSUpdate         every step when TLS present
+  sumo/edgebin      EdgeBin           every N steps when edge attributes configured
+  sumo/vehicletypes VehicleTypeDict   sent reliably when new types are seen
 
 Service: sumo_control
   load            start or reload a simulation from a .sumocfg path
@@ -18,6 +19,7 @@ Service: sumo_control
 import argparse
 import array as _array
 import os
+import struct as _struct
 import sys
 import threading
 import time
@@ -301,11 +303,12 @@ def main():
     # --- init eCAL and publishers ---
     ecal_core.initialize("sumo_publisher")
 
-    pub_network  = _make_publisher("sumo/network",   "sumo.NetworkData")
-    pub_simstep  = _make_publisher("sumo/simstep",   "sumo.SimStep")
-    pub_tls      = _make_publisher("sumo/tls",       "sumo.TLSUpdate")
-    pub_edgedata = _make_publisher("sumo/edgedata",  "sumo.EdgeDataUpdate")
-    pub_log      = _make_publisher("sumo/log",       "sumo.LogMessage")
+    pub_network      = _make_publisher("sumo/network",      "sumo.NetworkData")
+    pub_simbin       = _make_publisher("sumo/simbin",       "sumo.SimBin")
+    pub_tls          = _make_publisher("sumo/tls",          "sumo.TLSUpdate")
+    pub_edgebin      = _make_publisher("sumo/edgebin",      "sumo.EdgeBin")
+    pub_vehicletypes = _make_publisher("sumo/vehicletypes", "sumo.VehicleTypeDict")
+    pub_log          = _make_publisher("sumo/log",          "sumo.LogMessage")
 
     def _log(level: str, text: str) -> None:
         """Publish a log message to sumo/log and print to terminal."""
@@ -382,11 +385,12 @@ def main():
         "interval_current":     1,
         "at_min_bound":         False,
         "at_max_bound":         False,
-        "needs_edgedata_snapshot": False,  # set to True to trigger a full snapshot next step
+        "needs_edgebin_snapshot": False,  # set to True to trigger a full snapshot next step
     }
 
     # per-simulation state (replaced on each load)
-    sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False}
+    sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False,
+           "edge_id_to_idx": {}}
 
     # type-level property cache: type_id → (length, width, gui_shape)
     # cleared on each load so stale type data from a previous simulation doesn't leak
@@ -403,27 +407,80 @@ def main():
             _type_cache[type_id] = (length, width, gui_shape)
         return _type_cache[type_id]
 
+    # --- stable type registry (per load, cleared in _do_load) ---
+    _type_id_to_idx: dict[str, int] = {}   # type_id → stable index (insertion order)
+    _type_table: list = []                  # list of (id, length, width, shape, class_byte)
+
+    def _register_type(type_id: str, length: float, width: float, shape: str,
+                       class_byte: int) -> tuple[int, bool]:
+        """Return (index, is_new). Inserts on first encounter."""
+        if type_id in _type_id_to_idx:
+            return _type_id_to_idx[type_id], False
+        idx = len(_type_table)
+        _type_id_to_idx[type_id] = idx
+        _type_table.append((type_id, length, width, shape, class_byte))
+        return idx, True
+
+    def _publish_vehicletypes() -> None:
+        """Build and publish VehicleTypeDict from the current _type_table."""
+        type_id_block  = b''.join(tid.encode() + b'\x00' for tid, *_ in _type_table)
+        type_lengths   = _array.array('f', (row[1] for row in _type_table))
+        type_widths    = _array.array('f', (row[2] for row in _type_table))
+        type_shapes    = b''.join(row[3].encode() + b'\x00' for row in _type_table)
+        type_classes   = _array.array('B', (row[4] for row in _type_table))
+        vtd = sumo_pb2.VehicleTypeDict(
+            type_count=len(_type_table),
+            type_id_block=type_id_block,
+            type_lengths=type_lengths.tobytes(),
+            type_widths=type_widths.tobytes(),
+            type_shapes=type_shapes,
+            type_classes=type_classes.tobytes(),
+        )
+        pub_vehicletypes.send(vtd.SerializeToString())
+
     _step_event = threading.Event()
     _step_thread: list[threading.Thread | None] = [None]
     _step_stop   = threading.Event()
     _load_lock   = threading.Lock()
 
     # --- step loop (runs in background thread) ---
-    def _publish_edgedata_snapshot(time_ms: int):
+    def _publish_edgebin_snapshot(time_ms: int):
         """Full TraCI snapshot for all edges — infrequent, triggered by set_attributes/load."""
-        edu = sumo_pb2.EdgeDataUpdate()
-        edu.time_ms = time_ms
-        edu.full_snapshot = True
-        for eid in sim["all_edges"]:
-            ed = edu.edges.add()
-            ed.id = eid
-            for attr in ctrl["edge_attributes"]:
+        K_e = len(ctrl["edge_attributes"])
+        edge_id_to_idx = sim["edge_id_to_idx"]
+        all_edges = sim["all_edges"]
+        N = len(all_edges)
+
+        edge_indices = _array.array('I')
+        attr_cols = [_array.array('f') for _ in range(K_e)]
+
+        for eid in all_edges:
+            idx = edge_id_to_idx.get(eid)
+            if idx is None:
+                continue
+            edge_indices.append(idx)
+            for k, attr in enumerate(ctrl["edge_attributes"]):
                 getter = edge_attr_getters.get(attr)
+                val = 0.0
                 if getter:
-                    try: ed.attributes[attr] = getter(eid)
-                    except Exception: pass
-        pub_edgedata.send(edu.SerializeToString())
-        _log("INFO", "Published edgedata snapshot (%d edges)" % len(sim["all_edges"]))
+                    try:
+                        val = getter(eid)
+                    except Exception:
+                        pass
+                attr_cols[k].append(val)
+
+        # column-major: attr0[0..N-1], attr1[0..N-1], ...
+        attr_vals_bytes = b''.join(col.tobytes() for col in attr_cols)
+
+        eb = sumo_pb2.EdgeBin(
+            full_snapshot=True,
+            edge_count=len(edge_indices),
+            attr_count=K_e,
+            edge_indices=edge_indices.tobytes(),
+            attr_vals=attr_vals_bytes,
+        )
+        pub_edgebin.send(eb.SerializeToString())
+        _log("INFO", "Published edgebin snapshot (%d edges)" % len(edge_indices))
 
     def _step_loop():
         step          = 0
@@ -433,6 +490,7 @@ def main():
         all_edges     = sim["all_edges"]
         _t_report     = time.monotonic()
         total_sleep   = 0
+        collect_ms    = 0
         # auto-tuner: rolling average of data-collection time (excludes sleep + SUMO compute)
         _collect_times: list[float] = []
 
@@ -446,54 +504,101 @@ def main():
             traci.simulationStep()
             time_ms = round(traci.simulation.getTime() * 1000)
 
-            # --- full edgedata snapshot if requested (outside normal interval) ---
-            if ctrl["needs_edgedata_snapshot"] and ctrl["edge_attributes"]:
-                ctrl["needs_edgedata_snapshot"] = False
-                _publish_edgedata_snapshot(time_ms)
+            # --- full edgebin snapshot if requested (outside normal interval) ---
+            if ctrl["needs_edgebin_snapshot"] and ctrl["edge_attributes"]:
+                ctrl["needs_edgebin_snapshot"] = False
+                _publish_edgebin_snapshot(time_ms)
 
-            # --- unified step interval: publish simstep + tls + edgedata together ---
+            # --- unified step interval: publish simbin + tls + edgebin together ---
             interval = ctrl["interval_current"]
             if step % interval == 0:
                 t_collect = time.monotonic()
 
-                # simstep
-                ss = sumo_pb2.SimStep()
-                ss.time_ms = time_ms
+                # --- vehicle section ---
+                veh_ids = list(traci.vehicle.getIDList())
+                N = len(veh_ids)
+                K_v = len(ctrl["vehicle_attributes"])
+
+                veh_pos      = _array.array('d')   # f64 x,y pairs
+                veh_ang      = _array.array('f')   # f32
+                veh_spd      = _array.array('f')   # f32
+                veh_attrs    = [_array.array('f') for _ in range(K_v)]
+                veh_type_idx = _array.array('I')   # u32
+
                 active_edges = set()
-                for vid in traci.vehicle.getIDList():
+                new_types = False
+                for vid in veh_ids:
                     x, y = traci.vehicle.getPosition(vid)
                     if geo_ref and converter:
                         x, y = converter(x, y)
-                    v = ss.vehicles.add()
-                    v.id = vid; v.x = x; v.y = y
-                    v.speed = traci.vehicle.getSpeed(vid)
-                    v.angle = traci.vehicle.getAngle(vid)
-                    v.type_id = traci.vehicle.getTypeID(vid)
-                    v.length, v.width, v.gui_shape = _get_type_props(v.type_id)
-                    lane = traci.vehicle.getLaneID(vid)
-                    active_edges.add(lane[:lane.rfind("_")])
-                    for attr in ctrl["vehicle_attributes"]:
+                    veh_pos.append(x)
+                    veh_pos.append(y)
+                    spd = traci.vehicle.getSpeed(vid)
+                    veh_spd.append(spd)
+                    veh_ang.append(traci.vehicle.getAngle(vid))
+                    tid = traci.vehicle.getTypeID(vid)
+                    l, w, shp = _get_type_props(tid)
+                    idx, is_new = _register_type(tid, l, w, shp, 0)  # 0=vehicle
+                    if is_new:
+                        new_types = True
+                    veh_type_idx.append(idx)
+                    for k, attr in enumerate(ctrl["vehicle_attributes"]):
                         getter = vehicle_attr_getters.get(attr)
-                        if getter:
-                            try: v.attributes[attr] = getter(vid)
-                            except Exception: pass
-                for pid in traci.person.getIDList():
+                        try:
+                            veh_attrs[k].append(getter(vid) if getter else 0.0)
+                        except Exception:
+                            veh_attrs[k].append(0.0)
+                    lane = traci.vehicle.getLaneID(vid)
+                    active_edges.add(lane[:lane.rfind("_")] if "_" in lane else lane)
+
+                # --- person section ---
+                pers_ids = list(traci.person.getIDList())
+                M = len(pers_ids)
+                pers_pos      = _array.array('d')
+                pers_ang      = _array.array('f')
+                pers_type_idx = _array.array('I')
+                for pid in pers_ids:
                     x, y = traci.person.getPosition(pid)
                     if geo_ref and converter:
                         x, y = converter(x, y)
-                    p = ss.persons.add()
-                    p.id = pid; p.x = x; p.y = y
-                    p.angle = traci.person.getAngle(pid)
-                    p.type_id = traci.person.getTypeID(pid)
-                # for cid in traci.container.getIDList():
-                #     x, y = traci.container.getPosition(cid)
-                #     if geo_ref and converter:
-                #         x, y = converter(x, y)
-                #     c = ss.containers.add()
-                #     c.id = cid; c.x = x; c.y = y
-                #     c.angle = traci.container.getAngle(cid)
-                #     c.type_id = traci.container.getTypeID(cid)
-                pub_simstep.send(ss.SerializeToString())
+                    pers_pos.append(x)
+                    pers_pos.append(y)
+                    pers_ang.append(traci.person.getAngle(pid))
+                    tid = traci.person.getTypeID(pid)
+                    l, w, shp = _get_type_props(tid)
+                    idx, is_new = _register_type(tid, l, w, shp, 1)  # 1=person
+                    if is_new:
+                        new_types = True
+                    pers_type_idx.append(idx)
+
+                # --- publish VehicleTypeDict if new types seen ---
+                if new_types:
+                    _publish_vehicletypes()
+
+                # --- build and publish SimBin ---
+                vehicle_id_block = b''.join(vid.encode() + b'\x00' for vid in veh_ids)
+                person_id_block  = b''.join(pid.encode() + b'\x00' for pid in pers_ids)
+
+                # column-major attr_vals: attr0[0..N-1], attr1[0..N-1], ...
+                attr_vals_bytes = b''.join(a.tobytes() for a in veh_attrs)
+
+                sb = sumo_pb2.SimBin()
+                sb.time_ms = time_ms
+                sb.veh_count = N
+                sb.veh_attr_count = K_v
+                sb.veh_positions = veh_pos.tobytes()
+                sb.veh_angles = veh_ang.tobytes()
+                sb.veh_speeds = veh_spd.tobytes()
+                sb.veh_attr_vals = attr_vals_bytes
+                sb.vehicle_ids = vehicle_id_block
+                sb.veh_type_indices = veh_type_idx.tobytes()
+                sb.agent_count = M
+                sb.agent_positions = pers_pos.tobytes()
+                sb.agent_angles = pers_ang.tobytes()
+                sb.agent_ids = person_id_block
+                sb.agent_type_indices = pers_type_idx.tobytes()
+                # cont_count defaults to 0 (reserved)
+                pub_simbin.send(sb.SerializeToString())
 
                 # tls
                 if sim["has_tls"]:
@@ -505,20 +610,35 @@ def main():
                         ph.state = traci.trafficlight.getRedYellowGreenState(tls_id)
                     pub_tls.send(tu.SerializeToString())
 
-                # edgedata delta: occupied edges only
+                # edgebin delta: occupied edges only
                 if ctrl["edge_attributes"]:
-                    edu = sumo_pb2.EdgeDataUpdate()
-                    edu.time_ms = time_ms
-                    edu.full_snapshot = False
+                    K_e = len(ctrl["edge_attributes"])
+                    edge_id_to_idx = sim["edge_id_to_idx"]
+                    delta_indices = _array.array('I')
+                    delta_cols    = [_array.array('f') for _ in range(K_e)]
                     for eid in active_edges:
-                        ed = edu.edges.add()
-                        ed.id = eid
-                        for attr in ctrl["edge_attributes"]:
+                        eidx = edge_id_to_idx.get(eid)
+                        if eidx is None:
+                            continue
+                        delta_indices.append(eidx)
+                        for k, attr in enumerate(ctrl["edge_attributes"]):
                             getter = edge_attr_getters.get(attr)
+                            val = 0.0
                             if getter:
-                                try: ed.attributes[attr] = getter(eid)
-                                except Exception: pass
-                    pub_edgedata.send(edu.SerializeToString())
+                                try:
+                                    val = getter(eid)
+                                except Exception:
+                                    pass
+                            delta_cols[k].append(val)
+                    delta_attr_bytes = b''.join(col.tobytes() for col in delta_cols)
+                    eb = sumo_pb2.EdgeBin(
+                        full_snapshot=False,
+                        edge_count=len(delta_indices),
+                        attr_count=K_e,
+                        edge_indices=delta_indices.tobytes(),
+                        attr_vals=delta_attr_bytes,
+                    )
+                    pub_edgebin.send(eb.SerializeToString())
 
                 collect_ms = (time.monotonic() - t_collect) * 1000
                 _collect_times.append(collect_ms)
@@ -646,11 +766,12 @@ def main():
             traci.start(cmd)
             _log("INFO", "SUMO started: %s" % sumocfg_path)
 
-            sim["geo_referenced"] = ng.geo_referenced
-            sim["converter"]      = _make_geo_converter(ng.proj_parameter, ng.net_offset)
-            sim["all_edges"]      = list(ng.edge_ids)
-            sim["has_tls"]        = bool(ng.tls_entries)
-            ctrl["sumocfg_path"]  = sumocfg_path
+            sim["geo_referenced"]  = ng.geo_referenced
+            sim["converter"]       = _make_geo_converter(ng.proj_parameter, ng.net_offset)
+            sim["all_edges"]       = list(ng.edge_ids)
+            sim["has_tls"]         = bool(ng.tls_entries)
+            sim["edge_id_to_idx"]  = {eid: i for i, eid in enumerate(ng.edge_ids)}
+            ctrl["sumocfg_path"]   = sumocfg_path
             _log("INFO", "Published network (cache: %s)" % cp)
 
             # reset per-sim state — start paused so the user can inspect before running
@@ -659,8 +780,10 @@ def main():
             ctrl["at_min_bound"] = False
             ctrl["at_max_bound"] = False
             _type_cache.clear()
+            _type_id_to_idx.clear()
+            _type_table.clear()
             if ctrl["edge_attributes"]:
-                ctrl["needs_edgedata_snapshot"] = True
+                ctrl["needs_edgebin_snapshot"] = True
 
             _step_thread[0] = threading.Thread(target=_step_loop, daemon=True)
             _step_thread[0].start()
@@ -758,7 +881,7 @@ def main():
             ctrl["vehicle_attributes"] = list(req.vehicle_attributes)
             ctrl["edge_attributes"]    = list(req.edge_attributes)
             if ctrl["edge_attributes"]:
-                ctrl["needs_edgedata_snapshot"] = True
+                ctrl["needs_edgebin_snapshot"] = True
             return _ack()
         except Exception as e:
             return _ack(False, str(e))
