@@ -17,6 +17,7 @@ export interface LayerVisibility {
 interface Props {
   connected: boolean;
   paused: boolean;
+  simReady: boolean;
   onPause: () => void;
   onResume: () => void;
   onStep: () => void;
@@ -90,9 +91,9 @@ export function ControlPanel(p: Props) {
       {/* transport controls */}
       <div style={row}>
         {p.paused
-          ? <button style={btn} onClick={p.onResume}>▶</button>
+          ? <button style={{ ...btn, opacity: p.simReady ? 1 : 0.4 }} onClick={p.onResume} disabled={!p.simReady}>▶</button>
           : <button style={btn} onClick={p.onPause}>⏸</button>}
-        {p.paused && <button style={btn} onClick={p.onStep}>→</button>}
+        {p.paused && <button style={{ ...btn, opacity: p.simReady ? 1 : 0.4 }} onClick={p.onStep} disabled={!p.simReady}>→</button>}
         <button style={btn} title="Load new simulation" onClick={p.onBrowse}>Load</button>
         <button style={{ ...btn, opacity: p.cfgPath ? 1 : 0.4 }} title="Reload current simulation"
           onClick={p.onReload} disabled={!p.cfgPath}>↺</button>

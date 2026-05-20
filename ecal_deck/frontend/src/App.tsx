@@ -142,9 +142,17 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     const spanX = maxX - minX || 0.01, spanY = maxY - minY || 0.01;
     if (msg.geo_referenced) {
-      const zoom = Math.max(1, Math.min(20,
-        Math.floor(Math.log2(360 / Math.max(spanX, spanY))) - 1));
-      initialViewState = { longitude: cx, latitude: cy, zoom, pitch: 0, bearing: 0 } as MapViewState;
+      try {
+        const { longitude, latitude, zoom } = new WebMercatorViewport({
+          width: window.innerWidth, height: window.innerHeight,
+        }).fitBounds([[minX, minY], [maxX, maxY]], { padding: 24 });
+        initialViewState = { longitude, latitude, zoom, pitch: 0, bearing: 0 } as MapViewState;
+      } catch {
+        // Degenerate bounds (point network etc.) — fall back to centre + rough zoom.
+        const zoom = Math.max(1, Math.min(20,
+          Math.floor(Math.log2(360 / Math.max(spanX, spanY))) - 1));
+        initialViewState = { longitude: cx, latitude: cy, zoom, pitch: 0, bearing: 0 } as MapViewState;
+      }
     } else {
       const zoom = Math.log2(Math.min(window.innerWidth / spanX, window.innerHeight / spanY)) - 0.5;
       initialViewState = { target: [cx, cy, 0], zoom } as OrthographicViewState;
@@ -223,7 +231,9 @@ export default function App() {
   useEffect(() => { setViewState(null); }, [network]);
   const activeView = viewState ?? parsed?.initialViewState ?? null;
 
-  const [paused, setPaused] = useState(false);
+  const [paused, setPaused]   = useState(false);
+  const [simReady, setSimReady] = useState(false);
+  const readyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [delayMs, setDelayMs] = useState(0);
   const [basemapStyle, setBasemapStyle] = useState('positron');
 
@@ -248,7 +258,8 @@ export default function App() {
     setCfgPath(path);
     if (loadingToastId.current) toast.dismiss(loadingToastId.current);
     loadingToastId.current = toast.loading('Loading simulation…') as string;
-    setPaused(true); // server always starts paused after load
+    setSimReady(false);
+    setPaused(true);
     sendCommand('load', { sumocfg_path: path }, (resp) => {
       if (!resp.ok) {
         toast.dismiss(loadingToastId.current ?? undefined);
@@ -258,14 +269,33 @@ export default function App() {
     });
   };
 
+  // When the network frame arrives the .ecaldeck cache is ready but libsumo may still be
+  // loading. Poll get_state every second until simulation_ready=true, then show the toast
+  // and enable controls.
   useEffect(() => {
-    if (network && loadingToastId.current) {
-      toast.success('Simulation loaded', { id: loadingToastId.current });
-      loadingToastId.current = null;
-      // Sync paused/delay state from server — simulation starts paused after load.
+    if (!network) return;
+    if (!loadingToastId.current) {
+      // Reconnect while already loaded — just sync state once.
       sendCommand('get_state');
+      return;
     }
-  }, [network, sendCommand]);
+    if (readyPollRef.current) clearInterval(readyPollRef.current);
+    readyPollRef.current = setInterval(() => {
+      sendCommand('get_state', {}, (resp) => {
+        if (resp.simulation_ready) {
+          clearInterval(readyPollRef.current!);
+          readyPollRef.current = null;
+          toast.success('Simulation loaded', { id: loadingToastId.current ?? undefined });
+          loadingToastId.current = null;
+          setSimReady(true);
+          setDelayMs((resp.delay_ms as number) ?? 0);
+          setPaused(true);
+        }
+      });
+    }, 1000);
+    return () => { if (readyPollRef.current) clearInterval(readyPollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [network]);
 
   const handlePause  = () => { sendCommand('pause');  setPaused(true);  };
   const handleResume = () => { sendCommand('resume'); setPaused(false); };
@@ -461,7 +491,7 @@ export default function App() {
 
   const panel = (
     <ControlPanel
-      connected={connected} paused={paused}
+      connected={connected} paused={paused} simReady={simReady}
       onPause={handlePause} onResume={handleResume} onStep={handleStep}
       delayMs={delayMs} onSetDelay={handleDelay}
       snapshot={vehicleSnapshot} geoReferenced={parsed.geoReferenced}

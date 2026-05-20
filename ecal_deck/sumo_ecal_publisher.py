@@ -386,6 +386,7 @@ def main():
         "at_min_bound":         False,
         "at_max_bound":         False,
         "needs_edgebin_snapshot": False,  # set to True to trigger a full snapshot next step
+        "simulation_ready":       False,  # True only after libsumo has finished loading
     }
 
     # per-simulation state (replaced on each load)
@@ -787,6 +788,7 @@ def main():
 
             _step_thread[0] = threading.Thread(target=_step_loop, daemon=True)
             _step_thread[0].start()
+            ctrl["simulation_ready"] = True
 
     # --- service callbacks ---
     def _ack(ok=True, error=""):
@@ -812,7 +814,7 @@ def main():
             path = req.sumocfg_path
             if not os.path.isfile(path):
                 return _ack(False, "File not found: %s" % path)
-            # run in separate thread so the eCAL callback returns immediately
+            ctrl["simulation_ready"] = False
             threading.Thread(target=_do_load, args=(path,), daemon=True).start()
             return _ack()
         except Exception as e:
@@ -847,7 +849,8 @@ def main():
             network_cache_path=ctrl["network_cache_path"],
             step_interval_current=ctrl["interval_current"],
             step_at_min_bound=ctrl["at_min_bound"],
-            step_at_max_bound=ctrl["at_max_bound"])
+            step_at_max_bound=ctrl["at_max_bound"],
+            simulation_ready=ctrl["simulation_ready"])
         return 0, resp.SerializeToString()
 
     def _on_set_step_config(_mi, req_bytes):

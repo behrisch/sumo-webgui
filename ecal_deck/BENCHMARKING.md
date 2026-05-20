@@ -10,6 +10,14 @@
 | Frontend, 10 k visible edges (culled) | P95 frame time | < 16.6 ms |
 | Frontend, memory stability | JS heap after 5 min | < 200 MB |
 
+### Doe 6-7
+full hour:
+- sumo plain: 88s
+- sumo-gui: 134s
+- web-gui: 159s (without auto interval, color vehicles by speed, no edge coloring)
+
+Benchmark scenario: Doe 6:00-6:10
+
 ---
 
 ## Comparison with sumo-gui
