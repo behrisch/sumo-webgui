@@ -22,6 +22,7 @@ Benchmark scenario: Doe 6:00-6:10 (best of 3)
 - sumo-gui: 17.2s
 - web-gui 26.0s (with update interval 1)
 - web-gui 10.0s (with auto interval <= 10)
+- publisher only 21.9s (with update interval 1)
 
 
 ---

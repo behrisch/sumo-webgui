@@ -53,6 +53,8 @@ interface Props {
   perf: PerfStats;
   watchMs: number | null;      // null = not started; number = elapsed ms (ticking or frozen)
   watchRunning: boolean;       // true while ticking, false when frozen at sim end
+  autostart: boolean;
+  onAutostart: (v: boolean) => void;
   cfgPath: string;
   onBrowse: () => void;
   onReload: () => void;
@@ -99,7 +101,11 @@ export function ControlPanel(p: Props) {
         <button style={btn} title="Load new simulation" onClick={p.onBrowse}>Load</button>
         <button style={{ ...btn, opacity: p.cfgPath ? 1 : 0.4 }} title="Reload current simulation"
           onClick={p.onReload} disabled={!p.cfgPath}>↺</button>
-        <span style={{ opacity: p.connected ? 1 : 0.5, flex: 1 }}>
+        <label style={{ ...row, cursor: 'pointer', marginLeft: 'auto' }} title="Start simulation automatically after load">
+          <input type="checkbox" checked={p.autostart} onChange={(e) => p.onAutostart(e.target.checked)} />
+          Auto
+        </label>
+        <span style={{ opacity: p.connected ? 1 : 0.5 }}>
           {p.connected
             ? (t != null ? `t=${t}s  ${nv}v  ${np}p` : 't=–  –v  –p')
             : '⚠ disconnected'}

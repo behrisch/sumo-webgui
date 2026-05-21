@@ -241,6 +241,9 @@ export default function App() {
   const watchTickRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const watchEndPollRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const [delayMs, setDelayMs] = useState(0);
+  const [autostart, setAutostart] = useState(false);
+  const autostartRef = useRef(false);
+  const handleAutostart = (v: boolean) => { setAutostart(v); autostartRef.current = v; };
   const [basemapStyle, setBasemapStyle] = useState('positron');
 
   useEffect(() => {
@@ -268,11 +271,20 @@ export default function App() {
     loadingToastId.current = toast.loading('Loading simulation…') as string;
     setSimReady(false);
     setPaused(true);
-    // Reset stopwatch.
-    if (watchTickRef.current)    { clearInterval(watchTickRef.current);    watchTickRef.current    = null; }
+    // Stopwatch: start immediately when autostart (to include load time), else reset.
     if (watchEndPollRef.current) { clearInterval(watchEndPollRef.current); watchEndPollRef.current = null; }
-    watchStartRef.current = null;
-    setWatchMs(null);
+    if (watchTickRef.current)    { clearInterval(watchTickRef.current);    watchTickRef.current    = null; }
+    if (autostartRef.current) {
+      watchStartRef.current = Date.now();
+      setWatchMs(0);
+      watchTickRef.current = setInterval(
+        () => { if (watchStartRef.current) setWatchMs(Date.now() - watchStartRef.current); },
+        200,
+      );
+    } else {
+      watchStartRef.current = null;
+      setWatchMs(null);
+    }
     sendCommand('load', { sumocfg_path: path }, (resp) => {
       if (!resp.ok) {
         toast.dismiss(loadingToastId.current ?? undefined);
@@ -302,8 +314,36 @@ export default function App() {
           }
           setSimReady(true);
           setDelayMs((resp.delay_ms as number) ?? 0);
-          setPaused((resp.paused as boolean) ?? true);
           if (resp.sumocfg_path) setCfgPath(resp.sumocfg_path as string);
+          if (autostartRef.current) {
+            sendCommand('resume');
+            setPaused(false);
+            // Ensure stopwatch is ticking (already started in handleLoad for manual loads;
+            // for CLI-loaded sims watchStartRef is null so start from ready time).
+            if (watchStartRef.current === null) {
+              watchStartRef.current = Date.now();
+              setWatchMs(0);
+              if (watchTickRef.current) clearInterval(watchTickRef.current);
+              watchTickRef.current = setInterval(
+                () => { if (watchStartRef.current) setWatchMs(Date.now() - watchStartRef.current); },
+                200,
+              );
+            }
+            // Poll to detect simulation end and freeze the stopwatch.
+            if (watchEndPollRef.current) clearInterval(watchEndPollRef.current);
+            watchEndPollRef.current = setInterval(() => {
+              sendCommand('get_state', {}, (r) => {
+                if (!r.simulation_ready) {
+                  clearInterval(watchEndPollRef.current!); watchEndPollRef.current = null;
+                  clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
+                  if (watchStartRef.current) { setWatchMs(Date.now() - watchStartRef.current); watchStartRef.current = null; }
+                  setSimReady(false);
+                }
+              });
+            }, 2000);
+          } else {
+            setPaused((resp.paused as boolean) ?? true);
+          }
         }
       });
     }, 1000);
@@ -546,6 +586,7 @@ export default function App() {
       onStepConfig={(min, max, tune) => { setIntervalMin(min); setIntervalMax(max); setAutotune(tune); sendStepConfig(min, max, tune); }}
       cfgPath={cfgPath} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
+      autostart={autostart} onAutostart={handleAutostart}
       perf={perf}
       watchMs={watchMs}
       watchRunning={watchStartRef.current !== null}

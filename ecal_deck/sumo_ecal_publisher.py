@@ -310,6 +310,9 @@ def parse_args():
     p.add_argument("--step-length", type=float, default=1.0, help="Simulation step length in seconds")
     p.add_argument("--delay", type=int, default=0, metavar="MS",
                    help="Delay in milliseconds between simulation steps (default 0)")
+    p.add_argument("--benchmark", action="store_true",
+                   help="Run to completion publishing every step (interval=1, delay=0); "
+                        "requires --sumo-cfg. Exits when done.")
     return p.parse_args()
 
 
@@ -981,6 +984,27 @@ def main():
         ("get_edge_info",    sumo_pb2.GetEdgeInfoRequest,      sumo_pb2.GetEdgeInfoResponse,    _on_get_edge_info),
     ]:
         svc.set_method_callback(_method_info(name, req_cls, resp_cls), cb)
+
+    # --- benchmark mode: run to completion, then exit ---
+    if args.benchmark:
+        if not args.sumo_cfg:
+            sys.exit("--benchmark requires --sumo-cfg")
+        ctrl["delay_ms"]         = 0
+        ctrl["autotune"]         = False
+        ctrl["interval_min"]     = 1
+        ctrl["interval_max"]     = 1
+        ctrl["interval_current"] = 1
+        print("Benchmark mode: delay=0, interval=1, publishes every step.")
+        t_wall = time.monotonic()
+        _do_load(args.sumo_cfg)      # blocking in main thread
+        ctrl["paused"] = False       # _do_load leaves it True; override immediately
+        _step_event.set()            # unblock the step thread if it is already waiting
+        if _step_thread[0]:
+            _step_thread[0].join()
+        elapsed = time.monotonic() - t_wall
+        print("Benchmark done: %.2f s wall clock (including 1 s network publish delay)" % elapsed)
+        ecal_core.finalize()
+        sys.exit(0)
 
     # auto-load if sumocfg provided on command line
     if args.sumo_cfg:
