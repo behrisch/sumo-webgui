@@ -1046,6 +1046,13 @@ def main():
     ]:
         svc.set_method_callback(_method_info(name, req_cls, resp_cls), cb)
 
+    def _release_ecal_objects():
+        # Set all eCAL publisher/service references to None so nanobind's refcount reaches
+        # zero before ecal_core.finalize() is called. Closures see the update because Python
+        # closures capture variables by reference (via cell objects), not values.
+        nonlocal pub_network, pub_simbin, pub_tls, pub_edgebin, pub_vehicletypes, pub_log, svc
+        pub_network = pub_simbin = pub_tls = pub_edgebin = pub_vehicletypes = pub_log = svc = None
+
     # --- benchmark modes: run to completion, then exit ---
     if args.benchmark or args.benchmark_full:
         mode_flag = "--benchmark" if args.benchmark else "--benchmark-full"
@@ -1079,6 +1086,7 @@ def main():
             else:
                 print("Frontend: no stats received (bridge/frontend not connected)")
 
+        _release_ecal_objects()
         ecal_core.finalize()
         sys.exit(0)
 
@@ -1095,6 +1103,7 @@ def main():
     except KeyboardInterrupt:
         pass
 
+    _release_ecal_objects()
     ecal_core.finalize()
 
 

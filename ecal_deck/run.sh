@@ -2,9 +2,15 @@
 set -e
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) _venv_bin=Scripts ;;
-    *)                     _venv_bin=bin ;;
+    MINGW*|MSYS*|CYGWIN*) _venv_bin=Scripts; _windows=1 ;;
+    *)                     _venv_bin=bin;     _windows=0 ;;
 esac
+
+# On POSIX, enable job control so each & command gets its own process group,
+# making kill -- -$PID kill the entire tree (npm + shell wrapper + Vite).
+# On Windows/MSYS this is unreliable; we use taskkill /T instead.
+[ "$_windows" = "0" ] && set -m
+
 PYTHON=$(dirname $0)/../ecal_env/$_venv_bin/python
 WS_PORT=8765
 BENCHMARK=0
@@ -22,10 +28,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Kill a process and its entire subtree, portably.
+_kill_tree() {
+    local pid="${1:-}"
+    [ -z "$pid" ] && return
+    if [ "$_windows" = "1" ]; then
+        taskkill /F /T /PID "$pid" 2>/dev/null || true
+    else
+        kill -- "-${pid}" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     echo "Shutting down..."
-    kill "${PUBLISHER_PID:-}" "${BRIDGE_PID:-}" "${DEV_PID:-}" 2>/dev/null
-    wait "${PUBLISHER_PID:-}" "${BRIDGE_PID:-}" "${DEV_PID:-}" 2>/dev/null
+    _kill_tree "${DEV_PID:-}"
+    _kill_tree "${BRIDGE_PID:-}"
+    _kill_tree "${PUBLISHER_PID:-}"
+    wait "${DEV_PID:-}" "${BRIDGE_PID:-}" "${PUBLISHER_PID:-}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -53,8 +72,9 @@ if [ "$BENCHMARK" = "1" ]; then
     # Try to open browser automatically; fall back gracefully if no display
     URL="http://localhost:5173"
     case "$(uname -s)" in
-        Darwin) open "$URL" 2>/dev/null || true ;;
-        *)      xdg-open "$URL" 2>/dev/null || true ;;
+        Darwin)         open "$URL"     2>/dev/null || true ;;
+        MINGW*|MSYS*|CYGWIN*) start "$URL" 2>/dev/null || true ;;
+        *)              xdg-open "$URL" 2>/dev/null || true ;;
     esac
 
     # Wait for browser to load the page and connect the WebSocket
@@ -65,7 +85,6 @@ if [ "$BENCHMARK" = "1" ]; then
     $PYTHON sumo_ecal_publisher.py --benchmark-full --sumo-cfg "$SUMO_CFG"
     # publisher has exited — trap fires and cleans up bridge + dev server
 else
-    DEV_PID=""
     $PYTHON sumo_ecal_publisher.py --sumo-cfg "$SUMO_CFG" --delay 0 &
     PUBLISHER_PID=$!
 

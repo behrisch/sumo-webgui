@@ -61,13 +61,28 @@ The publisher skip rate is always 0 with `--benchmark` (interval=1, every step p
 Runs the same max-speed simulation but also collects rendering stats from the frontend.
 Requires the bridge and a browser with the frontend open before starting.
 
+The easiest way is via `run.sh`:
+
+```bash
+./run.sh --benchmark [--sumo-cfg path/to/sim.sumocfg] [--browser-wait <seconds>]
+```
+
+`run.sh --benchmark` starts the bridge and Vite dev server, waits until the dev server
+responds, opens the browser automatically (`xdg-open` / `open`), waits
+`--browser-wait` seconds (default 5) for the page to load and the WebSocket to connect,
+then runs the publisher with `--benchmark-full`. When the publisher exits the bridge and
+dev server are cleaned up automatically.
+
+To run the components manually instead:
+
 ```bash
 # Terminal 1
 python ecal_ws_bridge.py
 
-# Terminal 2 — open browser to http://localhost:5173 (or built frontend)
+# Terminal 2 — open browser to http://localhost:5173
+npm --prefix frontend run dev
 
-# Terminal 3
+# Terminal 3 — start after the browser has connected
 python sumo_ecal_publisher.py --benchmark-full --sumo-cfg path/to/sim.sumocfg
 ```
 
