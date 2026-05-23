@@ -17,42 +17,55 @@ full hour:
 - sumo-gui: 134s
 - web-gui: 159s (without auto interval, color vehicles by speed, no edge coloring)
 
-Benchmark scenario: Doe 6:00-6:10 (600 sim-seconds, ~5000 vehicles + 1400 persons)
+Benchmark scenario: Doe 6:00-6:10 (600 sim-seconds, ~5000 vehicles + 1400 persons,
+step-length 0.2 s → 3000 steps)
 
 | Component | Duration | RTF | Avg step | Notes |
 |---|---|---|---|---|
-| sumo (no GUI) | 11.26 s | 53.3 | 18.8 ms | baseline |
-| sumo-gui | 16.30 s | 36.8 | 27.2 ms | skip rate 77.7 %, frame 24.4 ms |
-| publisher `--benchmark` | 18.0 s | 33.4 | 30.0 ms | no bridge, interval=1 |
-| publisher `--benchmark` + bridge | 19.3 s | 31.1 | 32.2 ms | bridge subscribed, no browser |
-| publisher `--benchmark-full` | 24.9 s | 24.0 | 41.6 ms | bridge + browser collocated, interval=1, frontend frame 10.9 ms, skip 0.2 % |
+| sumo (no GUI) | 11.26 s | 53.3 | 3.75 ms | standalone binary, baseline |
+| sumo-gui | 16.30 s | 36.8 | 5.43 ms | skip rate 77.7 %, frame 24.4 ms (184 steps/s, 41 fps render) |
+| publisher `--benchmark` | 102.8 s | 5.84 | 34.26 ms | libsumo+TraCI, interval=1, no bridge |
+| publisher `--benchmark-full` (autotune) | 34.9 s | 17.2 | 11.65 ms | autotune interval 7–10, skip 86.3 %, frontend frame 9.7 ms, skip 1.0 % |
+
+Note: earlier measurements used publisher `--step-length 1.0` (override, now removed), making
+them incomparable to sumo/sumo-gui which ran the config's native 0.2 s steps.
 
 #### Pipeline overhead breakdown
 
-Isolating eCAL transport cost from browser CPU competition on the same machine:
-
 | Source | Step overhead | Cause |
 |---|---|---|
-| TraCI extraction + pack | +11.2 ms | vehicle queries, typed-array packing — dominates |
-| eCAL SHM publish (bridge subscribed) | +2.2 ms | write ~250 KB to SHM, signal subscriber |
-| Browser CPU stealing (collocated) | +9.5 ms | browser rendering competes for CPU on same host |
+| libsumo/TraCI step overhead | +3.4 ms | Python↔C++ boundary + TraCI event bookkeeping, even with no data collection |
+| TraCI extraction + pack | +30.5 ms | vehicle queries + typed-array packing for ~5000 vehicles — dominates |
+| eCAL SHM publish (bridge subscribed) | ~+2 ms | write ~250 KB to SHM, signal subscriber (measured at 1 s steps, approx.) |
+| Browser CPU stealing (collocated) | ~+10 ms | browser rendering competes for CPU on same host (measured at 1 s steps, approx.) |
 
-The browser overhead is not pipeline overhead — it disappears when the publisher runs on a
-dedicated server and the browser on a separate machine (normal deployment). The relevant
-server-side cost is the **bridge-only** row above: RTF 31.1 vs sumo-gui 36.8,
-a **1.18× overhead** at interval=1, within the 1.5× target.
+The libsumo/TraCI step overhead (~3.4 ms) is estimated from the autotune skip-step time
+(~7 ms measured) minus standalone SUMO (3.75 ms). It is always present regardless of interval.
+
+The browser overhead disappears in normal deployment (publisher on a dedicated server).
+The eCAL and browser estimates above were measured at 1 s step size and carry forward as
+rough approximations; a re-run of the bridge-only benchmark at 0.2 s steps would confirm.
 
 #### Autotune
 
-`t_sim = 18.8 ms`, `t_collect ≈ 13.4 ms` per publish step (extraction + pack + eCAL send, bridge connected).
-
 The autotune is a simple boolean toggle (on/off). When on, it converges freely to the minimum
-interval N satisfying the **1.5× overhead limit**: `c/N ≤ t_sim/2`. Derivation: at convergence
-`total = t_sim / (1 − f)`, so `f = 1/3` gives exactly 1.5×; the publisher uses
+publish interval N satisfying the **1.5× overhead limit**. Derivation: at convergence
+`total = t_skip / (1 − f)`, so `f = 1/3` gives exactly 1.5×; the publisher uses
 `target_budget = step_time_ms / 3`.
 
-For this scenario: `c/N ≤ 18.8/2 = 9.4 ms` → **N = 2** (`13.4 / 2 = 6.7 ms`).
-At `interval = 2`: total ≈ 18.8 + 6.7 = 25.5 ms → **1.36× overhead** (within 1.5× target).
+Here `t_skip` is the skip-step time (pure libsumo step, no data collection), estimated at
+**~7 ms** for this scenario (back-calculated from the autotune measurement).
+
+`t_collect ≈ 34 ms` (headless publisher, no bridge). At convergence (interval=8, delay=0):
+
+```
+target_budget = 11.65 / 3 = 3.88 ms
+interval = floor(34 / 3.88) + 1 = 9   (observed: 7–10 and drifting down as traffic builds)
+```
+
+At `interval = 8`: total ≈ t_skip + t_collect/8 = 7 + 4.3 = **11.3 ms → 1.61× t_skip**.
+Slightly above the 1.5× target because traffic density (and therefore `t_collect`) grows
+during the scenario; the autotune tracks it by lowering the interval toward 7.
 
 When `delay_ms ≥ t_collect` the sleep already absorbs the collection cost and autotune forces
 `interval = 1` (no skipping — the delay is the bottleneck, not extraction).
@@ -97,13 +110,13 @@ The publisher skip rate is always 0 with `--benchmark` (interval=1, every step p
 Runs the same max-speed simulation but also collects rendering stats from the frontend.
 Requires the bridge and a browser with the frontend open before starting.
 
-The easiest way is via `run.sh`:
+The easiest way is via `benchmark.sh`:
 
 ```bash
-./run.sh --benchmark [--sumo-cfg path/to/sim.sumocfg] [--browser-wait <seconds>]
+./benchmark.sh [--sumo-cfg path/to/sim.sumocfg] [--browser-wait <seconds>]
 ```
 
-`run.sh --benchmark` starts the bridge and Vite dev server, waits until the dev server
+`benchmark.sh` starts the bridge and Vite dev server, waits until the dev server
 responds, opens the browser automatically (`xdg-open` / `open`), waits
 `--browser-wait` seconds (default 5) for the page to load and the WebSocket to connect,
 then runs the publisher with `--benchmark-full`. When the publisher exits the bridge and
@@ -420,8 +433,9 @@ places where frames can be silently dropped.
 Given sumo-gui's `duration factor` (RTF) and `FPS`:
 
 ```
-steps_per_second = RTF / step_length_s          # e.g. RTF=5, step=1 s → 5 steps/s
+steps_per_second = RTF / step_length_s          # e.g. RTF=36.8, step=0.2 s → 184 steps/s
 skip_rate        = max(0, 1 − FPS / steps_per_second)
+                   # e.g. 41 fps / 184 steps/s → skip 77.7 %
 ```
 
 For our frontend, `seq_num` in `SimBin` (publisher-side monotonic counter) makes this

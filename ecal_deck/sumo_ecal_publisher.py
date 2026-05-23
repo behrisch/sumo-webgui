@@ -307,7 +307,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Publish SUMO simulation state via eCAL")
     p.add_argument("--sumo-cfg", default=None,
                    help="Path to .sumocfg file (optional; can also be set at runtime via the GUI)")
-    p.add_argument("--step-length", type=float, default=1.0, help="Simulation step length in seconds")
     p.add_argument("--delay", type=int, default=0, metavar="MS",
                    help="Delay in milliseconds between simulation steps (default 0)")
     p.add_argument("--benchmark", action="store_true",
@@ -824,7 +823,7 @@ def main():
                     print("WARNING: bridge did not acknowledge network load within 10 s; proceeding anyway")
 
             # start SUMO — log socket uses SUMO's "host:port" file syntax
-            cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
+            cmd = [sumo_bin, "-c", sumocfg_path,
                    "--message-log", _log_addr, "--error-log", _log_addr]
             traci.start(cmd)
             _log("INFO", "SUMO started: %s" % sumocfg_path)
