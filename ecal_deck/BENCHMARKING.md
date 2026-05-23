@@ -27,6 +27,84 @@ Benchmark scenario: Doe 6:00-6:10 (best of 3)
 
 ---
 
+## Running benchmarks
+
+### Publisher-only (`--benchmark`)
+
+Runs the simulation at maximum speed (interval=1, delay=0), publishing every step via
+eCAL. No bridge or frontend required. Use this to measure publisher throughput and RTF in
+isolation.
+
+```bash
+python sumo_ecal_publisher.py --benchmark --sumo-cfg path/to/sim.sumocfg
+```
+
+End-of-run output:
+
+```
+Benchmark mode (--benchmark): delay=0, interval=1, publishes every step.
+Simulation finished after 3600 steps
+Performance:
+  Duration: 21.9 s
+  Real time factor: 164.4
+  UPS: 48231.7
+Publisher:
+  Avg. step time [ms]: 6.08
+  Avg. skip rate: 0.000
+Benchmark done: 21.9 s wall clock
+```
+
+The publisher skip rate is always 0 with `--benchmark` (interval=1, every step published).
+
+### Full-stack (`--benchmark-full`)
+
+Runs the same max-speed simulation but also collects rendering stats from the frontend.
+Requires the bridge and a browser with the frontend open before starting.
+
+```bash
+# Terminal 1
+python ecal_ws_bridge.py
+
+# Terminal 2 — open browser to http://localhost:5173 (or built frontend)
+
+# Terminal 3
+python sumo_ecal_publisher.py --benchmark-full --sumo-cfg path/to/sim.sumocfg
+```
+
+The publisher sets `benchmark=true` in `GetStateResponse` so the frontend auto-resumes
+without manual interaction. When the simulation ends the frontend sends its cumulative
+rendering stats back via the `report_frontend_stats` service call. The publisher waits up
+to 15 s for this callback, then exits.
+
+End-of-run output (appended after the publisher block above):
+
+```
+Frontend:
+  Avg. frame time [ms]: 16.2
+  Avg. skip rate: 0.043
+  Frames rendered: 1847
+```
+
+If the frontend is not connected when the simulation ends, the publisher prints
+`Frontend: no stats received (bridge/frontend not connected)` and exits.
+
+### sumo-gui end-of-run stats
+
+sumo-gui (when built with `ENABLE_FOX=ON`) appends GUI-specific stats to the standard
+`--duration-log.statistics` output:
+
+```
+GUI:
+ Avg. frame time [ms]: 8.3
+ Avg. skip rate: 0.82
+```
+
+The skip rate here is `skipped_steps / total_steps` where a step is "skipped" when
+`GUIRunThread` completes a step before `GUIViewTraffic::doPaintGL` renders it. This is
+directly comparable to the publisher's skip rate and the frontend's `skip X%` overlay.
+
+---
+
 ## Comparison with sumo-gui
 
 sumo-gui is the natural reference point since it solves the same problem (visualising a
@@ -200,10 +278,14 @@ phase breakdown tells you which part to optimise first.
 ### No-GUI baseline
 
 ```bash
-# Option 1: SUMO built-in duration log
+# Option 1: SUMO built-in duration log (no Python overhead at all)
 sumo -c path/to/sim.sumocfg --duration-log.statistics true 2>&1 | grep "Duration"
 
-# Option 2: publisher with a --no-publish flag (to be added)
+# Option 2: publisher benchmark (includes TraCI connection overhead, excludes rendering)
+python sumo_ecal_publisher.py --benchmark --sumo-cfg path/to/sim.sumocfg
+# Compare "Real time factor" against Option 1's duration factor.
+
+# Option 3: publisher with a --no-publish flag (to be added)
 # Calls traci.simulationStep() in the same loop but skips all data extraction and
 # eCAL publishing. Isolates SUMO's own step time from extraction overhead.
 ```
@@ -257,6 +339,82 @@ Use `randomTrips.py --period <value>` to control injection rate. Always record b
 | 1 k (typical zoom-in) | 0.5–2 ms | 0.5–2 ms |
 | 10 k (city overview) | 5–20 ms | 1–4 ms |
 | 50 k (full Berlin visible) | 25–100 ms | — (culled before query) |
+
+---
+
+## Frame skipping
+
+### sumo-gui threading model (corrected)
+
+sumo-gui does **not** render every simulation step. The simulation runs in `GUIRunThread`,
+a dedicated background thread. The FOX toolkit event loop (main thread) renders
+asynchronously via a timer. Both threads share `mySimulationLock`: the sim thread holds it
+during `simulationStep()`; the render thread acquires it before `doPaintGL()`. Neither waits
+for the other — they race for the lock. As a result:
+
+- If the simulation is fast (short steps), the render thread rarely gets the lock → **frames
+  are skipped**.
+- If the simulation is slow (long steps or heavy network), the render thread easily keeps up
+  → skip rate near zero.
+- The `FPS` counter in sumo-gui measures actual `doPaintGL()` throughput — it can be far
+  below the simulation's steps/s when the sim runs much faster than real time.
+
+Our architecture has the same fundamental characteristic: the publisher publishes and moves
+on; the browser renders at whatever rate it can. The difference is that data crosses a
+network stack (eCAL → WebSocket → RAF) instead of a shared-memory mutex, so there are more
+places where frames can be silently dropped.
+
+### Skip rate formula
+
+Given sumo-gui's `duration factor` (RTF) and `FPS`:
+
+```
+steps_per_second = RTF / step_length_s          # e.g. RTF=5, step=1 s → 5 steps/s
+skip_rate        = max(0, 1 − FPS / steps_per_second)
+```
+
+For our frontend, `seq_num` in `SimBin` (publisher-side monotonic counter) makes this
+directly measurable: a gap of N in the received sequence means N frames were dropped
+somewhere in the pipeline (eCAL transport, bridge latest-value queue, or RAF coalescing).
+The skip rate is reported in the perf overlay as `skip X%` when non-zero.
+
+### Where frames are dropped in our pipeline
+
+| Drop point | Mechanism | Typical cause |
+|---|---|---|
+| eCAL transport | Buffer full on subscriber side | Publisher faster than eCAL can deliver |
+| Bridge latest-value queue | New SimBin arrives before previous WS send completes | SUMO steps faster than WebSocket throughput |
+| Frontend RAF coalescing | `latestSnapshot` ref overwritten before RAF fires | SUMO steps faster than 60 fps |
+
+The `seq_num` gap measures the **sum** of all three. There is currently no per-stage
+breakdown — if needed, the bridge could log its own received-vs-sent gap separately.
+
+### Acceptable skip rates
+
+Skip rate is not inherently bad — it means the simulation is running faster than the display
+can show, which is the desired outcome when speed matters.
+
+| Scenario | Skip rate | Interpretation |
+|---|---|---|
+| SUMO at ≤ 60 steps/s (1 s steps, RTF ≤ 60) | 0% | Display keeps up; every frame rendered |
+| SUMO at 200 steps/s | ~70% | Expected and fine for live monitoring |
+| SUMO at 200 steps/s, skip > 95% | Investigate | Rendering overload likely contributing |
+
+The problematic case is a **high skip rate caused by rendering overload rather than
+simulation speed**: if SUMO runs at only 10 steps/s but the frontend skips 80% of those
+because frame time exceeds 100 ms, the visualization is broken regardless of simulation
+throughput. The `skip X%` overlay combined with `frame Xms` distinguishes the two cases:
+
+- High skip + frame < 16 ms → simulation is fast, skipping is expected
+- High skip + frame > 16 ms → rendering is the bottleneck, optimise the frontend
+
+### Adding to benchmark targets
+
+The performance targets table should be extended with a skip-rate column once baseline
+measurements on real scenarios are collected. A suggested threshold: at the intended
+operating speed (not benchmark mode), skip rate should be ≤ the sumo-gui skip rate for
+the same scenario and hardware, confirming we add no extra pipeline overhead beyond what
+the native renderer already accepts.
 
 ---
 

@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 import websockets
@@ -43,6 +44,8 @@ _SERVICE_REGISTRY = {
     "set_step_config":   (sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck),
     "get_vehicle_info":  (sumo_pb2.GetVehicleInfoRequest,  sumo_pb2.GetVehicleInfoResponse),
     "get_edge_info":     (sumo_pb2.GetEdgeInfoRequest,     sumo_pb2.GetEdgeInfoResponse),
+    "ack_network":             (sumo_pb2.PauseRequest,                sumo_pb2.CommandAck),
+    "report_frontend_stats":   (sumo_pb2.ReportFrontendStatsRequest,  sumo_pb2.CommandAck),
 }
 
 # Binary frame type bytes
@@ -98,6 +101,8 @@ def _make_callback(topic: str, type_byte: int):
                     _network_frame = frame
                     if _loop is not None:
                         _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
+                    # Signal publisher that cache is loaded and we're ready for SimBin frames.
+                    threading.Thread(target=lambda: _call_service("ack_network", {}), daemon=True).start()
                 return
 
             if type_byte == _TYPE_EDGEBIN:

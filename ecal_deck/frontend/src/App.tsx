@@ -220,7 +220,9 @@ export default function App() {
   const { connected, reconnectAttempt, network, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
           edgeAttr, edgeAttrVersion,
           logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
-  const perf = usePerfStats();
+  const { resetCumulative, ...perf } = usePerfStats();
+  const perfRef = useRef(perf);
+  perfRef.current = perf;
 
   const parsed = useMemo(
     () => (network ? parseNetworkGeometry(network) : null),
@@ -228,7 +230,7 @@ export default function App() {
   );
 
   const [viewState, setViewState] = useState<MapViewState | OrthographicViewState | null>(null);
-  useEffect(() => { setViewState(null); }, [network]);
+  useEffect(() => { setViewState(null); resetCumulative(); }, [network]);
   const activeView = viewState ?? parsed?.initialViewState ?? null;
 
   const [paused, setPaused]     = useState(false);
@@ -315,7 +317,7 @@ export default function App() {
           setSimReady(true);
           setDelayMs((resp.delay_ms as number) ?? 0);
           if (resp.sumocfg_path) setCfgPath(resp.sumocfg_path as string);
-          if (autostartRef.current) {
+          if (autostartRef.current || resp.benchmark) {
             sendCommand('resume');
             setPaused(false);
             // Ensure stopwatch is ticking (already started in handleLoad for manual loads;
@@ -329,7 +331,7 @@ export default function App() {
                 200,
               );
             }
-            // Poll to detect simulation end and freeze the stopwatch.
+            // Poll to detect simulation end, freeze stopwatch, and report stats.
             if (watchEndPollRef.current) clearInterval(watchEndPollRef.current);
             watchEndPollRef.current = setInterval(() => {
               sendCommand('get_state', {}, (r) => {
@@ -338,6 +340,12 @@ export default function App() {
                   clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
                   if (watchStartRef.current) { setWatchMs(Date.now() - watchStartRef.current); watchStartRef.current = null; }
                   setSimReady(false);
+                  const p = perfRef.current;
+                  sendCommand('report_frontend_stats', {
+                    avg_frame_ms: p.cumAvgFrameMs,
+                    skip_rate:    p.cumSkipRate,
+                    frames:       p.cumFrames,
+                  });
                 }
               });
             }, 2000);
@@ -372,6 +380,12 @@ export default function App() {
           clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
           if (watchStartRef.current) { setWatchMs(Date.now() - watchStartRef.current); watchStartRef.current = null; }
           setSimReady(false);
+          const p = perfRef.current;
+          sendCommand('report_frontend_stats', {
+            avg_frame_ms: p.cumAvgFrameMs,
+            skip_rate:    p.cumSkipRate,
+            frames:       p.cumFrames,
+          });
         }
       });
     }, 2000);

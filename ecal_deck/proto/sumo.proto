@@ -118,6 +118,7 @@ message GetStateResponse {
   bool   step_at_max_bound     = 6;
   string network_cache_path    = 7; // path to .ecaldeck file; empty if no network loaded
   bool   simulation_ready      = 8; // true only after libsumo has finished loading and the step loop is running
+  bool   benchmark             = 9; // true when publisher was started with --benchmark
 }
 
 message GetAttributesRequest  {}
@@ -205,6 +206,7 @@ message SimBin {
   bytes  veh_attr_vals    = 7;   // f32[N×K_v] LE: column-major vehicle attributes
   bytes  vehicle_ids      = 8;   // null-terminated UTF-8: veh_count IDs
   bytes  veh_type_indices = 9;   // u32[N] LE: permanent index into VehicleTypeDict
+  uint32 seq_num          = 15;  // publisher-side counter, incremented per SimBin sent; gaps = dropped frames
 
   // --- Mobile agent section (persons + containers).
   //     Agent class is identified via VehicleTypeDict.type_classes[type_index]. ---
@@ -223,4 +225,10 @@ message EdgeBin {
   uint32 attr_count    = 3;   // K_e: number of edge attributes
   bytes  edge_indices  = 4;   // u32[N] LE: global index into NetworkGeometry.edge_ids
   bytes  attr_vals     = 5;   // f32[N×K_e] LE: column-major edge attributes
+}
+
+message ReportFrontendStatsRequest {
+  double avg_frame_ms = 1;  // average time between rAF callbacks (ms)
+  double skip_rate    = 2;  // fraction of SimBin frames dropped (0–1)
+  int32  frames       = 3;  // total rAF frames rendered
 }

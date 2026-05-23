@@ -311,8 +311,11 @@ def parse_args():
     p.add_argument("--delay", type=int, default=0, metavar="MS",
                    help="Delay in milliseconds between simulation steps (default 0)")
     p.add_argument("--benchmark", action="store_true",
-                   help="Run to completion publishing every step (interval=1, delay=0); "
-                        "requires --sumo-cfg. Exits when done.")
+                   help="Publisher-only benchmark: run to completion at max speed (interval=1, delay=0) "
+                        "and print publisher stats. Requires --sumo-cfg. No bridge or frontend needed.")
+    p.add_argument("--benchmark-full", action="store_true",
+                   help="Full-stack benchmark: like --benchmark but also waits for bridge+frontend "
+                        "and prints combined publisher+frontend stats. Requires --sumo-cfg.")
     return p.parse_args()
 
 
@@ -410,6 +413,11 @@ def main():
         "at_max_bound":         False,
         "needs_edgebin_snapshot": False,  # set to True to trigger a full snapshot next step
         "simulation_ready":       False,  # True only after libsumo has finished loading
+        "network_ack_event":      None,   # set after each network publish; bridge acks when cache loaded
+        "benchmark":              args.benchmark_full,  # sent to frontend via GetStateResponse → auto-start
+        "benchmark_headless":     args.benchmark,       # publisher-only: skip network_ack and frontend waits
+        "frontend_stats":         None,   # set by report_frontend_stats service call from bridge
+        "frontend_stats_event":   threading.Event(),
     }
 
     # per-simulation state (replaced on each load)
@@ -509,12 +517,16 @@ def main():
     def _step_loop():
         step          = 0
         steps_since   = 0
+        seq           = 0   # monotonic SimBin counter; reset per load (frontend resets on network)
         converter     = sim["converter"]
         geo_ref       = sim["geo_referenced"]
         all_edges     = sim["all_edges"]
-        _t_report     = time.monotonic()
+        loop_start    = time.monotonic()
+        _t_report     = loop_start
         total_sleep   = 0
         collect_ms    = 0
+        first_time_ms          = None   # sim time at first step (for RTF)
+        total_vehicles_published = 0    # vehicle count accumulated at each publish (for UPS)
         # auto-tuner: rolling average of data-collection time (excludes sleep + SUMO compute)
         _collect_times: list[float] = []
 
@@ -527,6 +539,8 @@ def main():
 
             traci.simulationStep()
             time_ms = round(traci.simulation.getTime() * 1000)
+            if first_time_ms is None:
+                first_time_ms = time_ms
 
             end_ms = sim["end_time_ms"]
             if end_ms is not None and time_ms >= end_ms:
@@ -627,6 +641,9 @@ def main():
                 sb.agent_ids = person_id_block
                 sb.agent_type_indices = pers_type_idx.tobytes()
                 # cont_count defaults to 0 (reserved)
+                total_vehicles_published += N
+                seq += 1
+                sb.seq_num = seq
                 pub_simbin.send(sb.SerializeToString())
 
                 # tls
@@ -711,7 +728,24 @@ def main():
             traci.close()
         except Exception:
             pass
+
+        wall_s  = time.monotonic() - loop_start
+        sim_s   = ((time_ms - first_time_ms) / 1000.0) if first_time_ms is not None and step > 0 else 0.0
+        rtf     = sim_s / wall_s if wall_s > 0 else 0.0
+        # UPS: scale published-step vehicle counts to all steps (published count × interval factor)
+        ups     = (total_vehicles_published * step / max(seq, 1)) / wall_s if wall_s > 0 else 0.0
+        avg_step_ms  = wall_s * 1000.0 / step if step > 0 else 0.0
+        # fraction of steps not published (0 = every step published, as in benchmark mode)
+        pub_skip     = 1.0 - seq / step if step > 0 else 0.0
+
         print("Simulation finished after %d steps" % step)
+        print("Performance:")
+        print("  Duration: %.1f s" % wall_s)
+        print("  Real time factor: %.3f" % rtf)
+        print("  UPS: %.1f" % ups)
+        print("Publisher:")
+        print("  Avg. step time [ms]: %.2f" % avg_step_ms)
+        print("  Avg. skip rate: %.3f" % pub_skip)
 
     # --- load a simulation (called from service callback thread) ---
     def _do_load(sumocfg_path: str):
@@ -766,6 +800,7 @@ def main():
 
                 # Set cache path so get_state can return it while SUMO loads (bridge polls it).
                 ctrl["network_cache_path"] = cp
+                ctrl["network_ack_event"] = threading.Event()
                 nd_bytes = sumo_pb2.NetworkData(geo_referenced=ng.geo_referenced, cache_path=cp).SerializeToString()
                 pub_network.send(nd_bytes)
                 if pub_network.get_subscriber_count() == 0:
@@ -786,9 +821,12 @@ def main():
                 _log("ERROR", "Network build/load failed — step loop not started. Check output above.")
                 return
 
-            # Sleep briefly so the bridge has time to receive the eCAL message and read
-            # the 225 MB cache file into _network_frame before traci.start() locks the GIL.
-            time.sleep(1.0)
+            # Wait for the bridge to ack that it has loaded the network cache into _network_frame.
+            # Skipped in headless benchmark (no bridge); falls back to 10 s timeout otherwise.
+            evt = ctrl.get("network_ack_event")
+            if evt is not None and not ctrl.get("benchmark_headless"):
+                if not evt.wait(timeout=10.0):
+                    print("WARNING: bridge did not acknowledge network load within 10 s; proceeding anyway")
 
             # start SUMO — log socket uses SUMO's "host:port" file syntax
             cmd = [sumo_bin, "-c", sumocfg_path, "--step-length", str(args.step_length),
@@ -876,6 +914,26 @@ def main():
         _step_event.set()
         return _ack()
 
+    def _on_ack_network(_mi, _req):
+        evt = ctrl.get("network_ack_event")
+        if evt is not None:
+            evt.set()
+        return _ack()
+
+    def _on_report_frontend_stats(_mi, req_bytes):
+        try:
+            req = sumo_pb2.ReportFrontendStatsRequest()
+            req.ParseFromString(req_bytes)
+            ctrl["frontend_stats"] = {
+                "avg_frame_ms": req.avg_frame_ms,
+                "skip_rate":    req.skip_rate,
+                "frames":       req.frames,
+            }
+            ctrl["frontend_stats_event"].set()
+            return _ack()
+        except Exception as e:
+            return _ack(False, str(e))
+
     def _on_get_state(_mi, _req):
         resp = sumo_pb2.GetStateResponse(
             delay_ms=ctrl["delay_ms"], paused=ctrl["paused"],
@@ -884,7 +942,8 @@ def main():
             step_interval_current=ctrl["interval_current"],
             step_at_min_bound=ctrl["at_min_bound"],
             step_at_max_bound=ctrl["at_max_bound"],
-            simulation_ready=ctrl["simulation_ready"])
+            simulation_ready=ctrl["simulation_ready"],
+            benchmark=ctrl["benchmark"])
         return 0, resp.SerializeToString()
 
     def _on_set_step_config(_mi, req_bytes):
@@ -976,6 +1035,8 @@ def main():
         ("pause",          sumo_pb2.PauseRequest,        sumo_pb2.CommandAck,            _on_pause),
         ("resume",         sumo_pb2.ResumeRequest,       sumo_pb2.CommandAck,            _on_resume),
         ("step",           sumo_pb2.StepRequest,         sumo_pb2.CommandAck,            _on_step),
+        ("ack_network",             sumo_pb2.PauseRequest,                    sumo_pb2.CommandAck,            _on_ack_network),
+        ("report_frontend_stats",   sumo_pb2.ReportFrontendStatsRequest,      sumo_pb2.CommandAck,            _on_report_frontend_stats),
         ("get_state",        sumo_pb2.GetStateRequest,        sumo_pb2.GetStateResponse,      _on_get_state),
         ("set_step_config",  sumo_pb2.SetStepConfigRequest,   sumo_pb2.CommandAck,            _on_set_step_config),
         ("get_attributes",   sumo_pb2.GetAttributesRequest,   sumo_pb2.GetAttributesResponse, _on_get_attributes),
@@ -985,16 +1046,17 @@ def main():
     ]:
         svc.set_method_callback(_method_info(name, req_cls, resp_cls), cb)
 
-    # --- benchmark mode: run to completion, then exit ---
-    if args.benchmark:
+    # --- benchmark modes: run to completion, then exit ---
+    if args.benchmark or args.benchmark_full:
+        mode_flag = "--benchmark" if args.benchmark else "--benchmark-full"
         if not args.sumo_cfg:
-            sys.exit("--benchmark requires --sumo-cfg")
+            sys.exit("%s requires --sumo-cfg" % mode_flag)
         ctrl["delay_ms"]         = 0
         ctrl["autotune"]         = False
         ctrl["interval_min"]     = 1
         ctrl["interval_max"]     = 1
         ctrl["interval_current"] = 1
-        print("Benchmark mode: delay=0, interval=1, publishes every step.")
+        print("Benchmark mode (%s): delay=0, interval=1, publishes every step." % mode_flag)
         t_wall = time.monotonic()
         _do_load(args.sumo_cfg)      # blocking in main thread
         ctrl["paused"] = False       # _do_load leaves it True; override immediately
@@ -1002,7 +1064,21 @@ def main():
         if _step_thread[0]:
             _step_thread[0].join()
         elapsed = time.monotonic() - t_wall
-        print("Benchmark done: %.2f s wall clock (including 1 s network publish delay)" % elapsed)
+        print("Benchmark done: %.2f s wall clock" % elapsed)
+
+        if args.benchmark_full:
+            # Wait for the frontend to report its stats (via bridge → report_frontend_stats service).
+            # The frontend detects sim end via the get_state poll (up to 2 s lag) then calls back.
+            fs_evt = ctrl["frontend_stats_event"]
+            if fs_evt.wait(timeout=15.0):
+                fs = ctrl["frontend_stats"]
+                print("Frontend:")
+                print("  Avg. frame time [ms]: %.2f" % fs["avg_frame_ms"])
+                print("  Avg. skip rate: %.3f" % fs["skip_rate"])
+                print("  Frames rendered: %d" % fs["frames"])
+            else:
+                print("Frontend: no stats received (bridge/frontend not connected)")
+
         ecal_core.finalize()
         sys.exit(0)
 

@@ -119,6 +119,7 @@ export function useSimSocket(url: string): SimState {
   const [logMessages, setLogMessages]         = useState<LogMessage[]>([]);
 
   const recentLogTexts = useRef(new Set<string>());
+  const prevSeqNumRef  = useRef<number | null>(null);  // for skip-frame counting
   const updateAttributeConfig = (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) =>
     setAttributeConfig(updater);
 
@@ -247,6 +248,11 @@ export function useSimSocket(url: string): SimState {
               agent_type_indices: toUint32(sb.agent_type_indices),
             };
             latestSnapshot.current = snapshot;
+            // Track skipped frames via seq_num gap
+            const seq = sb.seq_num;
+            const skipped = prevSeqNumRef.current !== null ? Math.max(0, seq - prevSeqNumRef.current - 1) : 0;
+            prevSeqNumRef.current = seq;
+            performance.mark('simbin-seq', { detail: { skipped } });
             break;
           }
           case TYPE_EDGEBIN: {
@@ -312,9 +318,10 @@ export function useSimSocket(url: string): SimState {
             const ng = NetworkGeometry.decode(payload);
             networkRef.current = ng;
             // Reset all simulation state on new network
-            edgeAttrRef.current       = null;
-            latestSnapshot.current    = null;
+            edgeAttrRef.current         = null;
+            latestSnapshot.current      = null;
             vehicleTypeTableRef.current = null;
+            prevSeqNumRef.current       = null;
             setVehicleSnapshot(null);
             setVehicleTypeTable(null);
             setNetwork(ng);

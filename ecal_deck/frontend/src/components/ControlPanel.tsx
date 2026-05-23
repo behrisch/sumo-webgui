@@ -216,6 +216,7 @@ export function ControlPanel(p: Props) {
       <div style={{ borderTop: '1px solid #444', paddingTop: 4, opacity: 0.6, fontSize: 11, lineHeight: 1.6 }}>
         <div>msg/s {p.perf.msgPerSec}  frame {p.perf.frameMs.toFixed(1)}ms</div>
         <div>parse {p.perf.parseMs.toFixed(2)}ms  veh-build {p.perf.vehicleBuildMs.toFixed(2)}ms</div>
+        {p.perf.skipRate > 0 && <div>skip {(p.perf.skipRate * 100).toFixed(0)}%</div>}
         {p.watchMs !== null && (
           <div style={{ opacity: p.watchRunning ? 1 : 0.5 }}>
             ⏱ {p.watchMs >= 3600000
