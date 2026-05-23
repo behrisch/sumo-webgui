@@ -405,12 +405,8 @@ def main():
         "edge_attributes":      [],
         "sumocfg_path":         args.sumo_cfg or "",
         "network_cache_path":   "",
-        "interval_min":         1,
-        "interval_max":         10,
         "autotune":             True,
         "interval_current":     1,
-        "at_min_bound":         False,
-        "at_max_bound":         False,
         "needs_edgebin_snapshot": False,  # set to True to trigger a full snapshot next step
         "simulation_ready":       False,  # True only after libsumo has finished loading
         "network_ack_event":      None,   # set after each network publish; bridge acks when cache loaded
@@ -691,17 +687,18 @@ def main():
                 if len(_collect_times) > 20:
                     _collect_times.pop(0)
 
-                # auto-tuner: adjust interval so data collection <= 25% of non-sleep step time
+                # auto-tuner: keep overhead ≤ 1.5× no-GUI baseline (collection ≤ t_sim/2 = 33% of step).
+                # When delay_ms ≥ avg_collect the sleep already absorbs the collection cost and
+                # the step time is delay-dominated regardless of interval — skipping frames would
+                # just lengthen the sleep without speeding up the simulation.
                 if ctrl["autotune"] and len(_collect_times) >= 5:
                     avg_collect = sum(_collect_times) / len(_collect_times)
-                    step_time_ms = ((time.monotonic() - _t_report) * 1000 - total_sleep) / max(steps_since, 1)
-                    target_budget = max(step_time_ms * 0.25, 1.0)
-                    new_interval = max(ctrl["interval_min"],
-                                       min(ctrl["interval_max"],
-                                           int(avg_collect / target_budget) + 1))
-                    ctrl["at_min_bound"] = new_interval == ctrl["interval_min"] and avg_collect > target_budget
-                    ctrl["at_max_bound"] = new_interval == ctrl["interval_max"] and avg_collect > target_budget
-                    ctrl["interval_current"] = new_interval
+                    if avg_collect <= ctrl["delay_ms"]:
+                        ctrl["interval_current"] = 1
+                    else:
+                        step_time_ms = ((time.monotonic() - _t_report) * 1000 - total_sleep) / max(steps_since, 1)
+                        target_budget = max(step_time_ms / 3, 1.0)
+                        ctrl["interval_current"] = max(1, int(avg_collect / target_budget) + 1)
 
             step        += 1
             steps_since += 1
@@ -715,10 +712,8 @@ def main():
             if now - _t_report >= 5.0:
                 elapsed = now - _t_report
                 rate = steps_since / elapsed
-                _log("INFO", "%.0f steps/s  (%.1f ms/step)  interval=%d%s%s" % (
-                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
-                    " [AT MIN]" if ctrl["at_min_bound"] else "",
-                    " [AT MAX]" if ctrl["at_max_bound"] else ""))
+                _log("INFO", "%.0f steps/s  (%.1f ms/step)  interval=%d" % (
+                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"]))
                 steps_since = 0
                 _t_report   = now
                 total_sleep = 0
@@ -849,9 +844,7 @@ def main():
 
             # reset per-sim state — start paused so the user can inspect before running
             ctrl["paused"] = True
-            ctrl["interval_current"] = ctrl["interval_min"]
-            ctrl["at_min_bound"] = False
-            ctrl["at_max_bound"] = False
+            ctrl["interval_current"] = 1
             _type_cache.clear()
             _type_id_to_idx.clear()
             _type_table.clear()
@@ -940,8 +933,6 @@ def main():
             sumocfg_path=ctrl["sumocfg_path"],
             network_cache_path=ctrl["network_cache_path"],
             step_interval_current=ctrl["interval_current"],
-            step_at_min_bound=ctrl["at_min_bound"],
-            step_at_max_bound=ctrl["at_max_bound"],
             simulation_ready=ctrl["simulation_ready"],
             benchmark=ctrl["benchmark"])
         return 0, resp.SerializeToString()
@@ -950,13 +941,9 @@ def main():
         try:
             req = sumo_pb2.SetStepConfigRequest()
             req.ParseFromString(req_bytes)
-            ctrl["interval_min"] = max(1, req.interval_min)
-            ctrl["interval_max"] = max(ctrl["interval_min"], req.interval_max)
-            ctrl["autotune"]     = req.autotune
+            ctrl["autotune"] = req.autotune
             if not ctrl["autotune"]:
-                ctrl["interval_current"] = ctrl["interval_min"]
-                ctrl["at_min_bound"] = False
-                ctrl["at_max_bound"] = False
+                ctrl["interval_current"] = 1
             return _ack()
         except Exception as e:
             return _ack(False, str(e))
@@ -1055,15 +1042,15 @@ def main():
 
     # --- benchmark modes: run to completion, then exit ---
     if args.benchmark or args.benchmark_full:
-        mode_flag = "--benchmark" if args.benchmark else "--benchmark-full"
         if not args.sumo_cfg:
-            sys.exit("%s requires --sumo-cfg" % mode_flag)
+            sys.exit("Benchmarking requires --sumo-cfg")
         ctrl["delay_ms"]         = 0
-        ctrl["autotune"]         = False
-        ctrl["interval_min"]     = 1
-        ctrl["interval_max"]     = 1
         ctrl["interval_current"] = 1
-        print("Benchmark mode (%s): delay=0, interval=1, publishes every step." % mode_flag)
+        if args.benchmark:
+            ctrl["autotune"] = False   # headless: measure max-throughput publisher overhead
+            print("Benchmark mode (--benchmark): delay=0, interval=1 fixed.")
+        else:
+            print("Benchmark mode (--benchmark-full): delay=0, autotune enabled.")
         t_wall = time.monotonic()
         _do_load(args.sumo_cfg)      # blocking in main thread
         ctrl["paused"] = False       # _do_load leaves it True; override immediately

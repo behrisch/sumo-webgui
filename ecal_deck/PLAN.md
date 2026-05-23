@@ -75,8 +75,8 @@ ecal_deck/
 | `resume`         | ResumeRequest          | CommandAck             |                                |
 | `step`           | StepRequest            | CommandAck             | Single step while paused       |
 | `set_delay`        | SetDelayRequest          | CommandAck             | ms between steps               |
-| `set_step_config`  | SetStepConfigRequest     | CommandAck             | interval_min, interval_max, autotune |
-| `get_state`        | GetStateRequest          | GetStateResponse       | delay_ms, paused, sumocfg_path, step_interval_current, step_at_min_bound, step_at_max_bound |
+| `set_step_config`  | SetStepConfigRequest     | CommandAck             | autotune |
+| `get_state`        | GetStateRequest          | GetStateResponse       | delay_ms, paused, sumocfg_path, step_interval_current |
 | `get_attributes`   | GetAttributesRequest     | GetAttributesResponse  | available + enabled attrs      |
 | `set_attributes`   | SetAttributesRequest     | CommandAck             | which attrs to collect; triggers full edgedata snapshot |
 | `get_vehicle_info` | GetVehicleInfoRequest    | GetVehicleInfoResponse | route, lane, all attrs — on demand only                 |
@@ -93,9 +93,9 @@ The bridge translates protobuf <-> JSON at the WebSocket boundary (same pattern 
 - `shape2json()` in `net2geojson.py` handles geo/non-geo internally via `net.hasGeoProj()`
 - `Vehicle` and `EdgeData` both have `map<string, double> attributes` for extensible coloring
 - `GetStateResponse` includes `sumocfg_path` so the frontend can enable Reload on connect
-- `GetStateResponse` includes `step_interval_current`, `step_at_min_bound`, `step_at_max_bound`
+- `GetStateResponse` includes `step_interval_current` (current publish interval, set by autotune)
 - `EdgeDataUpdate` includes `bool full_snapshot` to distinguish initial all-edges message from delta
-- `SetStepConfigRequest` has `interval_min`, `interval_max`, `autotune` fields
+- `SetStepConfigRequest` has `autotune` bool; `interval_min`/`interval_max` fields exist in proto but are unused (reserved for future video recording support)
 
 ---
 
@@ -123,15 +123,16 @@ The bridge translates protobuf <-> JSON at the WebSocket boundary (same pattern 
 All per-step data (simstep, tls, edgedata) is published on the same adaptive interval.
 This is the single answer to "how often does the frontend receive a visual update."
 
-**Adaptive interval (`SetStepConfigRequest`):**
-- `interval_min` (default 1), `interval_max` (default 10), `autotune` (default true)
-- Auto-tuner measures **total per-step data collection time** (vehicles + occupied-edge attrs)
-  over a rolling window; targets ≤ 25% of non-sleep step time; clamps to `[interval_min, interval_max]`
-- When `autotune = false`: always uses `interval_min`
-- At low vehicle counts and no edge attrs, collection is cheap → auto-tuner stays at `interval_min`
-- Edge data with large networks drives the interval upward when needed
-- `GetStateResponse` gains `step_interval_current`, `step_at_min_bound`, `step_at_max_bound`
-  so the frontend can display the current rate and warn when at either bound
+**Adaptive interval (`SetStepConfigRequest.autotune`):**
+- Simple boolean toggle (default true); no min/max bounds
+- Auto-tuner targets the **1.5× overhead limit**: keep collection ≤ t_sim/2 (= 33% of total step
+  time); converges freely to the minimum interval N satisfying this (formula: `target = step_time/3`)
+- When delay absorbs the collection cost (`delay_ms ≥ collect_ms`), autotune forces interval=1
+  (no benefit from skipping when the delay is the bottleneck)
+- When `autotune = false`: always uses interval=1
+- `GetStateResponse` includes `step_interval_current` so the frontend can display the current rate
+- Min/max interval bounds (currently unused proto fields) are reserved for future video recording
+  support, where a minimum visual frame rate needs to be guaranteed regardless of sim speed
 
 **EdgeData: base + delta protocol**
 
@@ -225,7 +226,7 @@ For geo-referenced networks, vehicle positions from TraCI (XY) are converted to 
   only occupied edges (present in latest delta) are coloured; viewport-culled via lane bboxes
 - Available/enabled attributes populated from `get_attributes` on connect (no inference needed)
 - Checkbox changes send `set_attributes` + trigger a new full snapshot from the publisher
-- Step interval config (min/max/autotune) shown in control panel with bound warnings;
+- Auto interval toggle shown in control panel with current interval display;
   applies uniformly to simstep, tls, and edgedata so vehicles and edge colours update together
 
 ### File browser
@@ -354,7 +355,7 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 | 4 | **Bridge batch message** — all pending topics flushed as one WebSocket frame per 60fps cycle | `ecal_ws_bridge.py` | 3× fewer `onmessage` events | msg/s ~100 (without edge data) |
 | 5 | **RAF-synchronized state updates** — high-frequency topics written to refs in `onmessage`; drained to React state once per `requestAnimationFrame` | `useSimSocket.ts` | Exactly one React render per browser frame | **65 ms → 35 ms** |
 | 6 | **Bridge batch: string concatenation** — batch assembly uses `','.join(_pending.values())` instead of `json.loads + json.dumps` round-trip; avoids blocking asyncio loop on large edgedata payloads | `ecal_ws_bridge.py` | msg/s with edge data: 15 → ~60 | implemented |
-| 7 | **Unified step interval + edge data base/delta** — one adaptive interval `[min, max]` with autotune controls simstep+tls+edgedata together; auto-tuner targets ≤25% of non-sleep step time. Edge data: full TraCI snapshot on `set_attributes`/load (`full_snapshot=true`), occupied-only deltas per interval. Frontend accumulates in `edgeValueMap` ref; empty edges shown in neutral grey from snapshot baseline. | publisher + bridge + frontend | step time with edge data: 22ms → ~7ms; steps/s: 45 → ~120 | implemented |
+| 7 | **Unified step interval + edge data base/delta** — single autotune-controlled interval for simstep+tls+edgedata; auto-tuner targets ≤ 1.5× no-GUI overhead (collection ≤ t_sim/2 = 33% of step time); converges freely, no min/max bounds. Edge data: full TraCI snapshot on `set_attributes`/load (`full_snapshot=true`), occupied-only deltas per interval. Frontend accumulates in `edgeValueMap` ref; empty edges shown in neutral grey from snapshot baseline. | publisher + bridge + frontend | step time with edge data: 22ms → ~7ms; steps/s: 45 → ~120 | implemented |
 | 8 | **Binary WebSocket transport** — all simulation topics sent as raw protobuf bytes with 1-byte type prefix; bridge skips `MessageToDict`/`json.dumps`; frontend uses ts-proto `decode()`; JSON batch replaced by individual binary frames per type; `permessage-deflate` compression on by default | bridge + publisher + frontend | eliminates `JSON.parse` cost per frame; large-network transfer | implemented |
 | 9 | **Binary network cache + parallel load** — `NetworkGeometry` proto with binary typed arrays replaces GeoJSON; cached to `<net.xml>.ecaldeck`; background thread handles read/build/publish concurrently with `traci.start()`; junction polygons (not centroids) for `SolidPolygonLayer`; projection params stored in cache so reload needs no net file access; network layers memoized to avoid per-frame `SolidPolygonLayer` tessellation | publisher + frontend | large-network load: minutes → ~SUMO startup time; frame time: 250ms → normal on large networks | implemented |
 | 10 | **Edge data viewport culling + occupied-only map** — (a) `edgeValueMap` always replaced (not merged) so map holds only occupied edges from the latest delta (typically hundreds vs tens-of-thousands); (b) `edgeLaneIndices` reverse map (edge→lanes) precomputed at network load; `buildEdgeDataLayer` iterates `valueMap` keys instead of all lanes — cost scales with occupied×visible, not total lanes; (c) per-lane bboxes (`laneBBoxes`) computed at network load; each candidate lane bbox-tested against viewport before inclusion; (d) PathLayer `getColor` uses `target` parameter to avoid per-lane array allocations; (e) `edgeDataLayer` memoized independently from `simStep` | frontend | frame time with edge data on large network: 750ms → solved | implemented |
@@ -620,6 +621,13 @@ Recording start/stop can be a button in the ControlPanel.
 
 **Limitations**: Frame rate is capped by the browser's rendering pipeline. Audio is not captured.
 `video/mp4` support varies by browser; `video/webm` is universally supported in Chrome/Firefox.
+
+**Interval control needed**: the autotune currently converges freely to the minimum publish
+interval that keeps simulation overhead ≤ 1.5×. For recording, a fast simulation would publish
+infrequently (e.g. interval=10), producing a choppy video even though the browser renders at
+60 fps. Recording requires a way to guarantee a minimum visual update rate — e.g. a `max_interval`
+cap or a dedicated "recording mode" that forces interval=1 regardless of overhead. The proto
+fields `interval_min`/`interval_max` in `SetStepConfigRequest` are reserved for exactly this.
 
 ---
 

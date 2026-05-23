@@ -137,7 +137,7 @@ message SetAttributesRequest {
 message SetStepConfigRequest {
   int32 interval_min = 1;  // minimum steps between publishes (default 1)
   int32 interval_max = 2;  // maximum steps (default 10)
-  bool  autotune     = 3;  // auto-tune within [min, max] to keep collection <= 25% of step time
+  bool  autotune     = 3;  // auto-tune within [min, max] to keep overhead <= 1.5× no-GUI baseline (≤ 33% of step time)
 }
 
 message LoadRequest { string sumocfg_path = 1; }

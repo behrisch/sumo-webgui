@@ -17,12 +17,48 @@ full hour:
 - sumo-gui: 134s
 - web-gui: 159s (without auto interval, color vehicles by speed, no edge coloring)
 
-Benchmark scenario: Doe 6:00-6:10 (best of 3)
-- sumo plain: 10.6s
-- sumo-gui: 17.2s
-- web-gui 26.0s (with update interval 1)
-- web-gui 10.0s (with auto interval <= 10)
-- publisher only 21.9s (with update interval 1)
+Benchmark scenario: Doe 6:00-6:10 (600 sim-seconds, ~5000 vehicles + 1400 persons)
+
+| Component | Duration | RTF | Avg step | Notes |
+|---|---|---|---|---|
+| sumo (no GUI) | 11.26 s | 53.3 | 18.8 ms | baseline |
+| sumo-gui | 16.30 s | 36.8 | 27.2 ms | skip rate 77.7 %, frame 24.4 ms |
+| publisher `--benchmark` | 18.0 s | 33.4 | 30.0 ms | no bridge, interval=1 |
+| publisher `--benchmark` + bridge | 19.3 s | 31.1 | 32.2 ms | bridge subscribed, no browser |
+| publisher `--benchmark-full` | 24.9 s | 24.0 | 41.6 ms | bridge + browser collocated, interval=1, frontend frame 10.9 ms, skip 0.2 % |
+
+#### Pipeline overhead breakdown
+
+Isolating eCAL transport cost from browser CPU competition on the same machine:
+
+| Source | Step overhead | Cause |
+|---|---|---|
+| TraCI extraction + pack | +11.2 ms | vehicle queries, typed-array packing — dominates |
+| eCAL SHM publish (bridge subscribed) | +2.2 ms | write ~250 KB to SHM, signal subscriber |
+| Browser CPU stealing (collocated) | +9.5 ms | browser rendering competes for CPU on same host |
+
+The browser overhead is not pipeline overhead — it disappears when the publisher runs on a
+dedicated server and the browser on a separate machine (normal deployment). The relevant
+server-side cost is the **bridge-only** row above: RTF 31.1 vs sumo-gui 36.8,
+a **1.18× overhead** at interval=1, within the 1.5× target.
+
+#### Autotune
+
+`t_sim = 18.8 ms`, `t_collect ≈ 13.4 ms` per publish step (extraction + pack + eCAL send, bridge connected).
+
+The autotune is a simple boolean toggle (on/off). When on, it converges freely to the minimum
+interval N satisfying the **1.5× overhead limit**: `c/N ≤ t_sim/2`. Derivation: at convergence
+`total = t_sim / (1 − f)`, so `f = 1/3` gives exactly 1.5×; the publisher uses
+`target_budget = step_time_ms / 3`.
+
+For this scenario: `c/N ≤ 18.8/2 = 9.4 ms` → **N = 2** (`13.4 / 2 = 6.7 ms`).
+At `interval = 2`: total ≈ 18.8 + 6.7 = 25.5 ms → **1.36× overhead** (within 1.5× target).
+
+When `delay_ms ≥ t_collect` the sleep already absorbs the collection cost and autotune forces
+`interval = 1` (no skipping — the delay is the bottleneck, not extraction).
+
+There is no configurable min/max interval. The only reason to cap the interval would be to
+guarantee a minimum visual update rate for video recording; that is a separate future concern.
 
 
 ---

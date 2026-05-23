@@ -253,7 +253,7 @@ export default function App() {
       setDelayMs(controlState.delayMs);
       setPaused(controlState.paused);
       if (controlState.sumocfg_path) setCfgPath(controlState.sumocfg_path);
-      setIntervalMin(controlState.step_interval_current);
+      setIntervalCurrent(controlState.step_interval_current ?? 1);
       // Activate controls when already-running sim is detected (e.g. loaded via CLI arg).
       if (controlState.simulation_ready) setSimReady(true);
     }
@@ -307,6 +307,7 @@ export default function App() {
     if (readyPollRef.current) clearInterval(readyPollRef.current);
     readyPollRef.current = setInterval(() => {
       sendCommand('get_state', {}, (resp) => {
+        if (resp.step_interval_current !== undefined) setIntervalCurrent(resp.step_interval_current as number);
         if (resp.simulation_ready) {
           clearInterval(readyPollRef.current!);
           readyPollRef.current = null;
@@ -335,6 +336,7 @@ export default function App() {
             if (watchEndPollRef.current) clearInterval(watchEndPollRef.current);
             watchEndPollRef.current = setInterval(() => {
               sendCommand('get_state', {}, (r) => {
+                if (r.step_interval_current !== undefined) setIntervalCurrent(r.step_interval_current as number);
                 if (!r.simulation_ready) {
                   clearInterval(watchEndPollRef.current!); watchEndPollRef.current = null;
                   clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
@@ -375,6 +377,7 @@ export default function App() {
     // Poll get_state every 2 s to detect simulation end (simulation_ready → false).
     watchEndPollRef.current = setInterval(() => {
       sendCommand('get_state', {}, (resp) => {
+        if (resp.step_interval_current !== undefined) setIntervalCurrent(resp.step_interval_current as number);
         if (!resp.simulation_ready) {
           clearInterval(watchEndPollRef.current!); watchEndPollRef.current = null;
           clearInterval(watchTickRef.current!);    watchTickRef.current    = null;
@@ -480,11 +483,10 @@ export default function App() {
     }
   }, [vehicleSnapshot, parsed]);
 
-  const [intervalMin, setIntervalMin]   = useState(1);
-  const [intervalMax, setIntervalMax]   = useState(10);
-  const [autotune, setAutotune]         = useState(true);
-  const sendStepConfig = (min: number, max: number, tune: boolean) =>
-    sendCommand('set_step_config', { interval_min: min, interval_max: max, autotune: tune });
+  const [autotune, setAutotune] = useState(true);
+  const [intervalCurrent, setIntervalCurrent] = useState(1);
+  const sendStepConfig = (tune: boolean) =>
+    sendCommand('set_step_config', { autotune: tune });
 
   // Static network layers — memoized on parsed only so the layer instances are stable
   // across frames. deck.gl skips GPU re-upload and junction re-tessellation when the
@@ -593,11 +595,9 @@ export default function App() {
       vehicleMinPixels={vehicleMinPixels} onVehicleMinPixels={setVehicleMinPixels}
       edgeColorAttr={edgeColorAttr} edgeKeys={edgeKeys} onEdgeColorAttr={setEdgeColorAttr}
       attributeConfig={attributeConfig} onSetAttributes={handleAttributes}
-      intervalMin={intervalMin} intervalMax={intervalMax} autotune={autotune}
-      intervalCurrent={controlState?.step_interval_current ?? 1}
-      atMinBound={controlState?.step_at_min_bound ?? false}
-      atMaxBound={controlState?.step_at_max_bound ?? false}
-      onStepConfig={(min, max, tune) => { setIntervalMin(min); setIntervalMax(max); setAutotune(tune); sendStepConfig(min, max, tune); }}
+      autotune={autotune}
+      intervalCurrent={intervalCurrent}
+      onStepConfig={(tune) => { setAutotune(tune); sendStepConfig(tune); }}
       cfgPath={cfgPath} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
       autostart={autostart} onAutostart={handleAutostart}

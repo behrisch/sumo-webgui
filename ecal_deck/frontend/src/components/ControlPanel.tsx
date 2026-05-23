@@ -43,13 +43,9 @@ interface Props {
   onEdgeColorAttr: (v: string) => void;
   attributeConfig: GetAttributesResponse | null;
   onSetAttributes: (vehicle: string[], edge: string[]) => void;
-  intervalMin: number;
-  intervalMax: number;
   autotune: boolean;
   intervalCurrent: number;
-  atMinBound: boolean;
-  atMaxBound: boolean;
-  onStepConfig: (min: number, max: number, autotune: boolean) => void;
+  onStepConfig: (autotune: boolean) => void;
   perf: PerfStats;
   watchMs: number | null;      // null = not started; number = elapsed ms (ticking or frozen)
   watchRunning: boolean;       // true while ticking, false when frozen at sim end
@@ -187,29 +183,15 @@ export function ControlPanel(p: Props) {
 
       {/* step interval config */}
       <div style={{ borderTop: '1px solid #444' }} />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-        <div style={row}>
-          <label style={{ cursor: 'pointer', ...row }}>
-            <input type="checkbox" checked={p.autotune}
-              onChange={(e) => p.onStepConfig(p.intervalMin, p.intervalMax, e.target.checked)} />
-            Auto interval
-          </label>
-          <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 11 }}>
-            now: {p.intervalCurrent}
-            {p.atMinBound && ' ▼'}
-            {p.atMaxBound && ' ▲'}
-          </span>
-        </div>
-        <div style={row}>
-          <span style={{ whiteSpace: 'nowrap', fontSize: 11 }}>min</span>
-          <input type="number" min={1} max={p.intervalMax} value={p.intervalMin}
-            onChange={(e) => p.onStepConfig(Number(e.target.value), p.intervalMax, p.autotune)}
-            style={{ width: 44, background: '#111', color: '#fff', border: '1px solid #555', borderRadius: 3, padding: '1px 4px' }} />
-          <span style={{ whiteSpace: 'nowrap', fontSize: 11 }}>max</span>
-          <input type="number" min={p.intervalMin} max={100} value={p.intervalMax}
-            onChange={(e) => p.onStepConfig(p.intervalMin, Number(e.target.value), p.autotune)}
-            style={{ width: 44, background: '#111', color: '#fff', border: '1px solid #555', borderRadius: 3, padding: '1px 4px' }} />
-        </div>
+      <div style={row}>
+        <label style={{ cursor: 'pointer', ...row }}>
+          <input type="checkbox" checked={p.autotune}
+            onChange={(e) => p.onStepConfig(e.target.checked)} />
+          Auto interval
+        </label>
+        <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 11 }}>
+          now: {p.intervalCurrent}
+        </span>
       </div>
 
       {/* perf stats */}
