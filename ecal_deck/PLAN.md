@@ -518,6 +518,238 @@ simulation throughput. TraCI subscriptions do not help because with libsumo (in-
 socket) individual getters are direct C++ calls, while subscriptions force SUMO to build
 intermediate Python dicts, potentially making things slower.
 
+---
+
+### Phase A: libsumo ECal Extension Module
+
+The immediate next step is **not** a full C++ publisher replacement but a targeted C++
+extension added to libsumo itself: a new `libsumo::ECal` class exposed via SWIG that replaces
+only the hot per-vehicle/per-edge iteration in `_step_loop` with a single C++ call.
+
+**Why this scope:**
+The Python publisher already does two distinct jobs well:
+1. *Orchestration* — start/stop SUMO, handle WebSocket commands, autotune, benchmark reporting
+2. *Hot loop* — iterate N vehicles + M edges, pack protobuf, publish SHM
+
+Only the hot loop is slow (~30 ms/step at 5 000 vehicles with 0.2 s steps).
+The C++ extension eliminates the N×Python↔C++ crossings for that loop while keeping all
+orchestration in Python unchanged.
+
+Measured bottleneck breakdown (0.2 s steps, ~5 000 vehicles, doe scenario):
+- libsumo/TraCI step overhead: ~3.4 ms (always present)
+- TraCI extraction + protobuf pack (Python): ~30.5 ms  ← target
+- eCAL SHM publish: ~2 ms
+- Browser CPU stealing: ~10 ms (when frontend is open)
+
+#### New SUMO files
+
+| File | Purpose |
+|------|---------|
+| `src/libsumo/ECal.h` | Class declaration (always compiled; stubs when `HAVE_ECAL` absent) |
+| `src/libsumo/ECal.cpp` | Implementation guarded by `#ifdef HAVE_ECAL`; stubs in `#else` branch |
+| `src/libsumo/sumo_ecal.proto` | Copy of `ecal_deck/proto/sumo.proto`; compiled to `sumo_ecal.pb.h/.cc` by CMake |
+
+#### Modified SUMO files
+
+| File | Change |
+|------|--------|
+| `src/libsumo/CMakeLists.txt` | `find_package(eCAL QUIET)` + `find_package(Protobuf QUIET)`; if both found: `protobuf_generate_cpp`, add ECal sources + proto to all three targets (libsumostatic / libsumoguistatic / libsumocpp), set `HAVE_ECAL`, add `target_compile_definitions` / `target_include_directories` / `target_link_libraries` for each |
+| `src/libsumo/libsumo.i` | `%include "ECal.h"` in `%{...%}` block and `%include` list |
+| `src/libsumo/libsumo_typemap.i` | `%rename(ecal) ECal;` + `%template(LongLongVector) std::vector<long long>;` |
+
+#### C++ API
+
+```cpp
+namespace libsumo {
+
+class ECal {
+public:
+    /// Create eCAL publishers. Call once after Simulation::load().
+    /// eCAL must already be initialised by the Python side (ecal_core.initialize()).
+    /// C++ and Python share the same libecal_core.so process state — no Initialize() needed.
+    static void init(const std::string& simbin_topic,
+                     const std::string& typedict_topic,
+                     const std::string& edgebin_topic);
+
+    /// Pass the global edge ID list once per simulation load (constant after that).
+    /// Maps edge ID strings to their integer index in NetworkGeometry.edge_ids.
+    static void setEdgeIndex(const std::vector<std::string>& all_edge_ids);
+
+    /// Collect all visible vehicles + persons + active edges; pack and publish.
+    ///
+    /// Publishes:
+    ///   - VehicleTypeDict  (to typedict_topic)  when a new type_id appears
+    ///   - SimBin           (to simbin_topic)     every call
+    ///   - EdgeBin          (to edgebin_topic)    every call if edge_attrs non-empty;
+    ///                      full_snapshot=true forces all-edges baseline (e.g. on set_attributes)
+    ///
+    /// Returns: { time_ms, veh_count, agent_count }
+    static std::vector<long long> publishSimStep(
+        const std::vector<std::string>& veh_attrs,
+        const std::vector<std::string>& edge_attrs,
+        bool full_edge_snapshot,
+        int seq);
+
+    /// Release publishers and clear type registry / edge index.
+    static void close();
+};
+
+} // namespace libsumo
+```
+
+Python usage after migration:
+```python
+# On simulation load  (replaces per-step Python publisher creation)
+traci.ecal.init("sumo/simbin", "sumo/vehicletypes", "sumo/edgebin")
+traci.ecal.setEdgeIndex(sim["all_edges"])   # once per load
+
+# In _step_loop, replaces the vehicle/person loops + SimBin/EdgeBin/VehicleTypeDict publish:
+result = traci.ecal.publishSimStep(
+    ctrl["vehicle_attributes"],
+    ctrl["edge_attributes"],
+    ctrl["needs_edgebin_snapshot"],   # True → full baseline; resets to False in C++
+    seq)
+# result: [time_ms, veh_count, agent_count]
+
+# TLS publish stays Python (cheap, infrequent topic)
+
+# On simulation unload
+traci.ecal.close()
+```
+
+`traci` is `libsumo` when libsumo is available (the publisher's existing `import libsumo as traci`).
+When `hasattr(traci, 'ecal')` is False (socket TraCI, or libsumo built without eCAL), the publisher
+falls back to the existing pure-Python path unchanged.
+
+#### ECal.cpp internals
+
+**Static state** (one instance per process lifetime, reset by `close()`):
+```
+g_state:
+  pub_simbin, pub_typedict, pub_edgebin  — eCAL::CPublisher (Send(const std::string&))
+  type_indices: unordered_map<string, uint32_t>  — stable insertion-order type registry
+  type_dict: sumo_ecal::VehicleTypeDict           — incrementally built, re-published on change
+  type_dict_dirty: bool
+  edge_id_to_idx: unordered_map<string, uint32_t> — populated by setEdgeIndex()
+  last_veh_attrs, last_edge_attrs: vector<string> — cache keys for attr fn resolution
+  veh_attr_fns: vector<function<double(MSVehicle*)>>
+  edge_attr_fns: vector<function<double(MSEdge*)>>
+```
+
+**Vehicle attribute dispatch** (resolved once on first call / attr list change):
+
+| Python name | C++ expression |
+|-------------|---------------|
+| `waiting_time` | `STEPS2TIME(v->getWaitingTime())` |
+| `accumulated_waiting_time` | `v->getAccumulatedWaitingSeconds()` |
+| `co2_emission` | `v->getEmissions<PollutantsInterface::CO2>()` |
+| `co_emission` | `v->getEmissions<PollutantsInterface::CO>()` |
+| `hc_emission` | `v->getEmissions<PollutantsInterface::HC>()` |
+| `nox_emission` | `v->getEmissions<PollutantsInterface::NO_X>()` |
+| `pmx_emission` | `v->getEmissions<PollutantsInterface::PM_X>()` |
+| `fuel_consumption` | `v->getEmissions<PollutantsInterface::FUEL>()` |
+| `electricity_consumption` | `v->getEmissions<PollutantsInterface::ELEC>()` |
+| `noise_emission` | `v->getHarmonoise_NoiseEmissions()` |
+
+**Edge attribute dispatch**:
+
+| Python name | C++ expression |
+|-------------|---------------|
+| `speed` | `e->getMeanSpeed()` |
+| `density` / `occupancy` | `e->getOccupancy()` |
+| `vehicle_count` | `(double)e->getVehicleNumber()` |
+| `waiting_time` | `e->getWaitingSeconds()` |
+| `travel_time` | `e->getTravelTime()` |
+| `co2_emission` | `e->getEmissions<PollutantsInterface::CO2>()` |
+| `fuel_consumption` | `e->getEmissions<PollutantsInterface::FUEL>()` |
+
+**Vehicle iteration** (mirrors `Vehicle::isVisible`):
+```cpp
+MSVehicleControl& vc = MSNet::getInstance()->getVehicleControl();
+for (auto it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
+    const SUMOVehicle* sv = it->second;
+    if (!sv->isOnRoad() && !sv->isParking() && !sv->wasRemoteControlled()) continue;
+    const MSVehicle* v = dynamic_cast<const MSVehicle*>(sv);
+    if (!v) continue;  // skip mesoscopic
+    ...
+    // track active edge from lane ID
+    const MSLane* lane = v->getLane();
+    if (lane) active_edge_set.insert(&lane->getEdge());
+}
+```
+
+**Person iteration** (mirrors `Person::getIDList` visibility filter):
+```cpp
+MSTransportableControl& pc = MSNet::getInstance()->getPersonControl();
+for (auto it = pc.loadedBegin(); it != pc.loadedEnd(); ++it) {
+    if (it->second->getCurrentStageType() == MSStageType::WAITING_FOR_DEPART) continue;
+    ...
+}
+```
+
+**Edge iteration** (for EdgeBin):
+```cpp
+if (full_snapshot) {
+    // iterate ALL edges in edge_id_to_idx order for full baseline
+} else {
+    // iterate only active_edge_set (collected during vehicle pass above)
+}
+for (MSEdge* e : edges_to_publish) {
+    uint32_t idx = edge_id_to_idx[e->getID()];
+    edge_indices.push_back(idx);
+    for (auto& fn : edge_attr_fns)
+        attr_vals.push_back((float)fn(e));
+}
+```
+
+**Type registry** (per load, reset on `close()`):
+- `type_id → uint32_t` stable insertion-order index
+- Mirrors Python `_type_id_to_idx` / `_type_table`
+- `VehicleTypeDict` built incrementally; published whenever `type_dict_dirty`
+
+**eCAL publisher creation**:
+```cpp
+eCAL::SDataTypeInformation dti;
+dti.encoding = "proto";
+dti.name     = "sumo.SimBin";   // matches Python _make_publisher's DataTypeInformation
+pub = std::make_unique<eCAL::CPublisher>(topic, dti);
+pub->Send(serialized_string);   // bool Send(const std::string&, long long time = -1)
+```
+No `eCAL::Initialize()` needed — the Python `ecal_core.initialize()` call already initialised
+the shared `libecal_core.so`; C++ publishers created afterwards work immediately.
+
+#### Things NOT moved to C++ in Phase A
+
+- TLS data collection and publish (cheap: 1 topic, few objects)
+- Network geometry building (`_build_network_binary`) — runs once at load, cost is negligible
+- Service handlers (load, pause, set_delay, …) — infrequent, Python overhead irrelevant
+- Autotune timing loop — wraps the `publishSimStep` call, stays Python
+- Geo-coordinate conversion (pyproj → lon/lat) — `getPosition()` returns SUMO XY;
+  for geo-referenced networks, a follow-up pass using `GeoConvHelper::getFinal()` is needed;
+  deferred to Phase B (most benchmark scenarios are non-geo-referenced)
+
+#### Expected outcome
+
+| Step | avg step time | Notes |
+|------|---------------|-------|
+| Before (Python) | ~34 ms | ~30 ms extraction + ~2 ms publish + ~2 ms overhead |
+| Phase A target  | ~5–8 ms | direct MSVehicle iteration, C++ protobuf pack, same SHM publish |
+
+The remaining cost after Phase A is estimated to be:
+- ~3–4 ms libsumo step (unavoidable: SUMO simulation compute)
+- ~1–2 ms C++ vehicle/edge iteration + pack
+- ~1–2 ms eCAL SHM publish
+
+#### Build notes
+
+eCAL headers: `/usr/include/ecal/`
+eCAL CMake config: `/usr/lib/x86_64-linux-gnu/cmake/eCAL/eCALConfig.cmake`
+eCAL shared lib: `/usr/lib/x86_64-linux-gnu/libecal_core.so`
+Protobuf: system `find_package(Protobuf)`
+Proto source to copy: `ecal_deck/proto/sumo.proto` → `src/libsumo/sumo_ecal.proto`
+
+---
+
 A C++ publisher eliminates all Python overhead from the hot path:
 - `libsumo::Edge::getLastStepMeanSpeed(id)` is a direct C++ function call into SUMO's
   already-computed internal data — no binding layer, no GIL, no dict allocation
