@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SimStepBin, VehicleTypeDict, TLSUpdate, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
+import { SimStepBin, VehicleTypeDict, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
 
-const RECONNECT_DELAY_MS = 500;
+const RECONNECT_INITIAL_MS = 100;
+const RECONNECT_MAX_MS = 2000;
 
 // Binary frame type bytes (must match ecal_ws_bridge.py)
-const TYPE_TLS         = 2;
 const TYPE_LOG         = 4;
 const TYPE_NETWORK     = 5;
 const TYPE_SIMSTEP     = 6;
 const TYPE_VEHICLETYPES = 8;
+
+// TLS state is folded into SimStepBin (formerly a separate TLSUpdate message).
+// We keep the same {id, state} shape for layer/InfoPanel consumers.
+export interface TLSPhase { id: string; state: string }
+export interface TLSUpdate { time_ms: number; lights: TLSPhase[] }
 
 export interface SimControlState {
   delayMs: number;
@@ -61,6 +66,7 @@ export interface SimState {
   logMessages: LogMessage[];
   controlState: SimControlState | null;
   attributeConfig: GetAttributesResponse | null;
+  staleSession: boolean;
   updateAttributeConfig: (updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) => void;
   sendCommand: (service: string, request?: Record<string, unknown>, onResponse?: (r: CommandResponse) => void) => void;
 }
@@ -114,6 +120,7 @@ export function useSimSocket(url: string): SimState {
   const [attributeConfig, setAttributeConfig] = useState<GetAttributesResponse | null>(null);
   const [edgeAttrVersion, setEdgeAttrVersion] = useState(0);
   const [logMessages, setLogMessages]         = useState<LogMessage[]>([]);
+  const [staleSession, setStaleSession]       = useState(false);
 
   const recentLogTexts = useRef(new Set<string>());
   const prevSeqNumRef  = useRef<number | null>(null);  // for skip-frame counting
@@ -131,6 +138,7 @@ export function useSimSocket(url: string): SimState {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmounted      = useRef(false);
   const pendingRef     = useRef<Map<string, (r: CommandResponse) => void>>(new Map());
+  const bridgeInstanceIdRef = useRef<string | null>(null);
 
   // Keep attrConfigRef in sync with React state
   const handleSetAttributeConfig = useCallback((updater: (prev: GetAttributesResponse | null) => GetAttributesResponse | null) => {
@@ -149,12 +157,15 @@ export function useSimSocket(url: string): SimState {
       const tls   = latestTLS.current;
       const dirty = edgeDataDirty.current;
       if (ss || tls || dirty) {
+        performance.mark('raf-drain-start');
         latestSnapshot.current = null;
         latestTLS.current      = null;
         edgeDataDirty.current  = false;
         if (ss)    setVehicleSnapshot(ss);
         if (tls)   setTlsUpdate(tls);
         if (dirty) setEdgeAttrVersion(v => v + 1);
+        performance.mark('raf-drain-end');
+        performance.measure('raf-drain', 'raf-drain-start', 'raf-drain-end');
       }
       rafId = requestAnimationFrame(onRaf);
     };
@@ -172,6 +183,11 @@ export function useSimSocket(url: string): SimState {
 
   useEffect(() => {
     unmounted.current = false;
+    // Exponential backoff for reconnect: starts at RECONNECT_INITIAL_MS, doubles
+    // each failure up to RECONNECT_MAX_MS. Resets to initial on successful open.
+    // Avoids burning ~10 visible "Connecting..." attempts during the bridge's
+    // multi-second eCAL initialization on cold starts.
+    let backoffMs = RECONNECT_INITIAL_MS;
 
     function connect() {
       if (unmounted.current) return;
@@ -187,6 +203,7 @@ export function useSimSocket(url: string): SimState {
 
       ws.onopen = () => {
         clearTimeout(connTimeout);
+        backoffMs = RECONNECT_INITIAL_MS;  // reset for next disconnect
         setConnected(true);
         setReconnectAttempt(0);
       };
@@ -243,6 +260,17 @@ export function useSimSocket(url: string): SimState {
               agent_type_indices: toUint32(sb.agent_type_indices),
             };
             latestSnapshot.current = snapshot;
+
+            // --- traffic light section (folded in from former TLSUpdate topic) ---
+            // tls_ids / tls_states are parallel null-terminated UTF-8 blobs.
+            const tlsCount = sb.tls_count;
+            if (tlsCount > 0) {
+              const ids = parseNullTermStrings(sb.tls_ids).slice(0, tlsCount);
+              const states = parseNullTermStrings(sb.tls_states).slice(0, tlsCount);
+              const lights: TLSPhase[] = new Array(ids.length);
+              for (let i = 0; i < ids.length; i++) lights[i] = { id: ids[i], state: states[i] ?? '' };
+              latestTLS.current = { time_ms: sb.time_ms, lights };
+            }
             // Track skipped frames via seq_num gap
             const seq = sb.seq_num;
             const skipped = prevSeqNumRef.current !== null ? Math.max(0, seq - prevSeqNumRef.current - 1) : 0;
@@ -286,9 +314,6 @@ export function useSimSocket(url: string): SimState {
             }
             break;
           }
-          case TYPE_TLS:
-            latestTLS.current = TLSUpdate.decode(payload);
-            break;
           case TYPE_LOG: {
             const m = LogMessage.decode(payload);
             if (!recentLogTexts.current.has(m.text)) {
@@ -323,6 +348,28 @@ export function useSimSocket(url: string): SimState {
 
       const dispatchJson = (msg: JsonMsg) => {
         switch (msg.type) {
+          case 'hello': {
+            const id = msg.instance_id as string | undefined;
+            if (id) {
+              const prev = bridgeInstanceIdRef.current;
+              if (prev === null) {
+                bridgeInstanceIdRef.current = id;
+              } else if (prev !== id) {
+                // The bridge was restarted (e.g. a fresh benchmark run started
+                // while this stale tab was still open). Permanently disconnect
+                // this tab so it can't compete with the new run's tab — no more
+                // service calls, no more broadcast decoding, no reconnects.
+                unmounted.current = true;
+                if (reconnectTimer.current) {
+                  clearTimeout(reconnectTimer.current);
+                  reconnectTimer.current = null;
+                }
+                setStaleSession(true);
+                ws.close();
+              }
+            }
+            break;
+          }
           case 'state': {
             const d = msg.data as { delay_ms?: number; paused?: boolean; sumocfg_path?: string; error?: string;
               step_interval_current?: number; simulation_ready?: boolean };
@@ -363,7 +410,8 @@ export function useSimSocket(url: string): SimState {
         setConnected(false);
         if (!unmounted.current) {
           setReconnectAttempt(n => n + 1);
-          reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY_MS);
+          reconnectTimer.current = setTimeout(connect, backoffMs);
+          backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
         }
       };
 
@@ -385,6 +433,7 @@ export function useSimSocket(url: string): SimState {
     edgeAttr: edgeAttrRef.current, edgeAttrVersion,
     tlsUpdate, logMessages, controlState,
     attributeConfig,
+    staleSession,
     updateAttributeConfig: handleSetAttributeConfig,
     sendCommand,
   };

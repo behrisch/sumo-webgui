@@ -219,10 +219,15 @@ function orthoViewportBounds(vs: OrthographicViewState): [number, number, number
 export default function App() {
   const { connected, reconnectAttempt, network, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
           edgeAttr, edgeAttrVersion,
-          logMessages, controlState, attributeConfig, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
+          logMessages, controlState, attributeConfig, staleSession, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const { resetCumulative, ...perf } = usePerfStats();
   const perfRef = useRef(perf);
   perfRef.current = perf;
+
+  const buildBreakdown = (p: typeof perf): string =>
+    `parse=${p.cumAvgParseMs.toFixed(2)} veh_build=${p.cumAvgVehicleBuildMs.toFixed(2)} ` +
+    `drain=${p.cumAvgDrainMs.toFixed(2)} edge_build=${p.cumAvgEdgeBuildMs.toFixed(2)} ` +
+    `layers=${p.cumAvgLayersBuildMs.toFixed(2)} deck=${p.cumAvgDeckRenderMs.toFixed(2)}`;
 
   const parsed = useMemo(
     () => (network ? parseNetworkGeometry(network) : null),
@@ -347,6 +352,7 @@ export default function App() {
                     avg_frame_ms: p.cumAvgFrameMs,
                     skip_rate:    p.cumSkipRate,
                     frames:       p.cumFrames,
+                    breakdown:    buildBreakdown(p),
                   });
                 }
               });
@@ -388,6 +394,7 @@ export default function App() {
             avg_frame_ms: p.cumAvgFrameMs,
             skip_rate:    p.cumSkipRate,
             frames:       p.cumFrames,
+            breakdown:    buildBreakdown(p),
           });
         }
       });
@@ -522,6 +529,7 @@ export default function App() {
 
   const layers = useMemo(() => {
     if (!parsed) return [];
+    performance.mark('layers-build-start');
     const result = [];
     // Static layers (memoized instances) must always stay in the array — removing and
     // re-adding the same instance causes deck.gl to skip re-initialisation because
@@ -548,6 +556,8 @@ export default function App() {
         result.push(al);
       }
     }
+    performance.mark('layers-build-end');
+    performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
   }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
@@ -571,6 +581,10 @@ export default function App() {
                 onCancel={() => setShowBrowser(false)} />
             )}
           </>
+        ) : staleSession ? (
+          <span style={{ color: '#f88' }}>
+            This tab is from a previous bridge session. Please close it — a newer run is in progress.
+          </span>
         ) : `Connecting to bridge… (attempt ${reconnectAttempt + 1})`}
       </div>
     );
@@ -635,7 +649,12 @@ export default function App() {
     return (
       <div style={{ width: '100vw', height: '100vh' }}>
         <DeckGL viewState={activeView as MapViewState} onViewStateChange={onViewChange}
-          controller layers={layers} onClick={handleClick}>
+          controller layers={layers} onClick={handleClick}
+          onBeforeRender={() => performance.mark('deck-render-start')}
+          onAfterRender={() => {
+            performance.mark('deck-render-end');
+            performance.measure('deck-render', 'deck-render-start', 'deck-render-end');
+          }}>
           {visibility.basemap && <MapGL mapStyle={BASEMAP_STYLES[basemapStyle]} />}
         </DeckGL>
         {panel}
@@ -649,7 +668,12 @@ export default function App() {
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
       <DeckGL views={new OrthographicView({ id: 'ortho' })} viewState={activeView as OrthographicViewState}
-        onViewStateChange={onViewChange} controller layers={layers} onClick={handleClick}>
+        onViewStateChange={onViewChange} controller layers={layers} onClick={handleClick}
+        onBeforeRender={() => performance.mark('deck-render-start')}
+        onAfterRender={() => {
+          performance.mark('deck-render-end');
+          performance.measure('deck-render', 'deck-render-start', 'deck-render-end');
+        }}>
         <div style={{ background: '#1a1a2e', width: '100%', height: '100%' }} />
       </DeckGL>
       {panel}

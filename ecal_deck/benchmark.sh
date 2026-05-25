@@ -67,6 +67,30 @@ echo ""
 until curl -sf http://localhost:5173 > /dev/null 2>&1; do sleep 0.5; done
 echo "Dev server ready."
 
+# Wait for the bridge to accept TCP connections on $WS_PORT before opening the
+# browser. Otherwise the page loads while the bridge is still initialising eCAL
+# (3-5 s for discovery + ServiceClient + 4 subscribers + websockets.serve) and
+# the frontend burns ~10 visible "Connecting..." reconnect attempts.
+# Cross-platform: uses $PYTHON instead of nc / Test-NetConnection.
+echo "Waiting for bridge to listen on port $WS_PORT..."
+"$PYTHON" - "$WS_PORT" <<'PYEOF'
+import asyncio, sys, time
+import websockets
+port = int(sys.argv[1])
+url = f"ws://127.0.0.1:{port}"
+deadline = time.monotonic() + 30
+async def probe():
+    while time.monotonic() < deadline:
+        try:
+            async with websockets.connect(url, open_timeout=0.5):
+                return 0
+        except Exception:
+            await asyncio.sleep(0.1)
+    return 1
+sys.exit(asyncio.run(probe()) or 0)
+PYEOF
+echo "Bridge ready."
+
 URL="http://localhost:5173"
 case "$(uname -s)" in
     Darwin)               open "$URL"     2>/dev/null || true ;;

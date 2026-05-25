@@ -10,10 +10,22 @@ export interface PerfStats {
   cumAvgFrameMs: number;
   cumSkipRate: number;
   cumFrames: number;
+  // cumulative per-frame phase averages (ms)
+  cumAvgParseMs: number;
+  cumAvgVehicleBuildMs: number;
+  cumAvgDrainMs: number;
+  cumAvgEdgeBuildMs: number;
+  cumAvgLayersBuildMs: number;
+  cumAvgDeckRenderMs: number;
 }
 
 export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
-  const [stats, setStats] = useState<PerfStats>({ msgPerSec: 0, parseMs: 0, vehicleBuildMs: 0, frameMs: 0, skipRate: 0, cumAvgFrameMs: 0, cumSkipRate: 0, cumFrames: 0 });
+  const [stats, setStats] = useState<PerfStats>({
+    msgPerSec: 0, parseMs: 0, vehicleBuildMs: 0, frameMs: 0, skipRate: 0,
+    cumAvgFrameMs: 0, cumSkipRate: 0, cumFrames: 0,
+    cumAvgParseMs: 0, cumAvgVehicleBuildMs: 0, cumAvgDrainMs: 0,
+    cumAvgEdgeBuildMs: 0, cumAvgLayersBuildMs: 0, cumAvgDeckRenderMs: 0,
+  });
 
   const msgCount   = useRef(0);
   const parseTotal = useRef(0);
@@ -29,26 +41,49 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
   const cumFrameCount = useRef(0);
   const cumSkipCount  = useRef(0);
   const cumSeqRecv    = useRef(0);
+  // cumulative per-phase totals and counts
+  const cumParseTotal      = useRef(0); const cumParseCount      = useRef(0);
+  const cumVehBuildTotal   = useRef(0); const cumVehBuildCount   = useRef(0);
+  const cumDrainTotal      = useRef(0); const cumDrainCount      = useRef(0);
+  const cumEdgeBuildTotal  = useRef(0); const cumEdgeBuildCount  = useRef(0);
+  const cumLayersTotal     = useRef(0); const cumLayersCount     = useRef(0);
+  const cumDeckRenderTotal = useRef(0); const cumDeckRenderCount = useRef(0);
 
   useEffect(() => {
     // count WS messages via PerformanceObserver on our custom marks
     const obs = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        if (entry.name === 'ws-parse') {
-          msgCount.current++;
-          parseTotal.current += entry.duration;
-        }
-        if (entry.name === 'vehicle-build') {
-          buildTotal.current += entry.duration;
-          buildCount.current++;
-        }
-        if (entry.name === 'simstep-seq') {
-          const detail = (entry as PerformanceMark).detail as { skipped: number } | undefined;
-          if (detail) {
-            skipCount.current += detail.skipped;
-            seqRecv.current++;
-            cumSkipCount.current += detail.skipped;
-            cumSeqRecv.current++;
+        switch (entry.name) {
+          case 'ws-parse':
+            msgCount.current++;
+            parseTotal.current += entry.duration;
+            cumParseTotal.current += entry.duration; cumParseCount.current++;
+            break;
+          case 'vehicle-build':
+            buildTotal.current += entry.duration; buildCount.current++;
+            cumVehBuildTotal.current += entry.duration; cumVehBuildCount.current++;
+            break;
+          case 'raf-drain':
+            cumDrainTotal.current += entry.duration; cumDrainCount.current++;
+            break;
+          case 'edge-build':
+            cumEdgeBuildTotal.current += entry.duration; cumEdgeBuildCount.current++;
+            break;
+          case 'layers-build':
+            cumLayersTotal.current += entry.duration; cumLayersCount.current++;
+            break;
+          case 'deck-render':
+            cumDeckRenderTotal.current += entry.duration; cumDeckRenderCount.current++;
+            break;
+          case 'simstep-seq': {
+            const detail = (entry as PerformanceMark).detail as { skipped: number } | undefined;
+            if (detail) {
+              skipCount.current += detail.skipped;
+              seqRecv.current++;
+              cumSkipCount.current += detail.skipped;
+              cumSeqRecv.current++;
+            }
+            break;
           }
         }
       }
@@ -82,6 +117,12 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
         cumAvgFrameMs:  cumFrameCount.current ? cumFrameTotal.current / cumFrameCount.current : 0,
         cumSkipRate:    cumTotal > 0 ? cumSkipCount.current / cumTotal : 0,
         cumFrames:      cumFrameCount.current,
+        cumAvgParseMs:        cumParseCount.current      ? cumParseTotal.current      / cumParseCount.current      : 0,
+        cumAvgVehicleBuildMs: cumVehBuildCount.current   ? cumVehBuildTotal.current   / cumVehBuildCount.current   : 0,
+        cumAvgDrainMs:        cumDrainCount.current      ? cumDrainTotal.current      / cumDrainCount.current      : 0,
+        cumAvgEdgeBuildMs:    cumEdgeBuildCount.current  ? cumEdgeBuildTotal.current  / cumEdgeBuildCount.current  : 0,
+        cumAvgLayersBuildMs:  cumLayersCount.current     ? cumLayersTotal.current     / cumLayersCount.current     : 0,
+        cumAvgDeckRenderMs:   cumDeckRenderCount.current ? cumDeckRenderTotal.current / cumDeckRenderCount.current : 0,
       });
       msgCount.current = parseTotal.current = buildTotal.current = buildCount.current = 0;
       frameTotal.current = frameCount.current = 0;
@@ -98,6 +139,12 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
   const resetCumulative = () => {
     cumFrameTotal.current = cumFrameCount.current = 0;
     cumSkipCount.current = cumSeqRecv.current = 0;
+    cumParseTotal.current      = cumParseCount.current      = 0;
+    cumVehBuildTotal.current   = cumVehBuildCount.current   = 0;
+    cumDrainTotal.current      = cumDrainCount.current      = 0;
+    cumEdgeBuildTotal.current  = cumEdgeBuildCount.current  = 0;
+    cumLayersTotal.current     = cumLayersCount.current     = 0;
+    cumDeckRenderTotal.current = cumDeckRenderCount.current = 0;
   };
 
   return { ...stats, resetCumulative };

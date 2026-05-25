@@ -6,8 +6,8 @@ Subscribes to SUMO eCAL topics and forwards them as binary WebSocket frames.
 Accepts incoming JSON command messages and forwards them to the publisher via eCAL ServiceClient.
 
 Binary frame layout: [u8 msg_type][protobuf payload bytes]
-  2 = TLSUpdate, 4 = LogMessage, 5 = NetworkGeometry
-  6 = SimStepBin, 8 = VehicleTypeDict
+  4 = LogMessage, 5 = NetworkGeometry
+  6 = SimStepBin (carries vehicles + persons + edges + TLS), 8 = VehicleTypeDict
 
 Commands and responses remain JSON text frames (unchanged).
 
@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import threading
+import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 import websockets
@@ -29,6 +30,13 @@ import sumo_pb2
 from google.protobuf.json_format import MessageToDict, ParseDict
 
 SERVICE_NAME = "sumo_control"
+
+# Random instance id, regenerated each bridge process start. Sent to each new
+# client as a "hello" message. The frontend reloads the page if it ever sees a
+# different id after a reconnect — this prevents a stale tab from a previous
+# benchmark run from re-attaching to a freshly-started bridge with stale state
+# (lingering poll timers, stale sumocfg path, etc.).
+_INSTANCE_ID = uuid.uuid4().hex
 
 # registry: method name → (request proto class, response proto class)
 _SERVICE_REGISTRY = {
@@ -49,7 +57,6 @@ _SERVICE_REGISTRY = {
 }
 
 # Binary frame type bytes
-_TYPE_TLS           = 2
 _TYPE_LOG           = 4
 _TYPE_NETWORK       = 5
 _TYPE_SIMSTEP       = 6
@@ -57,7 +64,6 @@ _TYPE_VEHICLETYPES  = 8
 
 TOPICS = {
     "sumo/simstep":      _TYPE_SIMSTEP,
-    "sumo/tls":          _TYPE_TLS,
     "sumo/log":          _TYPE_LOG,
     "sumo/network":      _TYPE_NETWORK,
     "sumo/vehicletypes": _TYPE_VEHICLETYPES,
@@ -75,7 +81,7 @@ _poller_task: asyncio.Task | None = None        # current _network_poller task
 
 # Latest-value semantics for high-frequency topics: callback overwrites; flush loop sends once.
 # Log messages are low-frequency and must not be dropped.
-_LATEST_VALUE = {_TYPE_TLS, _TYPE_SIMSTEP}
+_LATEST_VALUE = {_TYPE_SIMSTEP}
 _pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 
 
@@ -219,43 +225,83 @@ async def _network_poller() -> None:
 # ---------------------------------------------------------------------------
 # asyncio: WebSocket handler
 # ---------------------------------------------------------------------------
-async def _handler(websocket) -> None:
-    global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame, _poller_task
+async def _send_initial_state(websocket) -> None:
+    """Send the per-client initial snapshot: hello (instance id), network frame,
+    vehicle-types, last simstep, current state JSON, attributes JSON. Retries
+    the service calls so a client that connects before the publisher is
+    reachable still gets initial state once the publisher comes online (instead
+    of the bridge silently closing the connection and forcing a frontend
+    reconnect storm).
+    """
+    loop = asyncio.get_running_loop()
+
+    # Hello first — lets the frontend detect a fresh bridge process and reload
+    # if it had been connected to a previous one.
     try:
-        # Send network frame: prefer the cached eCAL-delivered frame; fall back to
-        # reading the cache file via get_state if eCAL topic delivery hasn't fired yet
-        # (happens when the bridge missed the publish due to slow eCAL discovery).
+        await websocket.send(json.dumps({"type": "hello", "instance_id": _INSTANCE_ID}))
+    except Exception:
+        return
+
+    async def _call_with_retry(method: str, total_timeout_s: float = 30.0) -> dict:
+        deadline = loop.time() + total_timeout_s
+        while loop.time() < deadline:
+            resp = await loop.run_in_executor(None, _call_service, method, {})
+            if resp.get("ok", True) and "error" not in resp:
+                return resp
+            # publisher not yet reachable; wait a bit and retry
+            await asyncio.sleep(0.2)
+        return {"ok": False, "error": "publisher not reachable"}
+
+    try:
+        # State first — needed for network_cache_path fallback and for App.tsx
+        # controlState bootstrap.
+        state = await _call_with_retry("get_state")
+        try:
+            await websocket.send(json.dumps({"type": "state", "data": state}))
+        except Exception:
+            return
+
+        # Prefer cached eCAL-delivered network frame; otherwise read the cache
+        # file via the state response.
         net_frame = _network_frame
         if net_frame is None:
-            loop = asyncio.get_running_loop()
-            state = await loop.run_in_executor(None, _call_service, "get_state", {})
             cache_path = state.get("network_cache_path", "")
             if cache_path:
                 try:
                     with open(cache_path, 'rb') as f:
-                        ng_bytes = f.read()
-                    net_frame = bytes([_TYPE_NETWORK]) + ng_bytes
+                        net_frame = bytes([_TYPE_NETWORK]) + f.read()
                 except OSError:
-                    pass
-            await websocket.send(json.dumps({"type": "state", "data": state}))
-        else:
-            loop = asyncio.get_running_loop()
-            state = await loop.run_in_executor(None, _call_service, "get_state", {})
-            await websocket.send(json.dumps({"type": "state", "data": state}))
+                    net_frame = None
 
-        if net_frame is not None:
-            await websocket.send(net_frame)
-        if _vehicletypes_frame is not None:
-            await websocket.send(_vehicletypes_frame)
-        if _simstep_snapshot_frame is not None:
-            await websocket.send(_simstep_snapshot_frame)
+        try:
+            if net_frame is not None:
+                await websocket.send(net_frame)
+            if _vehicletypes_frame is not None:
+                await websocket.send(_vehicletypes_frame)
+            if _simstep_snapshot_frame is not None:
+                await websocket.send(_simstep_snapshot_frame)
+        except Exception:
+            return
 
-        attrs = await loop.run_in_executor(None, _call_service, "get_attributes", {})
-        await websocket.send(json.dumps({"type": "attributes", "data": attrs}))
+        attrs = await _call_with_retry("get_attributes")
+        try:
+            await websocket.send(json.dumps({"type": "attributes", "data": attrs}))
+        except Exception:
+            return
     except Exception:
+        # Never let exceptions escape; connection lifecycle is owned by _handler.
         return
 
+
+async def _handler(websocket) -> None:
+    global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame, _poller_task
+
+    # Register the connection FIRST so broadcasts (simstep/log/tls frames from
+    # the publisher) reach this client immediately, and so the connection cannot
+    # be dropped by a slow-startup service call.
     _connected.add(websocket)
+    initial_task = asyncio.create_task(_send_initial_state(websocket))
+
     try:
         async for raw in websocket:
             try:
@@ -286,6 +332,7 @@ async def _handler(websocket) -> None:
     except Exception:
         pass
     finally:
+        initial_task.cancel()
         _connected.discard(websocket)
 
 

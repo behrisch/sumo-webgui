@@ -507,3 +507,506 @@ Measured on the **small benchmark scenario** (known N vehicles, reproducible):
 3. **P95 frame time < 16.6 ms** at 10 k visible edges (frontend, viewport culled).
 4. **No heap growth > 50 MB over 60 s** (no GC bomb building up).
 5. Berlin validation: subjectively smooth at 10+ fps, no noticeable simulation slowdown.
+
+## Findings (2026-05-25): end-to-end measurement on doe scenario
+
+Full-stack `./benchmark.sh` run on the doe scenario (Berlin Mitte, geo-referenced,
+~50 k edges, ~600 vehicles + ~100 agents steady state), with the C++ native
+publisher (libsumo::ECal), phase timers on both ends, and the new
+`Per-frame breakdown [ms]` line reported by the frontend.
+
+### Headline numbers
+
+| Configuration                                  | Wall time | RTF    | UPS      | ms / step |
+|------------------------------------------------|----------:|-------:|---------:|----------:|
+| **Pure SUMO** (no GUI, no libsumo, no eCAL)    | 11.26 s   | 53.3×  | 1.25 M   | **3.76**  |
+| **Our pipeline** (libsumo + native eCAL + browser) | 32.2 s    | 18.6×  | 432 k    | **10.74** |
+| Overhead vs pure SUMO                          | 2.86×     |        |          | +7 ms     |
+
+Skip rate: publisher 0.48 (autotune `interval=2` halving publish frequency to
+match the frontend), frontend 0.027 (essentially perfect — frontend keeps up).
+
+### Publisher per-step breakdown (from C++ `getStats` + Python timers, steady state)
+
+| Phase                                  | µs / step  | ms / step | % of step |
+|----------------------------------------|-----------:|----------:|----------:|
+| `sim=` — libsumo `simulationStep()`    | 6 000 – 10 500 | **~8.5** | ~80 %    |
+| `native=` — C++ publish (incl. PROJ)   | 2 200 – 2 800  | ~2.5     | ~23 %    |
+|   ↳ veh loop  (`veh_us` / `calls`)    | ~3 700 each call | (in native) | |
+|   ↳ agent loop                        | ~1 300 each call | (in native) | |
+|   ↳ edge loop                         | ~40 each call    | negligible  | |
+|   ↳ typedict / serialize / send       | ~80 each call    | negligible  | |
+| `tls=` — TLS state extract + publish   |  140       | ~0.1     | ~1 %     |100 
+
+**The single biggest cost is libsumo's `simulationStep` itself, which is 2 – 3×
+more expensive than the pure SUMO binary's step (3.76 ms).** That excess (~5 ms)
+is larger than the entire native publish path.
+
+### Frontend per-frame breakdown (cumulative averages over 2 508 frames)
+
+| Phase                                    | ms / frame | % of frame |
+|------------------------------------------|-----------:|-----------:|
+| Proto decode (`ws-parse`)                | 0.80       | 6 %        |
+| RAF drain — React state setters          | 0.07       | < 1 %      |
+| Vehicle layer build (`vehicle-build`)    | 0.23       | 2 %        |
+| Edge data layer build (`edge-build`)     | 0.00       | — (no recompute this run) |
+| Layers `useMemo` body (`layers-build`)   | 0.45       | 3 %        |
+| deck.gl GPU render (`deck-render`)       | 1.61       | 12 %       |
+| **Total instrumented work**              | **~3.2**   | **24 %**   |
+| **Unaccounted (browser idle / vsync wait)** | **~9.8** | **76 %**   |
+| Avg rAF interval                         | 13.03      | 100 %      |
+
+13.03 ms ≈ 1 / 75 Hz: the browser is pacing rAF to the display refresh. The
+frontend is doing ~3 ms of real work per frame and **has ~10 ms of headroom**.
+This refutes the earlier hypothesis that publisher and frontend were "balanced":
+the frontend is mostly idle and the bottleneck is entirely the publisher.
+
+### Implications for next perf work
+
+Priority is now strongly weighted toward shrinking publisher step time, because
+the frontend will absorb improvements without further changes (autotune would
+drop `interval` from 2 → 1 and publish twice as often).
+
+1. **#1: libsumo `simulationStep` overhead.** The gap between our `sim=` (~8.5 ms)
+   and pure SUMO's step (3.76 ms) is the largest single opportunity (~5 ms).
+   Suspects: subscription / output writer pumping, libsumo's global Helper maps,
+   sumocfg-driven outputs that the standalone binary may skip. Isolating
+   requires a libsumo-only loop (no eCAL publish at all) on the same scenario.
+2. **#2: native vehicle / agent extraction loop.** `native=` is ~2.5 ms, of
+   which the vehicle loop is the bulk. A batched libsumo accessor that fills
+   our protobuf directly from `MSVehicle*` would help, but the headroom is
+   smaller than #1.
+3. **#3: configurable position mode (METER_OFFSETS).** Eliminates the per-point
+   PROJ call. Saves ~1.5 ms of `native=` on geo networks. Already designed in
+   PLAN.md; lower priority now that the frontend has headroom.
+
+### Methodology notes for reproducing
+
+- Pure SUMO baseline: `sumo -c doe/view.sumocfg --duration-log.statistics`
+  produces `Performance: Duration / Real time factor / UPS` lines on stdout
+  (logged to `doe/sumo.log`).
+- Pipeline benchmark: `cd ecal_deck && ./benchmark.sh` (needs a real browser;
+  starts bridge + Vite dev server + opens Chromium).
+- Phase timers: C++ counters in `src/libsumo/ECal.cpp` (`State` struct,
+  exposed via `ECal::getStats(reset=true)`); Python timers in
+  `sumo_ecal_publisher.py::_step_loop`; frontend `performance.mark`/`measure`
+  collected by `usePerfStats.ts` and shipped via the new `breakdown` field on
+  `ReportFrontendStatsRequest`.
+
+### libsumo-only diagnostic (same scenario, no eCAL publish)
+
+To localize where the publisher overhead actually lives, the new helper
+`ecal_deck/bench_libsumo_only.py` runs the same doe scenario three ways and
+prints ms/step + RTF for each. Run on the **same machine** as the standalone
+SUMO baseline (otherwise the comparison is meaningless — CPU differences alone
+swamp the effect):
+
+```bash
+SUMO_HOME=$HOME/sumo ../ecal_env/bin/python ecal_deck/bench_libsumo_only.py doe/view.sumocfg
+```
+
+#### Reference machine (Linux dev box) — apples-to-apples (median of 3 runs)
+
+| Configuration                              | ms / step | RTF    | Δ vs pure SUMO |
+|--------------------------------------------|----------:|-------:|---------------:|
+| Pure SUMO binary (`sumo -c view.sumocfg`)  | **4.98**  | 40.1×  | baseline       |
+| libsumo loop only (A)                      | **4.77**  | 41.9×  | −0.21 (≈ 0)    |
+| libsumo + `getIDList` (B)                  | 6.61      | 30.2×  | +1.63          |
+| libsumo + `getIDList` + 3 getters/veh (C)  | 12.94     | 15.5×  | +7.96 (~14 k getter calls/step) |
+
+Run-to-run noise across three repetitions was under 5 % for every variant.
+
+#### Conclusion: libsumo itself is not the bottleneck
+
+The earlier hypothesis that "libsumo's `simulationStep` is 2–3× pure SUMO" was
+wrong. On the reference machine, libsumo loop-only matches the standalone
+binary within noise. Where the per-step cost grows is in the **per-vehicle
+Python ↔ C++ boundary calls** of variants B and C:
+
+- One `getIDList` per step: ~1.5 µs × ~600 vehicles → ~1 ms of Python list
+  marshalling.
+- Three getters per vehicle (Position, Speed, Angle): ~500 ns per call, ~14 k
+  calls per step in steady state → ~7 ms of pure boundary cost.
+
+#### What this means for our publisher
+
+This is exactly the cost our C++ native publisher already avoids by calling
+into libsumo's C++ API directly and writing the protobuf in-place. The
+`native=2.5 ms` we measure includes the full vehicle/agent loop plus geo
+projection plus protobuf serialization — i.e. **the native publisher does the
+job in ~2.5 ms that a naive Python loop would take ~10 ms for** (3 ms libsumo
+sim + 7 ms boundary calls). The C++ fast-path saves ~7 ms/step and is the main
+reason RTF is 18× rather than ~5×.
+
+#### Re-ranked perf priorities
+
+With libsumo eliminated as a culprit, the remaining publisher overhead vs the
+pure SUMO baseline (~2 ms on the user's machine: standalone 3.76 → publisher
+`sim=` ~5.7 ms in the best windows, ~10 ms in the worst) must come from
+something process-local in the publisher:
+
+1. **Subscriber-induced eCAL SHM contention.** On the user's run, `sim=` rose
+   from ~6 ms early (few/no subscribers) to ~10 ms late (browser fully
+   subscribed). Worth confirming by running the full pipeline with the bridge
+   started but no browser tab attached.
+2. **GIL / scheduling jitter** from the eCAL service callback thread and the
+   `time.sleep(0)` yield after each step. Could try removing the yield in the
+   benchmark path (using a dedicated `paused` check).
+3. **C++ vehicle loop tweaks.** Already at 2.5 ms; smaller absolute headroom
+   than #1. Direct `MSVehicle*` access instead of `libsumo::Vehicle::*`
+   wrappers would shave ~0.5–1 ms.
+4. **Position-mode METER_OFFSETS** (already in PLAN.md). Removes PROJ from
+   `native=`. Saves ~1 ms on geo networks.
+
+The single biggest verified win on the table is therefore #1 — characterize
+and reduce SHM-induced step-time bloat. Everything else is sub-millisecond.
+
+### Verifying the SHM-subscriber theory
+
+To check whether eCAL shared-memory subscribers slow the publisher, ran
+`--benchmark` (publisher-only, headless, `interval=1`, `delay=0`) twice on the
+same machine and scenario, once with the eCAL WebSocket bridge attached as a
+subscriber and once without.
+
+| Metric (steady-state late window) | Publisher alone | Publisher + bridge subscriber | Δ              |
+|-----------------------------------|----------------:|------------------------------:|---------------:|
+| `sim=`                            | 6.51 ms         | 6.73 ms                       | +0.22 ms       |
+| `native=`                         | 3.80 ms         | 3.98 ms                       | +0.18 ms       |
+| `send_us` (per publish)           | **1.4 µs**      | **32 µs**                     | +30 µs (≈ +0.06 ms / step) |
+| Avg step (whole run)              | 9.23 ms         | 9.47 ms                       | +0.24 ms (+2.6 %) |
+| RTF                               | 21.7×           | 21.1×                         | −0.6×          |
+
+**Verdict: the SHM-subscriber theory is also wrong** for this scenario on this
+hardware. The bridge attaching adds ~0.24 ms/step, fully within run-to-run
+noise. Send cost rises 23× in relative terms but stays at 32 µs absolute.
+
+### What the numbers actually say (revised)
+
+The whole-run average for pure SUMO (4.98 ms/step) is dragged down by the
+~50 ramp-up steps where vehicles are still being inserted. In those early
+windows the publisher reports `sim ≈ 3.9 ms` — close to the pure-SUMO average.
+By the time the publisher is in steady state with ~600 vehicles, `sim ≈ 6.5 ms`,
+and that **is what SUMO itself takes** for this scenario at full load:
+
+| Phase (publisher, steady state)    | Time      | Notes |
+|------------------------------------|----------:|-------|
+| SUMO compute (`sim=`)              | ~6.5 ms   | matches what pure SUMO needs at the same vehicle count |
+| Native C++ publish (`native=`)     | ~3.8 ms   | vehicle loop + agent loop + PROJ + protobuf |
+| TLS                                | ~0.17 ms  | |
+| **Total publisher step**           | **~10.5 ms** | |
+
+There is no hidden overhead. The publisher pipeline runs as fast as physics
+allows for this scenario; any further improvement must come from making either
+(a) SUMO step itself faster, or (b) the native C++ extraction loop faster.
+
+### Updated perf priorities
+
+1. **SUMO compute itself** is the largest remaining slice (~6.5 ms / ~62 % of
+   step). Levers are scenario-side (`--no-internal-links`, simplifying TLS
+   logic, lowering `--lateral-resolution`) rather than ours. The fundamental
+   limit on this scenario is set by SUMO.
+2. **Native C++ extraction loop** (~3.8 ms / ~36 %). The vehicle loop is the
+   bulk; direct `MSVehicle*` access avoiding `libsumo::Vehicle::*` wrappers
+   could shave a few hundred microseconds, but the absolute headroom is small
+   (~1 ms best case).
+3. **Position-mode METER_OFFSETS** (already in PLAN.md). Saves ~1 ms of PROJ
+   on geo networks. Now genuinely a small optimization rather than a critical
+   one, but still worth shipping for the largest networks.
+
+The frontend has ~10 ms of vsync headroom and is not on the critical path.
+Bridge / SHM / serialization / send are all sub-millisecond noise.
+
+## Berlin scenario (larger network, 5811 TLS)
+
+To check whether the doe findings generalize, ran the same diagnostics on a
+much larger Berlin scenario (`berlin/test_short.sumocfg`):
+
+- Network: `net.net.xml.gz` (98 MB compressed, ~22 s to load)
+- Routes: random trips, 1 vehicle/s inserted from t=0..3600
+- Capped at `--end 1800` (1799 sim seconds, ramping 0 → 1564 running vehicles)
+- **5811 traffic lights** (vs ~50 in doe)
+- 0 persons / 0 transit agents
+
+### Results (reference machine, same as doe runs)
+
+| Configuration                              | ms / step | RTF    | Notes |
+|--------------------------------------------|----------:|-------:|-------|
+| Pure SUMO binary                           | **12.7**  | 78.8×  | 23 s wall over 1800 steps |
+| libsumo loop only (A)                      | 18.4      | 54.4×  | +5.7 vs pure SUMO (?)  |
+| libsumo + `getIDList`                      | 18.7      | 53.4×  | vehicles list trivial cost |
+| libsumo + 3 getters/veh (~880 vehs avg)    | 20.0      | 49.9×  | +1.3 vs B |
+| libsumo + `getRedYellowGreenState` × 5811  | 16.4      | 61.0×  | +3.8 vs step-only at same load |
+| **Publisher `--benchmark`**                | **28.3**  | 35.3×  | full pipeline, headless |
+
+Publisher steady-state phase breakdown (late window, ~1500 vehicles, 5811 TLS):
+
+| Phase     | µs / step | ms / step |
+|-----------|----------:|----------:|
+| `sim=`    | ~24 000   | ~24       |
+| `tls=`    | ~10 000   | **~10**   |
+| `native=` | ~1 000    | ~1        |
+| Total     | ~35 000   | ~35       |
+
+### Key finding: TLS extraction is the Berlin bottleneck
+
+The Python loop that publishes traffic-light state (`sumo_ecal_publisher.py`
+around line 663) is:
+
+```python
+for tls_id in traci.trafficlight.getIDList():
+    ph = tu.lights.add()
+    ph.id = tls_id
+    ph.state = traci.trafficlight.getRedYellowGreenState(tls_id)
+pub_tls.send(tu.SerializeToString())
+```
+
+With 5811 TLS this is **5811 cross-boundary calls per step + 5811 protobuf
+field assignments + a ~20 KB SerializeToString**, totalling ~10 ms/step. That
+is *more than the entire native C++ vehicle/agent path*. For doe (~50 TLS) the
+same code costs ~0.15 ms — invisible — which is why the optimization hadn't
+been needed.
+
+### Library-side gap on Berlin (still ~5 ms unexplained)
+
+libsumo loop-only is 18.4 ms vs pure SUMO 12.7 ms on Berlin — a much bigger
+relative gap than on doe (where the two matched). The vehicle-getter loop only
+accounts for +1.3 ms of that. The unexplained ~4 ms is small-vehicle-count
+specific to libsumo on this large network; possibly subscription bookkeeping
+overhead that scales with network size. Worth a deeper look but lower priority
+than TLS (which is a 10 ms/step issue we control).
+
+### Updated perf priorities (combined doe + Berlin)
+
+1. **Native C++ TLS publish.** Mirror the existing vehicle/agent native path
+   for traffic lights. Expected: ~10 ms → ~0.5 ms on Berlin; no effect on doe.
+   This is the single biggest measurable win in the whole pipeline today.
+2. **Position-mode METER_OFFSETS.** ~1 ms PROJ savings on geo networks.
+   Still worth shipping.
+3. **Direct `MSVehicle*` access in native loop.** Sub-millisecond on doe,
+   couple of milliseconds on Berlin. Smaller wins.
+4. **Investigate libsumo + large-network overhead** (Berlin-specific 4 ms gap).
+   Lower priority — diagnostic only; the fix likely lives in libsumo itself.
+
+---
+
+## TLS Fold-In Results (2026-05-25)
+
+Followed up on the Berlin TLS finding by folding the former separate
+`sumo/tls` topic into `SimStepBin` and implementing TLS extraction natively
+in C++ inside `libsumo::ECal::publishSimStep`.  The Python TLS publish loop
+in `sumo_ecal_publisher.py` (which on Berlin cost ~10 ms/step) is gone for
+the native fast-path; the Python fallback path still has an equivalent
+section for geo-referenced networks that can't use the native publisher.
+
+### Wire / API changes
+
+- `proto/sumo.proto`: added `tls_count` (u32) + `tls_ids` and `tls_states`
+  (both null-terminated UTF-8 blobs) to `SimStepBin`. Removed the standalone
+  `TLSPhase` / `TLSUpdate` messages.
+- `libsumo::ECal`: new TLS section between agent and edge sections; iterates
+  `MSNet::getInstance()->getTLSControl().getAllTLIds()` and reads
+  `getActive(id)->getCurrentPhaseDef().getState()` per controller. New
+  `tlsNs` accumulator surfaced via `getStats()` as `tls_us=...`.
+- `ecal_ws_bridge.py`: dropped `_TYPE_TLS`, the `sumo/tls` topic and its
+  entry in `_LATEST_VALUE`.
+- Frontend: `TLSPhase` / `TLSUpdate` are now local TS interfaces defined in
+  `useSimSocket.ts`. The SimStep decode path builds `lights[]` on the fly
+  from the two parallel byte blobs; the binary frame type 2 case is gone.
+
+### Berlin scenario (test_short.sumocfg, 1800 s, 5811 TLS)
+
+Apples-to-apples publisher-only benchmark (`--benchmark`, no bridge / no
+browser), single run each:
+
+| Metric                | Before (Python TLS) | After (C++ native TLS) | Δ           |
+| --------------------- | ------------------: | ---------------------: | ----------- |
+| Avg. step time [ms]   |               28.3  |              **21.4**  | **−6.9 ms** (−24 %) |
+| Real-time factor      |               35.3× |               **46.6×**| +32 %       |
+| UPS                   |                ~29k |                **39k** | +35 %       |
+| TLS portion per step  |        ~10.0 ms (Py) |       **~4.0 ms** (C++) | **−6 ms** |
+
+Native-publisher per-step breakdown for the last 5 s window
+(steady-state, ~700 vehicles, full 5811 TLS extracted every step):
+
+```
+sim       = 22.2 ms/step   (SUMO compute, unchanged)
+native    =  5.2 ms/step   (total inside libsumo::ECal::publishSimStep)
+  └─ tls       = 4.2 ms     (≈ 720 ns per controller, batched, no GIL)
+  └─ veh       = 0.78 ms
+  └─ serialize = 0.04 ms
+  └─ send      = 0.003 ms
+```
+
+The C++ TLS loop costs about 720 ns per controller (string copy + one
+`std::map` lookup per active program), versus the ~1.7 µs/controller the
+Python TraCI loop was paying (two cross-boundary calls + Python object
+churn).  On networks with O(10²) TLS the absolute saving is negligible
+(<200 µs); on Berlin-scale networks it removes the dominant publisher
+cost in one step.
+
+### Updated priorities
+
+Berlin is now SUMO-compute bound at ~22 ms/step (RTF 46×).  The 5 ms of
+native publisher time per step is dominated by TLS extraction (4.2 ms);
+shaving more would require either:
+
+1. **A direct iterator API on `MSTLLogicControl`** that returns active
+   logics in one shot (no per-id map lookup) — would save ~0.5 ms.
+2. **Skipping TLS state when unchanged** — most controllers do not change
+   state every simulation step; a cheap "phase index changed" check could
+   collapse the wire payload (and the per-step work) by ~10× on average.
+   This would also shrink the SimStepBin payload meaningfully.
+
+Otherwise the remaining critical path is `traci.simulationStep` itself
+plus the unexplained ~5 ms libsumo+large-network gap.  Both are inside
+SUMO core, beyond this project's perf knobs.
+
+---
+
+## doe 20-minute Benchmark (2026-05-25)
+
+Re-ran the doe scenario with a longer 20-minute sim window
+(`begin=6:00:00`, `end=6:20:00`, `step-length=0.2 s` → 6000 steps) to
+dilute startup and network-loading effects that dominate shorter runs.
+All three configurations on the same machine, single run each.
+
+| Setup              | Wall (s) | RTF    | UPS      | Avg ms/step | Notes                                  |
+| ------------------ | -------: | -----: | -------: | ----------: | -------------------------------------- |
+| Plain SUMO         |  **26.4** | **45.5×** | **1.10 M** |   **~4.4** | `sumo` binary, no eCAL, `--verbose`    |
+| Publisher only     |    53.9  |  22.6× |    547 k |    8.84    | `--benchmark`, no bridge / no browser  |
+| Publisher + bridge |    54.8  |  22.3× |    538 k |    8.98    | bridge attached as eCAL subscriber     |
+
+### Bridge attach overhead
+
+**+0.14 ms/step (+1.6 %)** — confirms the earlier 1800-step finding that
+SHM subscriber cost is effectively free. The bridge can sit on the eCAL
+SHM ring without measurable impact on publisher throughput.
+
+### Pipeline overhead vs pure SUMO
+
+**+4.5 ms/step (≈ 2×)**, broken down for the publisher-only steady-state
+window (last 5 s, ~470 vehicles + ~150 persons):
+
+```
+sim       = 6.6 ms/step   (SUMO compute, baseline)
+native    = 3.7 ms/step total
+  └─ veh       = 2.50 ms   (per-vehicle PROJ4 + getter + append, all C++)
+  └─ agent     = 1.04 ms   (per-person PROJ4 + getter + append, all C++)
+  └─ tls       = 0.04 ms   (folded-in C++ path is essentially free at 50 TLS)
+  └─ serialize = 0.029 ms
+  └─ send      = 0.0024 ms
+```
+
+The TLS fold-in's contribution on doe is negligible (~40 µs/step vs ~10 ms
+on Berlin), as expected: doe has only ~50 TLS where the per-controller
+overhead is dominated by everything else.
+
+`sim` itself is also ~2 ms/step heavier than the standalone-SUMO baseline
+(6.6 vs ~4.4 ms). This matches the unexplained Berlin libsumo gap — most
+likely libsumo subscription bookkeeping or output-writer pumping that the
+standalone binary skips. Same root cause, same diagnostic.
+
+### Next perf knob
+
+The remaining native publish cost (~3.5 ms/step for veh + agent combined)
+is **not** SWIG boundary cost — the native publisher already iterates
+`MSVehicleControl::loadedVehBegin()` and reads `MSBaseVehicle*` getters
+directly in C++. The dominant per-vehicle cost is almost certainly
+**`GeoConvHelper::cartesian2geo` (PROJ4)** invoked per vehicle on
+geo-referenced networks like doe — typically 1.5–3 µs/call × ~470
+vehicles ≈ 0.7–1.4 ms/step. Plus the per-vehicle `dynamic_cast`,
+`registerType` map lookup, `getPosition` recomputation from lane+offset,
+and protobuf scratch appends.
+
+The two PLAN.md items aimed at this:
+
+1. **METER_OFFSETS position mode** — publish raw cartesian XY (+ network
+   origin) and let the frontend do a single bulk forward Mercator
+   projection. Cuts the per-vehicle PROJ4 cost to zero.
+2. **PROJ batching** — if we keep server-side projection, batch all N
+   positions into one `proj_trans_array` call instead of N individual
+   calls. ~5–10× speedup of the projection step alone.
+
+### sumo-gui comparison (20-min doe)
+
+For the same 20-minute doe scenario, `sumo-gui` (no recording, default
+view settings) reports:
+
+| Setup              | Wall (s) | RTF    | UPS      | Avg ms/step | Frame time | Render skip |
+| ------------------ | -------: | -----: | -------: | ----------: | ---------: | ----------: |
+| Plain SUMO         |    26.4  |  45.5× |   1.10 M |       4.4   |     —      |      —      |
+| **sumo-gui**       |  **35.8** | **33.5×** | **810 k** |     **6.0** | **23.8 ms** | **74.9 %** |
+| Publisher only     |    53.9  |  22.6× |    547 k |       8.84  |     —      |      —      |
+| Publisher + bridge |    54.8  |  22.3× |    538 k |       8.98  |     —      |      —      |
+| Publisher + frontend (earlier 11k-step run) | — | 18.6× | 432 k | 10.74 | 13.0 | 2.7 % |
+
+Two interesting comparisons:
+
+1. **sumo-gui's GUI overhead is only ~1.6 ms/step** above plain SUMO,
+   versus **~4.5 ms/step for our publisher**. sumo-gui's OpenGL renderer
+   runs concurrently with the sim step (it skips ~75 % of frames to
+   amortize the 23.8 ms render cost) and shares the same address space
+   as MSNet, so it has no serialization, no IPC, and no per-vehicle
+   PROJ4 forward projection (it draws in cartesian directly into a
+   transformed GL viewport). Our native publisher pays all three on
+   every published step.
+
+2. **The autotuner's 50 %-skip behaviour is conservative compared to
+   sumo-gui's 75 %.** sumo-gui prioritizes sim throughput by amortizing
+   render across 4 sim steps; we prioritize visual smoothness. This
+   reinforces the "render-aware autotune" follow-up in PLAN.md — once
+   the publisher knows the frontend frame time, it should be free to
+   match or exceed sumo-gui's skip ratio on render-bound configurations.
+
+### Full stack with browser (20-min doe)
+
+| Setup                | Wall (s) | RTF    | UPS      | Pub ms/step | Pub skip | Frontend frame | Frontend skip |
+| -------------------- | -------: | -----: | -------: | ----------: | -------: | -------------: | ------------: |
+| Plain SUMO           |    26.4  |  45.5× |   1.10 M |       4.4   |     —    |        —       |       —       |
+| sumo-gui             |    35.8  |  33.5× |    810 k |       6.0   |     —    |       23.8 ms  |     74.9 %    |
+| Publisher only       |    53.9  |  22.6× |    547 k |       8.84  |     0 %  |        —       |       —       |
+| Publisher + bridge   |    54.8  |  22.3× |    538 k |       8.98  |     0 %  |        —       |       —       |
+| **Full stack**       |  **73.5** | **17.0×** | **413 k** |    **11.77** | **26.7 %** | **6.43 ms** |   **13.7 %** |
+
+Frontend per-frame breakdown (10 936 frames rendered, ~149 fps on
+presumably a 144 Hz display):
+
+```
+parse       = 1.68 ms   (SimStepBin.decode + typed-array extraction)
+veh_build   = 0.25 ms
+drain       = 0.05 ms
+edge_build  = 0.00 ms   (no edge data enabled)
+layers      = 0.40 ms
+deck        = 1.38 ms   (GL draw, ~470 vehicles + ~150 persons)
+---------
+total       = 3.76 ms accounted, 2.7 ms idle (vsync wait)
+```
+
+The frontend is **wildly faster than sumo-gui's 23.8 ms render** — 6.4 ms
+vs 23.8 ms per frame — and is essentially idle (~40 % of frame budget
+spent waiting for vsync). The 13.7 % frontend skip rate comes from the
+publisher producing slightly faster than the display can refresh in some
+windows.
+
+Full-pipeline overhead vs publisher-only: **+2.8 ms/step** (8.98 → 11.77),
+all of which is the WebSocket fan-out + browser scheduling pressure on
+the bridge event loop. Notably the publisher's autotuner kicked in at
+26.7 % skip (interval bumping to 2 transiently) because the full pipeline
+got close to the ⅓-overhead threshold; in publisher-only mode it stayed
+at interval=1 the entire run.
+
+### Takeaways
+
+- **Frontend is not the bottleneck on doe.** With 3.76 ms of actual work
+  per render at ~149 fps, the React + deck.gl renderer has roughly 6×
+  more headroom than sumo-gui.
+- **Publisher is the bottleneck.** ~3.7 ms/step of native publish cost on
+  doe is dominated by per-vehicle `GeoConvHelper::cartesian2geo` (PROJ4)
+  for the geo-referenced network — *not* SWIG, which we already
+  eliminated. The next perf knob is the METER_OFFSETS position mode (or
+  PROJ batching) already planned in PLAN.md.
+- **sumo-gui still wins on pure RTF (33× vs 17×)** because it has zero
+  IPC/serialization cost AND aggressively skips 75 % of renders. With a
+  render-aware autotuner (see PLAN.md) and a native vehicle loop, we
+  should close most of that gap while preserving the much smoother and
+  far more responsive web frontend experience.

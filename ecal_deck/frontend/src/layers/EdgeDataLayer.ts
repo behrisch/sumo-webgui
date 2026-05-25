@@ -9,8 +9,13 @@ export function buildEdgeDataLayer(
   colorAttr: string,
   vpBounds: [number, number, number, number],
 ) {
+  performance.mark('edge-build-start');
   const colorAttrIdx = edgeAttr.attrNames.indexOf(colorAttr);
-  if (colorAttrIdx < 0) return null;
+  if (colorAttrIdx < 0) {
+    performance.mark('edge-build-end');
+    performance.measure('edge-build', 'edge-build-start', 'edge-build-end');
+    return null;
+  }
 
   const colorVals    = edgeAttr.values[colorAttrIdx];
   const N_edges      = colorVals.length;
@@ -41,7 +46,11 @@ export function buildEdgeDataLayer(
     }
   }
 
-  if (visLanes.length === 0) return null;
+  if (visLanes.length === 0) {
+    performance.mark('edge-build-end');
+    performance.measure('edge-build', 'edge-build-start', 'edge-build-end');
+    return null;
+  }
   const range = max - min || 1;
 
   // Count total positions for the visible subset
@@ -73,7 +82,7 @@ export function buildEdgeDataLayer(
     colors[j * 4] = r; colors[j * 4 + 1] = g; colors[j * 4 + 2] = b; colors[j * 4 + 3] = a;
   }
 
-  return new PathLayer({
+  const layer = new PathLayer({
     id: 'edgedata',
     data: {
       length: visLanes.length,
@@ -93,4 +102,7 @@ export function buildEdgeDataLayer(
     getWidth: (_: unknown, { index }: { index: number }) => widths[index],
     pickable: false,
   });
+  performance.mark('edge-build-end');
+  performance.measure('edge-build', 'edge-build-start', 'edge-build-end');
+  return layer;
 }

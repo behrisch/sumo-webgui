@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import type { TLSPhase, GetVehicleInfoResponse, GetEdgeInfoResponse, GetAttributesResponse } from '../generated/sumo';
-import type { VehicleSnapshot, EdgeAttrState, CommandResponse } from '../hooks/useSimSocket';
+import type { GetVehicleInfoResponse, GetEdgeInfoResponse, GetAttributesResponse } from '../generated/sumo';
+import type { VehicleSnapshot, EdgeAttrState, CommandResponse, TLSPhase } from '../hooks/useSimSocket';
 
 export type SelectedObject =
   | { type: 'vehicle';   id: string }

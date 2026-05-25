@@ -5,8 +5,7 @@ SUMO eCAL publisher -- starts SUMO and publishes simulation state as eCAL protob
 Topics:
   sumo/network      NetworkData       once per load
   sumo/simstep      SimStepBin        every simulation step (binary typed arrays;
-                                       carries vehicles + persons + optional edge data)
-  sumo/tls          TLSUpdate         every step when TLS present
+                                       carries vehicles + persons + edge data + TLS state)
   sumo/vehicletypes VehicleTypeDict   sent reliably when new types are seen
 
 Service: sumo_control
@@ -330,7 +329,6 @@ def main():
 
     pub_network      = _make_publisher("sumo/network",      "sumo.NetworkData")
     pub_simstep      = _make_publisher("sumo/simstep",      "sumo.SimStepBin")
-    pub_tls          = _make_publisher("sumo/tls",          "sumo.TLSUpdate")
     pub_vehicletypes = _make_publisher("sumo/vehicletypes", "sumo.VehicleTypeDict")
     pub_log          = _make_publisher("sumo/log",          "sumo.LogMessage")
 
@@ -488,17 +486,12 @@ def main():
         When `sim["use_native_ecal"]` is True, delegates the entire packing/publishing
         to libsumo::ECal in native C++ and returns a cheap getIDCount() for stats."""
         if sim.get("use_native_ecal"):
-            _ecal_native.publishSimStep(
+            return _ecal_native.publishSimStep(
                 ctrl["vehicle_attributes"],
                 ctrl["edge_attributes"] if full_edge_snapshot or ctrl["edge_attributes"] else [],
                 full_edge_snapshot,
                 seq,
             )
-            # Vehicle ID count is a single C call; cheap and keeps the UPS stat accurate.
-            try:
-                return traci.vehicle.getIDCount()
-            except Exception:
-                return 0
 
         converter = sim["converter"]
         geo_ref   = sim["geo_referenced"]
@@ -582,6 +575,18 @@ def main():
                             pass
                     edge_attr_cols[k].append(val)
 
+        # --- traffic light section (folded in from former separate TLSUpdate topic) ---
+        tls_ids_list:    list[bytes] = []
+        tls_states_list: list[bytes] = []
+        tls_count = 0
+        if sim.get("has_tls"):
+            for tls_id in traci.trafficlight.getIDList():
+                tls_ids_list.append(tls_id.encode() + b'\x00')
+                tls_states_list.append(
+                    traci.trafficlight.getRedYellowGreenState(tls_id).encode() + b'\x00'
+                )
+                tls_count += 1
+
         # --- pack and publish ---
         sb = sumo_pb2.SimStepBin(
             edge_full_snapshot=full_edge_snapshot,
@@ -604,6 +609,9 @@ def main():
             edge_attr_count=K_e,
             edge_indices=edge_indices_arr.tobytes(),
             edge_attr_vals=b''.join(col.tobytes() for col in edge_attr_cols),
+            tls_count=tls_count,
+            tls_ids=b''.join(tls_ids_list),
+            tls_states=b''.join(tls_states_list),
         )
         pub_simstep.send(sb.SerializeToString())
         return N
@@ -620,6 +628,9 @@ def main():
         total_vehicles_published = 0    # vehicle count accumulated at each publish (for UPS)
         # auto-tuner: rolling average of data-collection time (excludes sleep + SUMO compute)
         _collect_times: list[float] = []
+        # phase timers (us) accumulated since last 5s report
+        _t_sim_us = 0
+        _t_native_us = 0
 
         while traci.simulation.getMinExpectedNumber() > 0 and not _step_stop.is_set():
             if ctrl["paused"]:
@@ -628,7 +639,9 @@ def main():
                 if _step_stop.is_set():
                     break
 
+            _t = time.monotonic_ns()
             traci.simulationStep()
+            _t_sim_us += (time.monotonic_ns() - _t) // 1000
             time_ms = round(traci.simulation.getTime() * 1000)
             if first_time_ms is None:
                 first_time_ms = time_ms
@@ -652,18 +665,10 @@ def main():
                     ctrl["needs_full_edge_snapshot"] = False
                 t_collect = time.monotonic()
                 seq += 1
+                _t = time.monotonic_ns()
                 N = _build_and_publish_simstep(time_ms, seq, full_snap)
+                _t_native_us += (time.monotonic_ns() - _t) // 1000
                 total_vehicles_published += N
-
-                # tls
-                if sim["has_tls"]:
-                    tu = sumo_pb2.TLSUpdate()
-                    tu.time_ms = time_ms
-                    for tls_id in traci.trafficlight.getIDList():
-                        ph = tu.lights.add()
-                        ph.id = tls_id
-                        ph.state = traci.trafficlight.getRedYellowGreenState(tls_id)
-                    pub_tls.send(tu.SerializeToString())
 
                 if full_snap:
                     _log("INFO", "Published full-edge snapshot SimStepBin")
@@ -698,11 +703,23 @@ def main():
             if now - _t_report >= 5.0:
                 elapsed = now - _t_report
                 rate = steps_since / elapsed
-                _log("INFO", "%.0f steps/s  (%.1f ms/step)  interval=%d" % (
-                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"]))
+                # phase breakdown in us/step (averaged over the report window)
+                ns = max(steps_since, 1)
+                native_us = _t_native_us / ns
+                sim_us    = _t_sim_us / ns
+                native_breakdown = ""
+                if sim.get("use_native_ecal"):
+                    try:
+                        native_breakdown = "  " + _ecal_native.getStats(True)
+                    except Exception:
+                        pass
+                _log("INFO", "%.0f steps/s  (%.2f ms/step)  interval=%d  | sim=%.0fus native=%.0fus%s" % (
+                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
+                    sim_us, native_us, native_breakdown))
                 steps_since = 0
                 _t_report   = now
                 total_sleep = 0
+                _t_sim_us = _t_native_us = 0
 
         ctrl["simulation_ready"] = False
         try:
@@ -918,6 +935,7 @@ def main():
                 "avg_frame_ms": req.avg_frame_ms,
                 "skip_rate":    req.skip_rate,
                 "frames":       req.frames,
+                "breakdown":    req.breakdown,
             }
             ctrl["frontend_stats_event"].set()
             return _ack()
@@ -1034,8 +1052,8 @@ def main():
         # Set all eCAL publisher/service references to None so nanobind's refcount reaches
         # zero before ecal_core.finalize() is called. Closures see the update because Python
         # closures capture variables by reference (via cell objects), not values.
-        nonlocal pub_network, pub_simstep, pub_tls, pub_vehicletypes, pub_log, svc
-        pub_network = pub_simstep = pub_tls = pub_vehicletypes = pub_log = svc = None
+        nonlocal pub_network, pub_simstep, pub_vehicletypes, pub_log, svc
+        pub_network = pub_simstep = pub_vehicletypes = pub_log = svc = None
         # Release the native libsumo::ECal publishers BEFORE ecal_core.finalize() so the C++
         # destructors run while the shared libecal_core.so process state is still valid.
         if sim.get("use_native_ecal") and _has_native_ecal:
@@ -1075,6 +1093,8 @@ def main():
                 print("  Avg. frame time [ms]: %.2f" % fs["avg_frame_ms"])
                 print("  Avg. skip rate: %.3f" % fs["skip_rate"])
                 print("  Frames rendered: %d" % fs["frames"])
+                if fs.get("breakdown"):
+                    print("  Per-frame breakdown [ms]: %s" % fs["breakdown"])
             else:
                 print("Frontend: no stats received (bridge/frontend not connected)")
 

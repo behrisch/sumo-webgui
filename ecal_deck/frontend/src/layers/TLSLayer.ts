@@ -1,5 +1,6 @@
 import { LineLayer } from '@deck.gl/layers';
-import type { TlsEntry, TLSPhase } from '../generated/sumo';
+import type { TlsEntry } from '../generated/sumo';
+import type { TLSPhase } from '../hooks/useSimSocket';
 
 const SIGNAL_COLORS: Record<string, [number, number, number, number]> = {
   G: [0,   200, 0,   255],

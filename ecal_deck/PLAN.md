@@ -437,7 +437,82 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 |----------|-------------|-------|---------------|
 | ~~High~~ | ~~**Investigate 35ms frontend baseline**~~ — addressed by step 11 binary typed-array transport; per-vehicle accessor callbacks and JS object allocation eliminated; `SimpleMeshLayer` binary attribute API removes the remaining accessor overhead | — | **implemented — see step 11** |
 | ~~High~~ | ~~**Phase B: binary WebSocket + binary network cache**~~ | — | **implemented — see below** |
+| Med | **Aggressive frame skipping milestone** (see below): `max_publish_fps` knob + render-aware autotune + frontend interpolation | `sumo_ecal_publisher.py` + `App.tsx` | ~27× RTF on doe full stack (vs 17× today), matching sumo-gui's 33× ballpark without sacrificing smoothness |
 | Low | **Bridge timer precision** — replace `asyncio.sleep(1/60)` with wall-clock tracking | `ecal_ws_bridge.py` | msg/s: 100 → 60 (cosmetic given RAF sync) |
+
+#### Aggressive frame skipping (planned milestone)
+
+Benchmark numbers show our pipeline running at ~50 % publisher skip on the
+full doe stack, while sumo-gui hits ~75 % on the same scenario. The
+publisher cap is conservative on purpose (smooth at the cost of CPU
+headroom), but the three tunables below bundled together would let us
+match or exceed sumo-gui's throughput while keeping the frontend smooth.
+
+##### 1. `max_publish_fps` config knob
+
+Currently the autotuner has no notion of "useful publish rate" — it just
+tries to keep publisher overhead ≤ ⅓ of step time, so on cheap publishes
+it refuses to skip more even when no one would notice. Above ~30–60 fps
+of data updates humans cannot perceive the difference, so everything
+beyond is pure serialize + send + bridge-drop waste.
+
+Add a `max_publish_fps` to step config (default ~30). The autotuner gains
+a lower bound on interval:
+
+```python
+min_interval_fps_cap = max(1, ceil(steps_per_wall_second / max_publish_fps))
+interval = max(interval, min_interval_fps_cap)
+```
+
+For doe full stack (steps_per_wall_second ≈ 85, target 30 fps), that's
+interval = 3 → 67 % skip, matching sumo-gui territory.
+
+##### 2. Render-aware autotune (already in this doc, above)
+
+When the frontend reports its rolling `frame_time_ms`, push interval up
+so `publish_period ≥ frontend_frame_ms`. Otherwise the bridge drops
+frames the publisher just spent CPU producing.
+
+##### 3. Frontend interpolation between publishes
+
+Aggressive skipping alone makes vehicles visibly "jump" between frames:
+at interval=4, 0.2 s/step, RTF=17×, a 25 m/s car teleports 5 m every
+47 ms wall. sumo-gui hides this because sim and render share memory —
+render reads positions at "now" regardless of when sim last advanced. We
+don't. So aggressive skipping costs visual smoothness *unless* we
+interpolate on the frontend.
+
+Sketch:
+
+- Keep the previous `VehicleSnapshot` alongside the current one
+  (`prevSnapshot` ref, swapped on each new SimStep).
+- Each RAF tick, compute `t = (now - currentSnapshot.received_at_ms) /
+  (publishPeriodMs)`, clamped to `[0, 1]` (or slightly past 1 for
+  extrapolation when frames drop).
+- Per vehicle, interpolate position linearly using the snapshot's speed +
+  angle as a velocity fallback when prev/curr IDs match by index; for
+  vehicles that changed indices (insert/exit), no interpolation —
+  appear/disappear at the position from `currentSnapshot`.
+- Angles are already snake-case-snapped via `veh_angles`; linearly
+  interpolate with wrap-around handling.
+
+Approximate work: ~100 lines in `App.tsx` / a new
+`useInterpolatedSnapshot.ts` hook. Vehicle positions in
+`Float64Array(N×3)` are already in the right layout for a tight loop.
+
+##### Combined effect
+
+| | Now | + fps cap | + render-aware | + interpolation |
+| - | - | - | - | - |
+| Pub skip on doe full stack | 27 % | ~67 % | ~67 % | ~67 % |
+| Expected RTF | 17× | ~27× | ~27× | ~27× |
+| Visual smoothness | smooth | stuttery | stuttery | smooth |
+| Frontend skip rate | 14 % | <5 % | ~0 % | ~0 % |
+
+All three should ship together, ordered (1) → (2) → (3): (1) gives the
+RTF win but breaks smoothness, (2) prevents wasted publishes when the
+frontend lags, (3) restores smoothness so the RTF win is "free".
+
 
 ---
 
@@ -469,6 +544,107 @@ Once internal lane geometry is in NetworkGeometry:
    order (all edges including internal), replacing the current sumolib iteration
 3. Update the Python fallback EdgeBin path to use the same full edge list
 4. Bump `NetworkGeometry.version`
+
+#### Configurable position mode (publisher → frontend coordinate system)
+
+**Motivation.** On geo-referenced networks the publisher today calls
+`GeoConvHelper::cartesian2geo` per vehicle + per agent every step so that the
+frontend receives lon/lat — which deck.gl's `MapView` then forward-projects to
+Web Mercator on the GPU. A `proj_trans` per point is ~1–2 µs on libproj, so for
+the doe scenario (~600 vehicles + ~100 agents) the inverse projection costs
+**~0.7–1.5 ms / step**. Phase-timer measurements (2026-05) show the C++
+vehicle loop at 2.5 ms / step and the agent loop at 1.0 ms / step on doe, with
+PROJ accounting for a large chunk of both.
+
+For city-scale networks (≤ ~50 km extent) the round-trip can be skipped
+entirely by giving deck.gl positions in a **local tangent plane** instead of
+lon/lat — deck.gl's `COORDINATE_SYSTEM.METER_OFFSETS` mode takes positions as
+meters east/north of a reference `(lon, lat)` origin and handles the spherical
+correction on the GPU. SUMO XY is already exactly that (meters in a local
+frame), so the per-step CPU cost on the publisher drops to zero. For larger
+networks (Germany-scale ≈ 800 km) the tangent-plane approximation diverges and
+true lon/lat must still be sent.
+
+**Proto.** Add to `NetworkGeometry`:
+
+```protobuf
+enum PositionMode {
+  POSITION_MODE_CARTESIAN    = 0;  // non-geo network → raw SUMO XY → OrthographicView
+  POSITION_MODE_LOCAL_METERS = 1;  // geo network, fast path → raw SUMO XY → METER_OFFSETS
+  POSITION_MODE_LNGLAT       = 2;  // geo network, accurate path → cartesian2geo → LNGLAT
+}
+
+message NetworkGeometry {
+  ...
+  PositionMode position_mode  = 12;
+  double       geo_origin_lon = 13;   // only valid when position_mode == LOCAL_METERS
+  double       geo_origin_lat = 14;
+}
+```
+
+Bump `NetworkGeometry.version` so stale `.ecaldeck` caches re-build.
+
+**Selection policy** — decided once at network load:
+
+| CLI                                              | Behaviour |
+|--------------------------------------------------|-----------|
+| `--position-mode auto` (default)                 | Compute bbox in SUMO meters; if `max(width, height) ≤ --local-meters-threshold` (default **50 km**) and the network is geo-referenced → `LOCAL_METERS`. Otherwise → `LNGLAT`. Non-geo always → `CARTESIAN`. |
+| `--position-mode local`                          | Force `LOCAL_METERS` (error if not geo-referenced).                                                              |
+| `--position-mode lnglat`                         | Force `LNGLAT` (error if not geo-referenced).                                                                    |
+| `--local-meters-threshold <metres>` (default 50000) | Auto-policy bbox cap. 50 km keeps the tangent-plane error sub-pixel even at deep zoom; configurable for users who want to push it (e.g. Ruhrgebiet ≈ 100 km).                                                                |
+
+**Effect on each component**:
+
+| Component                                        | LOCAL_METERS                              | LNGLAT                                   | CARTESIAN                                       |
+|--------------------------------------------------|-------------------------------------------|------------------------------------------|-------------------------------------------------|
+| C++ `publishSimStep` (vehicle + agent loops)     | skip `cartesian2geo`                      | call `cartesian2geo` (today's path)      | skip                                            |
+| `_build_network_binary` lane / junction coords   | raw SUMO XY (skip `convertXY2LonLat`)     | lon/lat (today's path)                   | raw XY (today's path)                           |
+| Frontend `VehicleLayer` / agent layer            | `METER_OFFSETS` + `coordinateOrigin`      | `LNGLAT`                                 | `CARTESIAN` (OrthographicView)                  |
+| Frontend network layers (edges, junctions, TLS)  | `METER_OFFSETS` + same origin             | `LNGLAT`                                 | `CARTESIAN`                                     |
+
+All layers in a single `MapView` must use the same `coordinateOrigin`, so
+lanes follow vehicles into `METER_OFFSETS`. As a side-effect, `LOCAL_METERS`
+also skips the load-time PROJ pass over all 50k lanes — a few seconds saved
+on large networks.
+
+**C++ surface.** `ECal::init` gains a `positionMode` enum (or `int`) so the
+hot path can branch once per step on a `State` field rather than re-querying
+`GeoConvHelper::usingGeoProjection()` per vehicle.
+
+**Accuracy.** `METER_OFFSETS` uses a tangent-plane (spherical) approximation;
+UTM is conformal on the ellipsoid. Divergence over 50 km × 50 km is well below
+one screen pixel even at deep zoom. For larger networks the `auto` policy
+falls back to `LNGLAT`. Conformal-vs-spherical drift can be visualised by
+comparing a UTM ground truth against the tangent-plane projection at the bbox
+edges — see deck.gl docs for `LNGLAT_OFFSETS` vs `METER_OFFSETS` if the
+distinction ever matters.
+
+**Follow-on for LNGLAT mode — batched PROJ.** When `LOCAL_METERS` cannot be
+used (Germany-scale), the per-vehicle `cartesian2geo` cost remains. A batched
+implementation would help:
+
+1. Two-pass vehicle/agent loops in `ECal::publishSimStep`: first pass collects
+   raw cartesian `(x, y, z)` into the `mutable_veh_positions()` bytes buffer
+   (the layout is already `[x,y,z, x,y,z, ...]` f64 little-endian); second
+   pass transforms in place using libproj's `proj_trans_generic` with stride
+   24 over the same buffer.
+2. `proj_trans_generic` amortises the per-call context lookup
+   (`proj_context_errno`) and the function-pointer dispatch inside `proj_trans`
+   over N points; on dense PROJ workloads it's typically 2–5× faster than
+   per-point `proj_trans`.
+3. Requires pulling `<proj.h>` into `ECal.cpp` (libproj is already linked
+   transitively through SUMO). Add a `State::projHandle` cached from
+   `GeoConvHelper::getFinal()` rather than re-querying every step.
+4. The `getOffsetBase()` subtract stays per-point but is a trivial 3-double
+   subtraction — cheap compared to a PROJ call.
+5. Skip `checkError` per point; check once after the batch. The current
+   per-point `proj_context_errno` call is a TLS lookup that's small but
+   non-zero across 700 calls.
+
+Estimated additional win for `LNGLAT` mode: 30–60% off the current
+geo-conversion cost. Not needed for city-scale users once `LOCAL_METERS`
+ships; worth doing once a Germany-sized network user hits the bottleneck.
+
 
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
