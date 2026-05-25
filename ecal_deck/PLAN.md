@@ -85,6 +85,62 @@ ecal_deck/
 All eCAL service requests and responses use protobuf with full `DataTypeInformation` descriptors.
 The bridge translates protobuf <-> JSON at the WebSocket boundary (same pattern as pub/sub topics).
 
+### Planned proto change: merge SimBin + EdgeBin → SimStepBin
+
+`SimBin` (topic `sumo/simbin`) and `EdgeBin` (topic `sumo/edgebin`) will be merged into a
+single `SimStepBin` message on topic `sumo/simstep` (replacing the old `SimStep` / `sumo/simstep`).
+One C++ call → one message → one eCAL publish per step.  The edge section is simply
+zero-length when no edge attributes are enabled.
+
+```protobuf
+message SimStepBin {
+  bool   edge_full_snapshot = 1;   // true = all-edges baseline; false = occupied-only delta
+  //   placed at field 1 so the wire encoding starts with 0x08 0x01 (snapshot)
+  //   or 0x08 0x00 (normal) — the bridge sniffs that 2-byte prefix to decide
+  //   whether to cache the frame for late-joining WebSocket clients without
+  //   parsing the message.
+  int64  time_ms            = 2;
+  uint32 seq_num            = 3;
+
+  // --- vehicle section ---
+  uint32 veh_count          = 4;
+  uint32 veh_attr_count     = 5;
+  bytes  veh_positions      = 6;   // f64[N×3] LE: [x,y,z=0, x,y,z=0, ...]
+  //   3 components so deck.gl SimpleMeshLayer can use the bytes as a zero-copy
+  //   size=3 Float64Array without expansion.  z=0 now; road elevation when 3D is added.
+  bytes  veh_angles         = 7;   // f32[N] LE: SUMO degrees (0=north, CW); frontend negates for deck.gl yaw
+  bytes  veh_speeds         = 8;   // f32[N] LE
+  bytes  veh_attr_vals      = 9;   // f32[N×K_v] LE column-major: attr0[0..N-1], attr1[0..N-1], …
+  bytes  vehicle_ids        = 10;  // null-terminated UTF-8
+  bytes  veh_type_indices   = 11;  // u32[N] LE: index into VehicleTypeDict
+
+  // --- mobile agents section ---
+  uint32 agent_count        = 12;
+  bytes  agent_positions    = 13;  // f64[A×3] LE: [x,y,z=0, …] — same 3-component layout as vehicles
+  bytes  agent_angles       = 14;  // f32[A] LE
+  bytes  agent_ids          = 15;  // null-terminated UTF-8
+  bytes  agent_type_indices = 16;  // u32[A] LE
+
+  // --- edge section (merged from EdgeBin; empty when no edge attrs enabled) ---
+  uint32 edge_count         = 17;
+  uint32 edge_attr_count    = 18;
+  bytes  edge_indices       = 19;  // u32[M] LE — index into MSNet::getEdgeControl().getEdges()
+  bytes  edge_attr_vals     = 20;  // f32[M×K_e] LE column-major
+}
+```
+
+**Full edge snapshot timing**: when `set_attributes` or `load` triggers a full snapshot,
+Python calls `publishSimStep(..., full_edge_snapshot=True)` on the very next simulation step,
+bypassing the `step % interval == 0` guard for that one call.  This preserves the existing
+behaviour where the baseline fires immediately rather than waiting up to `interval` steps.
+The seq counter is incremented on every publish (normal or snapshot), so the frontend can
+detect gaps.
+
+**Migration**: `SimBin`, `EdgeBin`, `SimStep`, `EdgeDataUpdate` remain in `sumo.proto` for
+backward compatibility with existing bridge/frontend code until the C++ publisher is live and
+all consumers are updated.  The old topics `sumo/simbin` and `sumo/edgebin` are retired once
+`sumo/simstep` carries `SimStepBin`.
+
 ### Key schema decisions
 
 - `int64 time_ms` (not double) -- matches SUMO internal millisecond representation
@@ -389,6 +445,31 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 
 ### Near-term
 
+#### NetworkGeometry extensions
+
+The binary network cache (`NetworkGeometry`) is missing several visual elements.
+Each item below requires a proto field addition, a `_build_network_binary` change, a
+`NetworkGeometry.version` bump (so stale caches are invalidated), and a frontend layer update.
+
+| Element | How to store | Notes |
+|---------|-------------|-------|
+| **Stopping lines** | `bytes lane_has_stopline` — u8 bit per lane (1 = has stop line); frontend derives the two endpoints from the lane's last shape point + perpendicular direction + lane width | Displayed as short perpendicular white bars at lane ends before junctions; highly visible in real traffic maps |
+| **Internal lane geometry** | Include `:` lanes in `lane_positions` / `lane_widths` / `lane_starts`; add `bool lane_is_internal` mask or use the existing `lane_perm_class` sentinel | Required before C++ EdgeBin can use all edges; internal lanes are curved arcs through junctions |
+| **Crosswalks** | `bytes crosswalk_starts` + `bytes crosswalk_positions` (f64[] LE) — one polygon per pedestrian crossing; derived from lanes with `allow="pedestrian"` that cross junction entries | Rendered as striped rectangles (zebra crossing pattern) or solid rectangles |
+| **Sidewalk / footpath distinction** | Extend `lane_perm_class` encoding (currently 0=pedestrian/other, 1=bicycle, 2=motorised) to separate 0=other, 1=pedestrian, 2=bicycle, 3=motorised | Allows frontend to render footpaths in a distinct style (narrower, different colour) |
+
+**Recommended order**: stopping lines first (high visual value, self-contained), then internal
+lane geometry (unblocks full EdgeBin coverage), then crosswalks, then sidewalk distinction.
+
+#### Internal edges in EdgeBin (follow-on to Phase A C++ publisher)
+
+Once internal lane geometry is in NetworkGeometry:
+1. Remove the `:` filter in the C++ edge pass — `MSEdgeControl::getEdges()` already includes all edges
+2. Update `_build_network_binary` to write `edge_ids` in `MSNet::getEdgeControl().getEdges()`
+   order (all edges including internal), replacing the current sumolib iteration
+3. Update the Python fallback EdgeBin path to use the same full edge list
+4. Bump `NetworkGeometry.version`
+
 - **Bridge `--topics` flag**: the bridge hardcodes the four SUMO topics. Should be configurable
   via CLI before coupling a second simulator (e.g. `--topics sumo/simstep,jupedsim/simstep`).
 
@@ -555,7 +636,7 @@ Measured bottleneck breakdown (0.2 s steps, ~5 000 vehicles, doe scenario):
 |------|--------|
 | `src/libsumo/CMakeLists.txt` | `find_package(eCAL QUIET)` + `find_package(Protobuf QUIET)`; if both found: `protobuf_generate_cpp`, add ECal sources + proto to all three targets (libsumostatic / libsumoguistatic / libsumocpp), set `HAVE_ECAL`, add `target_compile_definitions` / `target_include_directories` / `target_link_libraries` for each |
 | `src/libsumo/libsumo.i` | `%include "ECal.h"` in `%{...%}` block and `%include` list |
-| `src/libsumo/libsumo_typemap.i` | `%rename(ecal) ECal;` + `%template(LongLongVector) std::vector<long long>;` |
+| `src/libsumo/libsumo_typemap.i` | `%rename(ecal) ECal;` |
 
 #### C++ API
 
@@ -567,24 +648,26 @@ public:
     /// Create eCAL publishers. Call once after Simulation::load().
     /// eCAL must already be initialised by the Python side (ecal_core.initialize()).
     /// C++ and Python share the same libecal_core.so process state — no Initialize() needed.
-    static void init(const std::string& simbin_topic,
-                     const std::string& typedict_topic,
-                     const std::string& edgebin_topic);
+    static void init(const std::string& simstep_topic,
+                     const std::string& typedict_topic);
+    // SimBin and EdgeBin are merged into a single SimStepBin message on one topic (see proto
+    // section below).  No edge ordering communication needed — C++ uses
+    // MSNet::getEdgeControl().getEdges() directly; position in that stable vector = EdgeBin index.
 
-    /// Pass the global edge ID list once per simulation load (constant after that).
-    /// Maps edge ID strings to their integer index in NetworkGeometry.edge_ids.
-    static void setEdgeIndex(const std::vector<std::string>& all_edge_ids);
-
-    /// Collect all visible vehicles + persons + active edges; pack and publish.
+    /// Collect all visible vehicles + persons + active edges; pack into one SimStepBin and publish.
     ///
     /// Publishes:
     ///   - VehicleTypeDict  (to typedict_topic)  when a new type_id appears
-    ///   - SimBin           (to simbin_topic)     every call
-    ///   - EdgeBin          (to edgebin_topic)    every call if edge_attrs non-empty;
-    ///                      full_snapshot=true forces all-edges baseline (e.g. on set_attributes)
+    ///   - SimStepBin       (to simstep_topic)   every call; edge section empty when no edge attrs
     ///
-    /// Returns: { time_ms, veh_count, agent_count }
-    static std::vector<long long> publishSimStep(
+    /// full_edge_snapshot: when true, edge section contains ALL edges (not just occupied ones).
+    ///   NOTE: a full snapshot must fire regardless of the current autotune interval — Python
+    ///   must call publishSimStep with full_edge_snapshot=true on the very next step after
+    ///   set_attributes / load, bypassing the normal `step % interval == 0` guard for that
+    ///   one call.  C++ resets nothing; Python owns the needs_edgebin_snapshot flag.
+    ///
+    /// Returns void — Python already has time_ms from traci.simulation.getTime().
+    static void publishSimStep(
         const std::vector<std::string>& veh_attrs,
         const std::vector<std::string>& edge_attrs,
         bool full_edge_snapshot,
@@ -599,17 +682,26 @@ public:
 
 Python usage after migration:
 ```python
-# On simulation load  (replaces per-step Python publisher creation)
-traci.ecal.init("sumo/simbin", "sumo/vehicletypes", "sumo/edgebin")
-traci.ecal.setEdgeIndex(sim["all_edges"])   # once per load
+# On simulation load
+traci.ecal.init("sumo/simstep", "sumo/vehicletypes")
 
-# In _step_loop, replaces the vehicle/person loops + SimBin/EdgeBin/VehicleTypeDict publish:
-result = traci.ecal.publishSimStep(
-    ctrl["vehicle_attributes"],
-    ctrl["edge_attributes"],
-    ctrl["needs_edgebin_snapshot"],   # True → full baseline; resets to False in C++
-    seq)
-# result: [time_ms, veh_count, agent_count]
+# In _step_loop — normal publish every interval steps:
+if step % interval == 0:
+    traci.ecal.publishSimStep(
+        ctrl["vehicle_attributes"],
+        ctrl["edge_attributes"],
+        False,   # delta: occupied edges only
+        seq)
+
+# Full edge snapshot: fires on the very next step regardless of interval,
+# then clears the flag.  Python owns the flag; C++ does not reset it.
+if ctrl["needs_edgebin_snapshot"] and ctrl["edge_attributes"]:
+    ctrl["needs_edgebin_snapshot"] = False
+    traci.ecal.publishSimStep(
+        ctrl["vehicle_attributes"],
+        ctrl["edge_attributes"],
+        True,    # full baseline: all edges
+        seq)
 
 # TLS publish stays Python (cheap, infrequent topic)
 
@@ -626,11 +718,13 @@ falls back to the existing pure-Python path unchanged.
 **Static state** (one instance per process lifetime, reset by `close()`):
 ```
 g_state:
-  pub_simbin, pub_typedict, pub_edgebin  — eCAL::CPublisher (Send(const std::string&))
+  pub_simstep, pub_typedict  — eCAL::CPublisher (Send(const std::string&))
+  // SimBin and EdgeBin merged into single SimStepBin message on pub_simstep
   type_indices: unordered_map<string, uint32_t>  — stable insertion-order type registry
   type_dict: sumo_ecal::VehicleTypeDict           — incrementally built, re-published on change
   type_dict_dirty: bool
-  edge_id_to_idx: unordered_map<string, uint32_t> — populated by setEdgeIndex()
+  // no edge index map needed — MSNet::getEdgeControl().getEdges() is a stable vector;
+  // position in that vector IS the EdgeBin index; iterated directly each step
   last_veh_attrs, last_edge_attrs: vector<string> — cache keys for attr fn resolution
   veh_attr_fns: vector<function<double(MSVehicle*)>>
   edge_attr_fns: vector<function<double(MSEdge*)>>
@@ -656,7 +750,7 @@ g_state:
 | Python name | C++ expression |
 |-------------|---------------|
 | `speed` | `e->getMeanSpeed()` |
-| `density` / `occupancy` | `e->getOccupancy()` |
+| `occupancy` | `e->getOccupancy()` (brutto, matches sumo-gui's `"by current occupancy (streetwise, brutto)"` and `traci.edge.getLastStepOccupancy`) |
 | `vehicle_count` | `(double)e->getVehicleNumber()` |
 | `waiting_time` | `e->getWaitingSeconds()` |
 | `travel_time` | `e->getTravelTime()` |
@@ -689,14 +783,14 @@ for (auto it = pc.loadedBegin(); it != pc.loadedEnd(); ++it) {
 
 **Edge iteration** (for EdgeBin):
 ```cpp
-if (full_snapshot) {
-    // iterate ALL edges in edge_id_to_idx order for full baseline
-} else {
-    // iterate only active_edge_set (collected during vehicle pass above)
-}
-for (MSEdge* e : edges_to_publish) {
-    uint32_t idx = edge_id_to_idx[e->getID()];
-    edge_indices.push_back(idx);
+// active_set built during vehicle pass: unordered_set<const MSEdge*>
+// MSEdgeControl::getEdges() is a stable vector — position = EdgeBin index, no map needed
+const MSEdgeVector& edges = MSNet::getInstance()->getEdgeControl().getEdges();
+for (uint32_t i = 0; i < edges.size(); ++i) {
+    const MSEdge* e = edges[i];
+    if (e->getID()[0] == ':') continue;                          // skip internal (Phase A)
+    if (!full_snapshot && !active_set.count(e)) continue;        // delta: occupied only
+    edge_indices.push_back(i);
     for (auto& fn : edge_attr_fns)
         attr_vals.push_back((float)fn(e));
 }
@@ -711,12 +805,27 @@ for (MSEdge* e : edges_to_publish) {
 ```cpp
 eCAL::SDataTypeInformation dti;
 dti.encoding = "proto";
-dti.name     = "sumo.SimBin";   // matches Python _make_publisher's DataTypeInformation
+dti.name     = "sumo.SimStepBin";   // matches Python _make_publisher's DataTypeInformation
 pub = std::make_unique<eCAL::CPublisher>(topic, dti);
 pub->Send(serialized_string);   // bool Send(const std::string&, long long time = -1)
 ```
 No `eCAL::Initialize()` needed — the Python `ecal_core.initialize()` call already initialised
 the shared `libecal_core.so`; C++ publishers created afterwards work immediately.
+
+#### Internal edges in Phase A
+
+C++ filters out internal edges (junction internals, IDs starting with `:`) when building
+`edge_id_to_idx` in `init()`, mirroring the current `traci.edge.getIDList()` behaviour:
+
+```cpp
+for (const MSEdge* e : MSNet::getInstance()->getEdgeControl().getEdges()) {
+    if (e->getID().empty() || e->getID()[0] == ':') continue;
+    edge_id_to_idx[e->getID()] = idx++;
+}
+```
+
+This keeps EdgeBin indices consistent with the current NetworkGeometry which also excludes
+internal edges.  Adding internal edges is a separate follow-on task (see below).
 
 #### Things NOT moved to C++ in Phase A
 
@@ -724,9 +833,10 @@ the shared `libecal_core.so`; C++ publishers created afterwards work immediately
 - Network geometry building (`_build_network_binary`) — runs once at load, cost is negligible
 - Service handlers (load, pause, set_delay, …) — infrequent, Python overhead irrelevant
 - Autotune timing loop — wraps the `publishSimStep` call, stays Python
-- Geo-coordinate conversion (pyproj → lon/lat) — `getPosition()` returns SUMO XY;
-  for geo-referenced networks, a follow-up pass using `GeoConvHelper::getFinal()` is needed;
-  deferred to Phase B (most benchmark scenarios are non-geo-referenced)
+- Geo-coordinate conversion is included in Phase A: when the network is
+  geo-referenced, the C++ side applies `GeoConvHelper::getFinal().cartesian2geo(p)`
+  to each vehicle/person position before packing it into the SimStepBin.
+  No `pyproj` round-trip; same wire format as the Python path.
 
 #### Expected outcome
 
@@ -739,6 +849,142 @@ The remaining cost after Phase A is estimated to be:
 - ~3–4 ms libsumo step (unavoidable: SUMO simulation compute)
 - ~1–2 ms C++ vehicle/edge iteration + pack
 - ~1–2 ms eCAL SHM publish
+
+#### Measured outcome (doe scenario, `view.sumocfg`)
+
+| Path                                | Avg step time | UPS      | Real-time factor |
+|-------------------------------------|---------------|----------|------------------|
+| Python publisher (baseline)         | ~31 ms        | ~150 k   | 6.4×             |
+| C++ `libsumo::ECal` (with geo conv) | ~10–13 ms     | ~370–460 k | 16–24×         |
+
+Matches the Phase A target.  Per-step variance (~3 ms) is shared-host load; cold
+runs hit ~8 ms.  `cross_demo` (non-geo, tiny network) hits ~0.17 ms/step.
+
+#### Design notes
+
+*Why `GeoConvHelper` is queried inside C++ rather than passed as an init flag.*
+The loaded network already knows whether it carries a projection
+(`GeoConvHelper::getFinal().usingGeoProjection()`).  Threading a redundant bool
+from Python through SWIG would create a second source of truth that could drift
+from the network's own state on `load`.  The check is also free at publish time
+(one indirect read per step).
+
+*Coordinate-frame contract — must stay consistent across the publisher.*
+The publisher emits two parallel streams that the frontend has to overlay:
+the **network geometry** (lane positions, junction polygons, TLS positions)
+and the **per-step entity positions** (vehicles, persons, containers).
+Both streams must live in the same coordinate frame, and that frame depends
+on whether the loaded network is geo-referenced:
+
+| Network          | Network geometry stream                                   | Per-step positions                                       | Frontend view     |
+|------------------|-----------------------------------------------------------|----------------------------------------------------------|-------------------|
+| `projParameter != "!"` (geo)     | `net.convertXY2LonLat(...)` → (lon, lat) → subtracts offset, then projects | `GeoConvHelper::cartesian2geo(p)` → same offset+project pipeline | `MapView` + MapLibre |
+| `projParameter == "!"` (non-geo) | raw `lane.getShape()` → offset XY as stored in `.net.xml` | raw `getPosition()` → offset XY                          | `OrthographicView`   |
+
+The two important invariants:
+
+1. **Non-geo networks: do NOT apply `cartesian2geo` to positions.**  The
+   network geometry side does *not* subtract the offset (it publishes raw
+   `lane.getShape()` values), so subtracting `netOffset` from positions
+   would shift vehicles relative to lanes.  And `netOffset` is not reliably
+   zero for non-geo nets — SUMO's own test fixtures (`ticket3900`,
+   `ticket4528` in `tests/netedit/bugs/...`) have `netOffset="25.00,0.00"`
+   and `netOffset="25.00,20.00"` with `projParameter="!"`.
+2. **`GeoConvHelper::cartesian2geo` is *not* a no-op for non-geo nets.**
+   It unconditionally subtracts `getOffsetBase()` and *then* checks
+   `myProjectionMethod == NONE`.  The `usingGeoProjection()` gate at the
+   call site is therefore mandatory, not just an optimisation.
+
+If the contract changes (e.g. we ever decide that non-geo networks should
+also have their offset subtracted, putting both streams in "original world
+XY"), it has to change in *both* `_build_network_binary` (Python) and the
+ECal vehicle/transportable loops (C++) atomically.
+
+*Why publisher state lives in a file-local `State` struct (anonymous namespace)
+behind a `state()` accessor, not as static members of `ECal`.*
+Static members would force the public header `ECal.h` to declare types like
+`std::unique_ptr<eCAL::CPublisher>`, `sumo::VehicleTypeDict`, the
+`VehAttrFn`/`EdgeAttrFn` callables, and the `std::unordered_map` registry —
+which in turn drags `<ecal/...>` and the generated `sumo_ecal.pb.h` into every
+translation unit that includes `ECal.h`, including the SWIG wrapper.  It would
+also require `#ifdef HAVE_ECAL` fences in the header to gate eCAL types when
+eCAL is absent.  Keeping the state in `ECal.cpp` lets the header stay minimal
+(`<string>` + `<vector>`) and unconditional.  The trade-off is one extra
+`State&` parameter on a few file-local helpers, which is a small price for
+keeping eCAL/Protobuf out of `libsumo.i`'s include graph.
+
+#### Refactoring idea — move VehicleTypeDict publish back to Python
+
+The C++ side currently owns both the `sumo/simstep` and `sumo/vehicletypes`
+topics.  Publishing the SimStep in C++ is essential — that's the hot loop the
+whole exercise targets — but publishing the VehicleTypeDict is cold-path
+(typically a handful of sends at scenario start, then never).  It only ended
+up in C++ because the dirty flag and the typed-array scratch buffers are
+already sitting in `State` when `publishSimStep` finishes registering types.
+
+What *must* stay in C++: the type-index *assignment* (`typeIndex` map +
+`typeCount`), because `SimStepBin.veh_type_indices` references those indices
+and the alternative would be re-walking every vehicle in Python per step to
+look up its type ID — re-introducing exactly the per-vehicle Python overhead
+Phase A removes.
+
+What could move back to Python: the *serialization and send* of
+`VehicleTypeDict`.  Two viable shapes:
+
+1. **C++ exposes `bool drainTypeDictBlob(std::string& out)`** that returns the
+   already-serialized dict bytes when dirty; Python sends them on its own
+   `CPublisher`.  Single-source proto definition (`sumo_ecal.proto` stays the
+   authority), one fewer eCAL publisher on the C++ side, `ECal::init` becomes
+   one-arg.
+2. **C++ exposes `drainTypeDictDelta()`** returning only the entries added
+   since the last drain; Python assembles the full `VehicleTypeDict` itself.
+   Cleanest C++ surface but now both sides have to know the wire layout.
+
+Trade-off: we lose the in-call atomicity of "new type registered → dict
+published before the SimStep referencing it leaves the process".  Python would
+need to drain after every `publishSimStep` call; a missed drain stalls
+rendering of vehicles with unknown type indices.  The frontend's existing
+behaviour absorbs the gap in practice but it becomes a real correctness
+contract to maintain.
+
+Worth doing if/when the C++ surface grows further (more proto types, more
+topics).  Today the cost is two `set_*` calls + one `Send()` + a `bool`
+flag — small enough that the atomicity guarantee is probably worth keeping.
+
+#### Refactoring idea — hoist eCAL detection into the main CMakeLists.txt
+
+The `find_package(eCAL QUIET)` + `find_package(Protobuf QUIET)` probe and the
+resulting `HAVE_ECAL` definition currently live in `src/libsumo/CMakeLists.txt`
+and are pushed onto each target via `target_compile_definitions(... HAVE_ECAL)`.
+That kept the Phase A patch surgical (no upstream SUMO build-system changes
+required), but it has two drawbacks:
+
+* `HAVE_ECAL` is a per-target macro, not a project-wide one.  Anywhere else in
+  SUMO that might eventually want to react to eCAL availability (e.g. a
+  GUI-side subscriber, a netconvert exporter, a unit test) would have to
+  re-do the `target_compile_definitions` dance.
+* `#ifdef HAVE_ECAL` inside `ECal.cpp` is invisible to callers — including
+  `ECal.h` — which is why the header has to declare the stub API
+  unconditionally and the `.cpp` has to provide two parallel implementations.
+
+Better long-term shape:
+
+1. Move the `find_package(eCAL)` / `find_package(Protobuf)` probe into the
+   top-level `CMakeLists.txt`, behind an option (`option(SUMO_WITH_ECAL "..."
+   ON)` defaulting to ON-if-found, OFF-otherwise).
+2. Add `#cmakedefine HAVE_ECAL` to `src/config.h.cmake` so it lands in the
+   generated `config.h` alongside `HAVE_FOX`, `HAVE_GDAL`, `HAVE_OSG`, etc.
+3. Replace `target_compile_definitions(... HAVE_ECAL)` with a plain
+   `#include <config.h>` in any consumer.
+4. With the macro project-wide, `ECal.h` itself can be conditionally compiled
+   (no more "always-declared stubs" pattern), which also lets us drop the
+   `<ecal/...>` / `sumo_ecal.pb.h` headers from any translation unit that
+   doesn't need them.
+
+This matches how SUMO already handles every other optional dependency (FOX,
+GDAL, OSG, FFmpeg, GL2PS, …) and removes the one-off CMake pattern Phase A
+introduced.  Not urgent; do it when upstreaming the eCAL integration or when a
+second translation unit needs to react to eCAL availability.
 
 #### Build notes
 

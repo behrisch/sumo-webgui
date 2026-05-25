@@ -7,7 +7,7 @@ Accepts incoming JSON command messages and forwards them to the publisher via eC
 
 Binary frame layout: [u8 msg_type][protobuf payload bytes]
   2 = TLSUpdate, 4 = LogMessage, 5 = NetworkGeometry
-  6 = SimBin, 7 = EdgeBin, 8 = VehicleTypeDict
+  6 = SimStepBin, 8 = VehicleTypeDict
 
 Commands and responses remain JSON text frames (unchanged).
 
@@ -52,14 +52,12 @@ _SERVICE_REGISTRY = {
 _TYPE_TLS           = 2
 _TYPE_LOG           = 4
 _TYPE_NETWORK       = 5
-_TYPE_SIMBIN        = 6
-_TYPE_EDGEBIN       = 7
+_TYPE_SIMSTEP       = 6
 _TYPE_VEHICLETYPES  = 8
 
 TOPICS = {
-    "sumo/simbin":       _TYPE_SIMBIN,
+    "sumo/simstep":      _TYPE_SIMSTEP,
     "sumo/tls":          _TYPE_TLS,
-    "sumo/edgebin":      _TYPE_EDGEBIN,
     "sumo/log":          _TYPE_LOG,
     "sumo/network":      _TYPE_NETWORK,
     "sumo/vehicletypes": _TYPE_VEHICLETYPES,
@@ -70,14 +68,14 @@ TOPICS = {
 # ---------------------------------------------------------------------------
 _connected: set = set()
 _network_frame: bytes | None = None             # cached type-5 frame for late joiners
-_edgebin_snapshot_frame: bytes | None = None    # cached type-7 full-snapshot frame for late joiners
+_simstep_snapshot_frame: bytes | None = None    # cached type-6 full-snapshot frame for late joiners
 _vehicletypes_frame: bytes | None = None        # cached type-8 frame for late joiners
 _loop: asyncio.AbstractEventLoop | None = None
 _poller_task: asyncio.Task | None = None        # current _network_poller task
 
 # Latest-value semantics for high-frequency topics: callback overwrites; flush loop sends once.
 # Log messages are low-frequency and must not be dropped.
-_LATEST_VALUE = {_TYPE_TLS, _TYPE_SIMBIN}
+_LATEST_VALUE = {_TYPE_TLS, _TYPE_SIMSTEP}
 _pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 
 
@@ -86,7 +84,7 @@ _pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 # ---------------------------------------------------------------------------
 def _make_callback(topic: str, type_byte: int):
     def _cb(publisher_id, data_type_info, data):
-        global _network_frame, _edgebin_snapshot_frame, _vehicletypes_frame
+        global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame
         try:
             buf   = bytes(data.buffer)
             frame = bytes([type_byte]) + buf
@@ -101,16 +99,16 @@ def _make_callback(topic: str, type_byte: int):
                     _network_frame = frame
                     if _loop is not None:
                         _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
-                    # Signal publisher that cache is loaded and we're ready for SimBin frames.
+                    # Signal publisher that cache is loaded and we're ready for SimStep frames.
                     threading.Thread(target=lambda: _call_service("ack_network", {}), daemon=True).start()
                 return
 
-            if type_byte == _TYPE_EDGEBIN:
-                # EdgeBin's full_snapshot field is proto field 1 (bool=true).
+            if type_byte == _TYPE_SIMSTEP:
+                # SimStepBin's edge_full_snapshot field is proto field 1 (bool=true).
                 # proto3 encodes bool field 1 = true as tag 0x08, value 0x01.
                 is_snapshot = buf[:2] == b'\x08\x01'
                 if is_snapshot:
-                    _edgebin_snapshot_frame = frame
+                    _simstep_snapshot_frame = frame
                 if _loop is not None:
                     if is_snapshot:
                         _loop.call_soon_threadsafe(_reliable_send_bytes, frame)
@@ -222,7 +220,7 @@ async def _network_poller() -> None:
 # asyncio: WebSocket handler
 # ---------------------------------------------------------------------------
 async def _handler(websocket) -> None:
-    global _network_frame, _edgebin_snapshot_frame, _vehicletypes_frame, _poller_task
+    global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame, _poller_task
     try:
         # Send network frame: prefer the cached eCAL-delivered frame; fall back to
         # reading the cache file via get_state if eCAL topic delivery hasn't fired yet
@@ -249,8 +247,8 @@ async def _handler(websocket) -> None:
             await websocket.send(net_frame)
         if _vehicletypes_frame is not None:
             await websocket.send(_vehicletypes_frame)
-        if _edgebin_snapshot_frame is not None:
-            await websocket.send(_edgebin_snapshot_frame)
+        if _simstep_snapshot_frame is not None:
+            await websocket.send(_simstep_snapshot_frame)
 
         attrs = await loop.run_in_executor(None, _call_service, "get_attributes", {})
         await websocket.send(json.dumps({"type": "attributes", "data": attrs}))
@@ -272,7 +270,7 @@ async def _handler(websocket) -> None:
                 # frame from the previous simulation.
                 if service == "load":
                     _network_frame = None
-                    _edgebin_snapshot_frame = None
+                    _simstep_snapshot_frame = None
                     _vehicletypes_frame = None
                     if _poller_task and not _poller_task.done():
                         _poller_task.cancel()

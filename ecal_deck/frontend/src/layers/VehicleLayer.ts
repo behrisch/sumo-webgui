@@ -45,20 +45,15 @@ export function buildVehicleLayer(
   const attrVals    = colorAttrIdx >= 0 ? snapshot.veh_attr_vals[colorAttrIdx] : null;
   const minM        = sizeMinPixels * metersPerPixel;
 
-  // getPosition needs size=3 (x, y, z=0); deck.gl SimpleMeshLayer's instancePositions is size=3.
+  // getPosition reads snapshot.veh_positions directly (size=3, [x,y,z=0] N×3 from publisher).
   // getOrientation and getScale are CPU-side mesh transforms in SimpleMeshLayer — not GPU
   // attributes — so they MUST be accessor functions, not binary TypedArrays. We pre-compute
   // them into TypedArrays here and read from those in the accessor closures.
-  const positions   = new Float64Array(N * 3);
   const colors      = new Uint8Array(N * 4);
   const orientations = new Float32Array(N * 3); // [pitch=0, yaw=-angle, roll=0] per vehicle
   const scales      = new Float32Array(N * 3);  // [width, length, 1] per vehicle
 
   for (let i = 0; i < N; i++) {
-    positions[i * 3]     = snapshot.veh_positions[i * 2];
-    positions[i * 3 + 1] = snapshot.veh_positions[i * 2 + 1];
-    // positions[i * 3 + 2] = 0 (Float64Array default)
-
     let r: number, g: number, b: number;
     if (attrVals && colorAttrName !== 'speed') {
       const val = attrVals[i];
@@ -99,7 +94,7 @@ export function buildVehicleLayer(
       length: N,
       attributes: {
         // GPU attributes: binary TypedArrays passed directly to the shader
-        getPosition: { value: positions, size: 3 },
+        getPosition: { value: snapshot.veh_positions, size: 3 },
         getColor:    { value: colors, size: 4, normalized: true },
       },
     } as any, // eslint-disable-line @typescript-eslint/no-explicit-any

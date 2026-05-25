@@ -5,7 +5,7 @@ export interface PerfStats {
   parseMs: number;        // avg proto decode time per binary frame (ms)
   vehicleBuildMs: number; // avg buildVehicleLayer time (ms)
   frameMs: number;        // avg time between rAF callbacks (ms)
-  skipRate: number;       // fraction of SimBin frames dropped in the last second (0–1)
+  skipRate: number;       // fraction of SimStep frames dropped in the last second (0–1)
   // cumulative since last network load (for benchmark reporting)
   cumAvgFrameMs: number;
   cumSkipRate: number;
@@ -23,7 +23,7 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
   const frameTotal = useRef(0);
   const frameCount = useRef(0);
   const skipCount  = useRef(0);  // frames dropped (seq_num gaps) in current window
-  const seqRecv    = useRef(0);  // SimBin frames received in current window
+  const seqRecv    = useRef(0);  // SimStep frames received in current window
   // cumulative totals (never reset, cleared on network load via resetCum)
   const cumFrameTotal = useRef(0);
   const cumFrameCount = useRef(0);
@@ -42,7 +42,7 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
           buildTotal.current += entry.duration;
           buildCount.current++;
         }
-        if (entry.name === 'simbin-seq') {
+        if (entry.name === 'simstep-seq') {
           const detail = (entry as PerformanceMark).detail as { skipped: number } | undefined;
           if (detail) {
             skipCount.current += detail.skipped;

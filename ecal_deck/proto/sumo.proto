@@ -194,41 +194,49 @@ message VehicleTypeDict {
 // All numeric arrays are little-endian typed arrays packed into bytes fields.
 // Attribute value arrays are column-major: attr0[0..N-1], attr1[0..N-1], ...
 // Attribute order matches ctrl["vehicle_attributes"] (= vehicle_enabled in GetAttributesResponse).
-message SimBin {
-  int64  time_ms          = 1;
-
-  // --- Vehicle section ---
-  uint32 veh_count        = 2;
-  uint32 veh_attr_count   = 3;   // K_v: number of vehicle attributes
-  bytes  veh_positions    = 4;   // f64[N×2] LE: [x0,y0, x1,y1, ...]
-  bytes  veh_angles       = 5;   // f32[N] LE: SUMO degrees (0=north, CW)
-  bytes  veh_speeds       = 6;   // f32[N] LE: m/s
-  bytes  veh_attr_vals    = 7;   // f32[N×K_v] LE: column-major vehicle attributes
-  bytes  vehicle_ids      = 8;   // null-terminated UTF-8: veh_count IDs
-  bytes  veh_type_indices = 9;   // u32[N] LE: permanent index into VehicleTypeDict
-  uint32 seq_num          = 15;  // publisher-side counter, incremented per SimBin sent; gaps = dropped frames
-
-  // --- Mobile agent section (persons + containers).
-  //     Agent class is identified via VehicleTypeDict.type_classes[type_index]. ---
-  uint32 agent_count        = 10;
-  bytes  agent_positions    = 11;  // f64[A×2] LE
-  bytes  agent_angles       = 12;  // f32[A] LE
-  bytes  agent_ids          = 13;  // null-terminated UTF-8: agent_count IDs
-  bytes  agent_type_indices = 14;  // u32[A] LE: permanent index into VehicleTypeDict
-}
-
-// High-frequency binary edge attribute snapshot — replaces EdgeDataUpdate / repeated EdgeData.
-// Attribute order matches ctrl["edge_attributes"] (= edge_enabled in GetAttributesResponse).
-message EdgeBin {
-  bool   full_snapshot = 1;   // true = all-edges baseline; false = occupied-only delta
-  uint32 edge_count    = 2;
-  uint32 attr_count    = 3;   // K_e: number of edge attributes
-  bytes  edge_indices  = 4;   // u32[N] LE: global index into NetworkGeometry.edge_ids
-  bytes  attr_vals     = 5;   // f32[N×K_e] LE: column-major edge attributes
-}
-
 message ReportFrontendStatsRequest {
   double avg_frame_ms = 1;  // average time between rAF callbacks (ms)
-  double skip_rate    = 2;  // fraction of SimBin frames dropped (0–1)
+  double skip_rate    = 2;  // fraction of SimStep frames dropped (0–1)
   int32  frames       = 3;  // total rAF frames rendered
+}
+
+// Unified high-frequency simulation snapshot — replaces SimBin + EdgeBin on a
+// single topic (sumo/simstep).  Field 1 is `edge_full_snapshot` so the wire
+// encoding starts with either 0x08 0x01 (snapshot) or 0x08 0x00 (normal),
+// letting the bridge cache snapshot frames for late joiners without parsing
+// the message.
+//
+// All numeric arrays are little-endian typed arrays packed into bytes fields.
+// Attribute value arrays are column-major: attr0[0..N-1], attr1[0..N-1], ...
+// Attribute order matches ctrl["vehicle_attributes"] / ctrl["edge_attributes"]
+// (= vehicle_enabled / edge_enabled in GetAttributesResponse).
+message SimStepBin {
+  bool   edge_full_snapshot = 1;   // true = all-edges baseline; false = occupied-only delta
+  int64  time_ms            = 2;
+  uint32 seq_num            = 3;   // publisher-side counter, incremented per frame sent; gaps = dropped
+
+  // --- vehicle section ---
+  uint32 veh_count          = 4;
+  uint32 veh_attr_count     = 5;   // K_v
+  bytes  veh_positions      = 6;   // f64[N×3] LE: [x,y,z=0, x,y,z=0, ...]
+  //   3 components so deck.gl SimpleMeshLayer can use the bytes as a zero-copy
+  //   size=3 Float64Array without expansion. z=0 now; road elevation later.
+  bytes  veh_angles         = 7;   // f32[N] LE: SUMO degrees (0=north, CW); frontend negates for deck.gl yaw
+  bytes  veh_speeds         = 8;   // f32[N] LE
+  bytes  veh_attr_vals      = 9;   // f32[N×K_v] LE column-major
+  bytes  vehicle_ids        = 10;  // null-terminated UTF-8
+  bytes  veh_type_indices   = 11;  // u32[N] LE: index into VehicleTypeDict
+
+  // --- mobile agent section (persons + containers) ---
+  uint32 agent_count        = 12;
+  bytes  agent_positions    = 13;  // f64[A×3] LE: [x,y,z=0, ...]
+  bytes  agent_angles       = 14;  // f32[A] LE
+  bytes  agent_ids          = 15;  // null-terminated UTF-8
+  bytes  agent_type_indices = 16;  // u32[A] LE
+
+  // --- edge section (empty when no edge attrs enabled) ---
+  uint32 edge_count         = 17;
+  uint32 edge_attr_count    = 18;  // K_e
+  bytes  edge_indices       = 19;  // u32[M] LE: index into NetworkGeometry.edge_ids
+  bytes  edge_attr_vals     = 20;  // f32[M×K_e] LE column-major
 }

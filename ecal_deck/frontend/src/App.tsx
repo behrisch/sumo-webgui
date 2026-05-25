@@ -441,8 +441,8 @@ export default function App() {
       setSelectedObject(null);
       return;
     }
-    const x = vehicleSnapshot!.veh_positions[idx * 2];
-    const y = vehicleSnapshot!.veh_positions[idx * 2 + 1];
+    const x = vehicleSnapshot!.veh_positions[idx * 3];
+    const y = vehicleSnapshot!.veh_positions[idx * 3 + 1];
     setViewState(prev => {
       if (!prev) return prev;
       return parsed.geoReferenced

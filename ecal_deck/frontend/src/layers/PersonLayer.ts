@@ -44,8 +44,8 @@ export function buildAgentLayer(
 
     for (let j = 0; j < M; j++) {
       const i = indices[j];
-      positions[j * 3]     = snapshot.agent_positions[i * 2];
-      positions[j * 3 + 1] = snapshot.agent_positions[i * 2 + 1];
+      positions[j * 3]     = snapshot.agent_positions[i * 3];
+      positions[j * 3 + 1] = snapshot.agent_positions[i * 3 + 1];
       // positions[j * 3 + 2] = 0 (default)
       orientations[j * 3 + 1] = -snapshot.agent_angles[i];
       scales[j * 3]     = size;

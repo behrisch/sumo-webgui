@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SimBin, EdgeBin, VehicleTypeDict, TLSUpdate, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
+import { SimStepBin, VehicleTypeDict, TLSUpdate, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
 
 const RECONNECT_DELAY_MS = 500;
 
@@ -7,8 +7,7 @@ const RECONNECT_DELAY_MS = 500;
 const TYPE_TLS         = 2;
 const TYPE_LOG         = 4;
 const TYPE_NETWORK     = 5;
-const TYPE_SIMBIN      = 6;
-const TYPE_EDGEBIN     = 7;
+const TYPE_SIMSTEP     = 6;
 const TYPE_VEHICLETYPES = 8;
 
 export interface SimControlState {
@@ -32,14 +31,14 @@ export interface VehicleTypeTable {
 export interface VehicleSnapshot {
   time_ms: number;
   veh_count: number;
-  veh_positions: Float64Array;    // N×2
+  veh_positions: Float64Array;    // N×3 (x,y,z=0)
   veh_angles: Float32Array;       // N
   veh_speeds: Float32Array;       // N
   veh_attr_vals: Float32Array[];  // K_v separate arrays of N floats each (column-major unpacked)
   vehicle_ids: string[];          // N
   veh_type_indices: Uint32Array;  // N
   agent_count: number;
-  agent_positions: Float64Array;  // A×2
+  agent_positions: Float64Array;  // A×3 (x,y,z=0)
   agent_angles: Float32Array;     // A
   agent_ids: string[];            // A
   agent_type_indices: Uint32Array; // A
@@ -214,9 +213,9 @@ export function useSimSocket(url: string): SimState {
             setVehicleTypeTable(table);
             break;
           }
-          case TYPE_SIMBIN: {
-            // Decode SimBin, build VehicleSnapshot
-            const sb = SimBin.decode(payload);
+          case TYPE_SIMSTEP: {
+            // Decode SimStepBin, build VehicleSnapshot and (if present) update edge attr state.
+            const sb = SimStepBin.decode(payload);
             const N  = sb.veh_count;
             const A  = sb.agent_count;
             const K_v = sb.veh_attr_count;
@@ -248,51 +247,43 @@ export function useSimSocket(url: string): SimState {
             const seq = sb.seq_num;
             const skipped = prevSeqNumRef.current !== null ? Math.max(0, seq - prevSeqNumRef.current - 1) : 0;
             prevSeqNumRef.current = seq;
-            performance.mark('simbin-seq', { detail: { skipped } });
-            break;
-          }
-          case TYPE_EDGEBIN: {
-            // Decode EdgeBin, update edgeAttrRef
-            const eb = EdgeBin.decode(payload);
+            performance.mark('simstep-seq', { detail: { skipped } });
+
+            // --- edge section (if present) ---
+            const K_e    = sb.edge_attr_count;
+            const N_recv = sb.edge_count;
             const N_edges = networkRef.current?.edge_ids.length ?? 0;
-            if (N_edges === 0) break;
+            if (K_e > 0 && N_edges > 0 && (sb.edge_full_snapshot || N_recv > 0)) {
+              const attrNames = (attrConfigRef.current?.edge_enabled ?? []).slice(0, K_e);
+              const prev = edgeAttrRef.current;
+              const needReset = sb.edge_full_snapshot || prev === null || prev.values.length !== K_e;
 
-            const K_e       = eb.attr_count;
-            const N_recv    = eb.edge_count;
-            const attrNames = (attrConfigRef.current?.edge_enabled ?? []).slice(0, K_e);
+              let state: EdgeAttrState;
+              if (needReset) {
+                const values: Float32Array[] = [];
+                for (let k = 0; k < K_e; k++) {
+                  const arr = new Float32Array(N_edges);
+                  arr.fill(NaN);
+                  values.push(arr);
+                }
+                state = { attrNames, values };
+              } else {
+                state = { ...prev!, attrNames };
+              }
 
-            // Determine if we need to create/reset the state
-            const prev = edgeAttrRef.current;
-            const needReset = eb.full_snapshot || prev === null || prev.values.length !== K_e;
-
-            let state: EdgeAttrState;
-            if (needReset) {
-              const values: Float32Array[] = [];
+              const edgeIndices = toUint32(sb.edge_indices);
               for (let k = 0; k < K_e; k++) {
-                const arr = new Float32Array(N_edges);
-                arr.fill(NaN);
-                values.push(arr);
+                const colBytes = sb.edge_attr_vals.subarray(k * N_recv * 4, (k + 1) * N_recv * 4);
+                const colVals  = toFloat32(colBytes);
+                const targetArr = state.values[k];
+                for (let j = 0; j < N_recv; j++) {
+                  targetArr[edgeIndices[j]] = colVals[j];
+                }
               }
-              state = { attrNames, values };
-            } else {
-              state = prev!;
-              // Update attrNames in case they changed
-              state = { ...state, attrNames };
-            }
 
-            // Parse edge_indices and attr_vals
-            const edgeIndices = toUint32(eb.edge_indices);
-            for (let k = 0; k < K_e; k++) {
-              const colBytes = eb.attr_vals.subarray(k * N_recv * 4, (k + 1) * N_recv * 4);
-              const colVals  = toFloat32(colBytes);
-              const targetArr = state.values[k];
-              for (let j = 0; j < N_recv; j++) {
-                targetArr[edgeIndices[j]] = colVals[j];
-              }
+              edgeAttrRef.current  = state;
+              edgeDataDirty.current = true;
             }
-
-            edgeAttrRef.current  = state;
-            edgeDataDirty.current = true;
             break;
           }
           case TYPE_TLS:
