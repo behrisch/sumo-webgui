@@ -541,6 +541,18 @@ above subsume the perf benefit Tauri would deliver. See `TAURI.md` for the
 packaging rationale and integration plan, which remains scheduled for after
 the web frontend is feature-complete.
 
+#### `--benchmark --autotune` combo flag
+
+Right now `--benchmark` hard-disables autotune (it measures interval=1 max
+throughput) and `--benchmark-full` enables autotune but waits for a browser
+frontend. Headless autotune benchmarking (e.g. to isolate publisher cost
+from browser-induced CPU contention, as in the 2026-05-26 investigation)
+requires a wrapper that monkey-patches `ctrl["autotune"] = True` after the
+`--benchmark` setup, which is awkward and easy to forget. A small `--autotune`
+flag that can stack with `--benchmark` would make this a first-class
+benchmark mode and eliminate the wrapper. Low priority; document the
+wrapper recipe in BENCHMARKING.md until it's needed.
+
 #### NetworkGeometry extensions
 
 The binary network cache (`NetworkGeometry`) is missing several visual elements.

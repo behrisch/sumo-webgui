@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface PerfStats {
   msgPerSec: number;      // WebSocket messages received per second
@@ -136,7 +136,7 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
     };
   }, []);
 
-  const resetCumulative = () => {
+  const resetCumulative = useCallback(() => {
     cumFrameTotal.current = cumFrameCount.current = 0;
     cumSkipCount.current = cumSeqRecv.current = 0;
     cumParseTotal.current      = cumParseCount.current      = 0;
@@ -145,7 +145,7 @@ export function usePerfStats(): PerfStats & { resetCumulative: () => void } {
     cumEdgeBuildTotal.current  = cumEdgeBuildCount.current  = 0;
     cumLayersTotal.current     = cumLayersCount.current     = 0;
     cumDeckRenderTotal.current = cumDeckRenderCount.current = 0;
-  };
+  }, []);
 
   return { ...stats, resetCumulative };
 }

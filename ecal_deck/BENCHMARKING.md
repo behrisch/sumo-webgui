@@ -152,6 +152,48 @@ Frontend:
 If the frontend is not connected when the simulation ends, the publisher prints
 `Frontend: no stats received (bridge/frontend not connected)` and exits.
 
+### Enabling verbose instrumentation
+
+The publisher and frontend keep their detailed per-step / per-frame counters
+*collecting* all the time (they feed `--benchmark-full`), but the verbose
+**display** of them is off by default to keep production logs and UI quiet.
+Turn them on when investigating performance:
+
+- **Publisher 5 s report log** (`steps/s`, `ms/step`, `interval [binding]`,
+  frontend `frame_ms`, `sim`/`native` µs, C++ `getStats` breakdown):
+
+  ```bash
+  python sumo_ecal_publisher.py --verbose-perf --sumo-cfg …
+  ```
+
+  Always on automatically in `--benchmark` and `--benchmark-full` modes.
+
+- **Frontend per-frame stats panel** (`msg/s`, `frame ms`, `parse`,
+  `veh-build`, `skip %`): open the UI with `?perf=1` in the URL, e.g.
+  `http://localhost:5173/?perf=1`.
+
+### Environment requirements
+
+- **`eclipse-sumo >= 1.27.0`**. Version 1.26.0 segfaults inside
+  `simulation.start()` on the doe scenario (faulthandler trace points at
+  `libsumo/__init__.py:232`). Upgrading the pip-installed package
+  (`pip install -U eclipse-sumo`) fixes it. `requirements.txt` leaves
+  `libsumo` unpinned so a fresh install picks up the fix automatically.
+- `SUMO_HOME` must point at a matching SUMO checkout for the tools (e.g.
+  `sumolib`) that the publisher imports.
+
+### Headless autotune benchmarking (current capability gap)
+
+`--benchmark` hard-disables autotune by design (it's meant to measure
+publisher max throughput at interval=1). `--benchmark-full` enables
+autotune but requires a connected browser frontend. To measure the
+autotune-on path **without** a browser (the most informative isolation of
+the "browser CPU contention" question — see the 2026-05-26 findings
+below), the current workaround is a small wrapper script that imports
+`sumo_ecal_publisher.py` and sets `ctrl["autotune"] = True` after the
+`--benchmark` setup. A `--benchmark --autotune` combo flag would close
+this gap; see PLAN.md "Near-term" for the deferred follow-up.
+
 ### sumo-gui end-of-run stats
 
 sumo-gui (when built with `ENABLE_FOX=ON`) appends GUI-specific stats to the standard

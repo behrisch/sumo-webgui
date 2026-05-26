@@ -335,6 +335,11 @@ def parse_args():
     p.add_argument("--benchmark-full", action="store_true",
                    help="Full-stack benchmark: like --benchmark but also waits for bridge+frontend "
                         "and prints combined publisher+frontend stats. Requires --sumo-cfg.")
+    p.add_argument("--verbose-perf", action="store_true",
+                   help="Print the per-5s publisher performance report (steps/s, ms/step, "
+                        "interval, frontend frame_ms, sim/native µs, C++ getStats breakdown). "
+                        "Always on in --benchmark / --benchmark-full modes. Off by default to "
+                        "keep production logs quiet.")
     return p.parse_args()
 
 
@@ -429,6 +434,8 @@ def main():
         "network_ack_event":      None,   # set after each network publish; bridge acks when cache loaded
         "benchmark":              args.benchmark_full,  # sent to frontend via GetStateResponse → auto-start
         "benchmark_headless":     args.benchmark,       # publisher-only: skip network_ack and frontend waits
+        # Print the 5s perf report line. Always on in benchmark modes (benchmarks rely on it).
+        "verbose_perf":           args.verbose_perf or args.benchmark or args.benchmark_full,
         "frontend_stats":         None,   # set by report_frontend_stats service call from bridge
         "frontend_stats_event":   threading.Event(),
         # Rolling render-aware autotune inputs (smoothed EMA). 0 = no signal yet.
@@ -776,21 +783,22 @@ def main():
             if now - _t_report >= 5.0:
                 elapsed = now - _t_report
                 rate = steps_since / elapsed
-                # phase breakdown in us/step (averaged over the report window)
-                ns = max(steps_since, 1)
-                native_us = _t_native_us / ns
-                sim_us    = _t_sim_us / ns
-                native_breakdown = ""
-                if sim.get("use_native_ecal"):
-                    try:
-                        native_breakdown = "  " + _ecal_native.getStats(True)
-                    except Exception:
-                        pass
-                _log("INFO", "%.0f steps/s  (%.2f ms/step)  interval=%d [%s] frontend=%.1fms  | sim=%.0fus native=%.0fus%s" % (
-                    rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
-                    ctrl.get("interval_binding", "?"),
-                    ctrl.get("frontend_rolling_frame_ms", 0.0),
-                    sim_us, native_us, native_breakdown))
+                if ctrl.get("verbose_perf"):
+                    # phase breakdown in us/step (averaged over the report window)
+                    ns = max(steps_since, 1)
+                    native_us = _t_native_us / ns
+                    sim_us    = _t_sim_us / ns
+                    native_breakdown = ""
+                    if sim.get("use_native_ecal"):
+                        try:
+                            native_breakdown = "  " + _ecal_native.getStats(True)
+                        except Exception:
+                            pass
+                    _log("INFO", "%.0f steps/s  (%.2f ms/step)  interval=%d [%s] frontend=%.1fms  | sim=%.0fus native=%.0fus%s" % (
+                        rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
+                        ctrl.get("interval_binding", "?"),
+                        ctrl.get("frontend_rolling_frame_ms", 0.0),
+                        sim_us, native_us, native_breakdown))
                 steps_since = 0
                 _t_report   = now
                 total_sleep = 0

@@ -235,7 +235,7 @@ export default function App() {
   );
 
   const [viewState, setViewState] = useState<MapViewState | OrthographicViewState | null>(null);
-  useEffect(() => { setViewState(null); resetCumulative(); }, [network]);
+  useEffect(() => { setViewState(null); resetCumulative(); }, [network, resetCumulative]);
   const activeView = viewState ?? parsed?.initialViewState ?? null;
 
   const [paused, setPaused]     = useState(false);

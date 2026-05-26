@@ -194,20 +194,23 @@ export function ControlPanel(p: Props) {
         </span>
       </div>
 
-      {/* perf stats */}
-      <div style={{ borderTop: '1px solid #444', paddingTop: 4, opacity: 0.6, fontSize: 11, lineHeight: 1.6 }}>
-        <div>msg/s {p.perf.msgPerSec}  frame {p.perf.frameMs.toFixed(1)}ms</div>
-        <div>parse {p.perf.parseMs.toFixed(2)}ms  veh-build {p.perf.vehicleBuildMs.toFixed(2)}ms</div>
-        {p.perf.skipRate > 0 && <div>skip {(p.perf.skipRate * 100).toFixed(0)}%</div>}
-        {p.watchMs !== null && (
-          <div style={{ opacity: p.watchRunning ? 1 : 0.5 }}>
-            ⏱ {p.watchMs >= 3600000
-              ? new Date(p.watchMs).toISOString().slice(11, 19)
-              : (p.watchMs / 1000).toFixed(1) + ' s'}
-            {!p.watchRunning && ' (done)'}
-          </div>
-        )}
-      </div>
+      {/* perf stats (enable with ?perf=1 in the URL) */}
+      {typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('perf') && (
+        <div style={{ borderTop: '1px solid #444', paddingTop: 4, opacity: 0.6, fontSize: 11, lineHeight: 1.6 }}>
+          <div>msg/s {p.perf.msgPerSec}  frame {p.perf.frameMs.toFixed(1)}ms</div>
+          <div>parse {p.perf.parseMs.toFixed(2)}ms  veh-build {p.perf.vehicleBuildMs.toFixed(2)}ms</div>
+          {p.perf.skipRate > 0 && <div>skip {(p.perf.skipRate * 100).toFixed(0)}%</div>}
+        </div>
+      )}
+
+      {p.watchMs !== null && (
+        <div style={{ borderTop: '1px solid #444', paddingTop: 4, opacity: p.watchRunning ? 1 : 0.5, fontSize: 11, lineHeight: 1.6 }}>
+          ⏱ {p.watchMs >= 3600000
+            ? new Date(p.watchMs).toISOString().slice(11, 19)
+            : (p.watchMs / 1000).toFixed(1) + ' s'}
+          {!p.watchRunning && ' (done)'}
+        </div>
+      )}
 
       {p.attributeConfig && (
         <>
