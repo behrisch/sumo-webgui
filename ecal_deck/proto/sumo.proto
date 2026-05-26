@@ -104,6 +104,53 @@ message PolygonData {
   repeated string poi_image_url = 38; // "" when absent
 }
 
+// Stopping places (bus/train/container stops, charging stations, parking areas).
+// Each stop is resolved to a rectangle ring in world space by the publisher so
+// the frontend can hand it straight to SolidPolygonLayer without per-frame lane
+// lookups.
+message StoppingPlaceData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;
+
+  uint32          count       = 10;
+  bytes           kind        = 11; // u8[] LE — 1=busStop 2=trainStop 3=containerStop 4=chargingStation 5=parkingArea
+  bytes           xy_starts   = 12; // u32[] LE — cumulative vertex index, length count+1
+  bytes           xy          = 13; // f32[] LE — interleaved [x,y,...], ring vertices
+  bytes           rgba        = 14; // u8[] LE — 4 bytes per stop
+  bytes           label_xy    = 15; // f32[] LE — 2 floats per stop (mid-point for label/icon)
+  repeated string ids         = 16;
+  repeated string names       = 17; // human-readable `name` attr
+  repeated string lines       = 18; // bus/train lines (space-joined) — tooltip
+}
+
+// Detectors — E1 (point), E2 (lane segment), E3 (sets of entry/exit bars).
+message DetectorData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;
+
+  // E1 (point) detectors — rendered as short perpendicular bars.
+  uint32          e1_count = 10;
+  bytes           e1_xy    = 11; // f32[] LE — 2 floats per detector (midpoint)
+  bytes           e1_angle = 12; // f32[] LE — radians, perpendicular bar orientation
+  bytes           e1_rgba  = 13; // u8[] LE — 4 bytes per detector
+  repeated string e1_ids   = 14;
+
+  // E2 (lane segment) detectors — resolved rectangle rings, like stopping places.
+  uint32          e2_count    = 30;
+  bytes           e2_xy_starts = 31; // u32[] LE
+  bytes           e2_xy       = 32;  // f32[] LE
+  bytes           e2_rgba     = 33;  // u8[] LE
+  repeated string e2_ids      = 34;
+
+  // E3 entry/exit cross-sections — each rendered as an E1-style bar.
+  uint32          e3_bar_count     = 50;
+  bytes           e3_bar_xy        = 51; // f32[] LE
+  bytes           e3_bar_angle     = 52; // f32[] LE
+  bytes           e3_bar_rgba      = 53; // u8[] LE
+  bytes           e3_bar_kind      = 54; // u8[] LE — 0=entry 1=exit
+  repeated string e3_bar_parent_ids = 55; // parent E3 id per bar (for picking)
+}
+
 // ---------------------------------------------------------------------------
 // Service: sumo_control
 // ---------------------------------------------------------------------------

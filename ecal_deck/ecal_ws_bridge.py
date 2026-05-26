@@ -64,7 +64,8 @@ _TYPE_NETWORK       = 5
 _TYPE_SIMSTEP       = 6
 _TYPE_VEHICLETYPES  = 8
 _TYPE_POLYGONS      = 9
-# 10/11 reserved for stops/detectors (later commits)
+_TYPE_STOPS         = 10
+_TYPE_DETECTORS     = 11
 
 TOPICS = {
     "sumo/simstep":      _TYPE_SIMSTEP,
@@ -77,8 +78,8 @@ TOPICS = {
 # AdditionalsNotice.Family → binary type byte
 _ADDITIONALS_TYPE_BY_FAMILY = {
     sumo_pb2.AdditionalsNotice.POLYGONS:  _TYPE_POLYGONS,
-    # sumo_pb2.AdditionalsNotice.STOPS:     10,
-    # sumo_pb2.AdditionalsNotice.DETECTORS: 11,
+    sumo_pb2.AdditionalsNotice.STOPS:     _TYPE_STOPS,
+    sumo_pb2.AdditionalsNotice.DETECTORS: _TYPE_DETECTORS,
 }
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ _simstep_snapshot_frame: bytes | None = None    # cached type-6 full-snapshot fr
 _vehicletypes_frame: bytes | None = None        # cached type-8 frame for late joiners
 # Additional-file caches keyed by source_path so editing one file replaces only
 # its own entry; late joiners receive every cached frame on connect.
-_additionals_frames: dict[str, bytes] = {}
+_additionals_frames: dict[tuple[str, int], bytes] = {}  # (source_path, family) → cached frame
 _loop: asyncio.AbstractEventLoop | None = None
 _poller_task: asyncio.Task | None = None        # current _network_poller task
 
@@ -123,7 +124,7 @@ def _make_callback(topic: str, type_byte: int):
                           % (notice.cache_path, exc))
                     return
                 addl_frame = bytes([tb]) + payload
-                _additionals_frames[notice.source_path] = addl_frame
+                _additionals_frames[(notice.source_path, notice.family)] = addl_frame
                 if _loop is not None:
                     _loop.call_soon_threadsafe(_reliable_send_bytes, addl_frame)
                 return

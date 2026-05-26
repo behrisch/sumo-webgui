@@ -10,7 +10,9 @@ export type SelectedObject =
   | { type: 'junction';  id: string }
   | { type: 'tls';       id: string; tlIndex: number }
   | { type: 'polygon';   id: string; polyType?: string; filled?: boolean }
-  | { type: 'poi';       id: string; poiType?: string; imageUrl?: string };
+  | { type: 'poi';       id: string; poiType?: string; imageUrl?: string }
+  | { type: 'stop';      id: string; kind?: string; name?: string; lines?: string }
+  | { type: 'detector';  id: string; detKind: 'E1' | 'E2' | 'E3'; e3Subtype?: 'entry' | 'exit' };
 
 interface Props {
   selected: SelectedObject;
@@ -134,6 +136,7 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
     vehicle: 'Vehicle', person: 'Person', container: 'Container',
     edge: 'Edge', junction: 'Junction', tls: 'Signal',
     polygon: 'Polygon', poi: 'POI',
+    stop: 'Stop', detector: 'Detector',
   };
   const edgeSubtypeTitles: Record<string, string> = {
     internal: 'Internal lane', crossing: 'Crossing', walkingarea: 'Walking area',
@@ -178,6 +181,19 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {selected.poiType && row('type', selected.poiType)}
           {selected.imageUrl && row('image', selected.imageUrl)}
+        </div>
+      )}
+      {selected.type === 'stop' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {selected.kind && row('kind', selected.kind)}
+          {selected.name && row('name', selected.name)}
+          {selected.lines && row('lines', selected.lines)}
+        </div>
+      )}
+      {selected.type === 'detector' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {row('kind', selected.detKind)}
+          {selected.e3Subtype && row('side', selected.e3Subtype)}
         </div>
       )}
 

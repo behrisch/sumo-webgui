@@ -1676,7 +1676,31 @@ This order lets each step land independently with a working build and a
 demonstrable feature, and keeps the lane-resolution code (needed by 5 and 6
 but not 2) out of the first slice.
 
+#### Status (as of commits ff15802 → HEAD)
+
+- [x] **Step 1** — Cache-dir refactor (`__ecaldeck__/` + `.gitignore`,
+  version-in-filename, `_cache_path(source, family)` helper). Commit `ff15802`.
+- [x] **Step 2** — `PolygonData` + `AdditionalsNotice` proto, publisher
+  builder, CLI `--additional-file`. Commit `c135fc2`.
+- [x] **Step 3** — Bridge family→type-byte map; sentinel `-1` topic dispatch;
+  late-joiner replay. Commit `8bcb365`.
+- [x] **Step 4** — Frontend hook decode, `PolygonLayer.ts`, ControlPanel
+  toggles, InfoPanel polygon/POI rows. Commit `928c5c6`.
+- [x] **Steps 5 + 6** — `StoppingPlaceData` + `DetectorData` proto, builders
+  with shared lane-segment-rectangle / lane-point-and-angle helpers, bridge
+  types 10/11, `StoppingPlaceLayer.ts` + `DetectorLayer.ts`, ControlPanel
+  toggles (stops / detectors), InfoPanel rows. Cache version bumped to 8.
+- [x] **Step 7** — Real-world test scenario: doe's `gtfs_pt_stops.add.xml`
+  (~hundreds of bus stops) and `parkingAreas.add.xml` (~thousands of
+  parking-area entries) both classified and cached automatically; local
+  `test_polygons.add.xml` exercises polygon + POI + busStop + E1 + E2 in one
+  file. End-to-end verified: bridge emits type-9/10/11 frames; frontend
+  decodes + renders.
+
+Out-of-scope items below remain deferred.
+
 #### Out of scope (deferred)
+
 
 - Editing in the GUI (sumo-gui supports add/move/delete in design mode).
   Read-only is sufficient for now.

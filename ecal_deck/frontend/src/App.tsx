@@ -17,6 +17,10 @@ import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
 import { parsePolygonData, buildPolygonLayers, buildPOILayer } from './layers/PolygonLayer';
 import type { ParsedPolygonSource } from './layers/PolygonLayer';
+import { parseStoppingPlaceData, buildStoppingPlaceLayer, stopKindName } from './layers/StoppingPlaceLayer';
+import type { ParsedStops } from './layers/StoppingPlaceLayer';
+import { parseDetectorData, buildDetectorLayers } from './layers/DetectorLayer';
+import type { ParsedDetectors } from './layers/DetectorLayer';
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
 import { LogPane } from './components/LogPane';
@@ -236,7 +240,7 @@ function orthoViewportBounds(vs: OrthographicViewState): [number, number, number
 }
 
 export default function App() {
-  const { connected, reconnectAttempt, network, polygonData, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
+  const { connected, reconnectAttempt, network, polygonData, stoppingPlaceData, detectorData, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
           edgeAttr, edgeAttrVersion,
           logMessages, controlState, attributeConfig, staleSession, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const { resetCumulative, ...perf } = usePerfStats();
@@ -451,6 +455,7 @@ export default function App() {
   const [visibility, setVisibility] = useState<LayerVisibility>({
     edges: true, junctions: true, vehicles: true, persons: true, containers: true,
     tls: true, edgeData: true, basemap: true, polygons: true, pois: true,
+    stops: true, detectors: true,
   });
   const patchVisibility = (patch: Partial<LayerVisibility>) =>
     setVisibility((v) => ({ ...v, ...patch }));
@@ -558,6 +563,26 @@ export default function App() {
     [polygonSources],
   );
 
+  // Stopping places — one parsed object per additional file with stops.
+  const stoppingPlaceSources: ParsedStops[] = useMemo(
+    () => stoppingPlaceData.map(parseStoppingPlaceData),
+    [stoppingPlaceData],
+  );
+  const stoppingPlaceLayerResults = useMemo(
+    () => stoppingPlaceSources.map((s, i) => buildStoppingPlaceLayer(s, String(i))),
+    [stoppingPlaceSources],
+  );
+
+  // Detectors — one parsed object per additional file with detectors.
+  const detectorSources: ParsedDetectors[] = useMemo(
+    () => detectorData.map(parseDetectorData),
+    [detectorData],
+  );
+  const detectorLayerResults = useMemo(
+    () => detectorSources.map((s, i) => buildDetectorLayers(s, String(i))),
+    [detectorSources],
+  );
+
   // Helper: any layer whose pickable items map back to a global lane index can
   // share this logic. Returns the edge id, or undefined if the lane index is
   // out of range / lane has no edge.
@@ -641,10 +666,47 @@ export default function App() {
           imageUrl: source.pois.imageUrls[i] || undefined,
         });
       }
+    } else if (layerId?.startsWith('stops-')) {
+      const sourceIdx = Number(layerId.slice('stops-'.length));
+      const source = stoppingPlaceSources[sourceIdx];
+      if (source) {
+        const i = info.index;
+        setSelectedObject({
+          type: 'stop',
+          id: source.ids[i],
+          kind: stopKindName(source.kind[i]),
+          name: source.names[i] || undefined,
+          lines: source.lines[i] || undefined,
+        });
+      }
+    } else if (layerId?.startsWith('detectors-e1-')) {
+      const sourceIdx = Number(layerId.slice('detectors-e1-'.length));
+      const source = detectorSources[sourceIdx];
+      if (source) {
+        setSelectedObject({ type: 'detector', id: source.e1.ids[info.index] ?? '', detKind: 'E1' });
+      }
+    } else if (layerId?.startsWith('detectors-e2-')) {
+      const sourceIdx = Number(layerId.slice('detectors-e2-'.length));
+      const source = detectorSources[sourceIdx];
+      if (source) {
+        setSelectedObject({ type: 'detector', id: source.e2.ids[info.index] ?? '', detKind: 'E2' });
+      }
+    } else if (layerId?.startsWith('detectors-e3-')) {
+      const sourceIdx = Number(layerId.slice('detectors-e3-'.length));
+      const source = detectorSources[sourceIdx];
+      if (source) {
+        const i = info.index;
+        setSelectedObject({
+          type: 'detector',
+          id: source.e3.parentIds[i] ?? '',
+          detKind: 'E3',
+          e3Subtype: source.e3.kind[i] === 1 ? 'exit' : 'entry',
+        });
+      }
     } else {
       setSelectedObject(null);
     }
-  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources]);
+  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources, stoppingPlaceSources, detectorSources]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
@@ -683,6 +745,17 @@ export default function App() {
     if (crossingLayer) result.push(crossingLayer.clone({ visible: visibility.edges }));
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
+    // Stopping places — above road network so they're clearly visible, but
+    // below vehicles so vehicles parked in them remain on top.
+    for (const r of stoppingPlaceLayerResults) {
+      if (!r) continue;
+      result.push(r.layer.clone({ visible: visibility.stops }));
+    }
+    // Detectors — render above stops and edges so the small bars stay visible.
+    for (const r of detectorLayerResults) {
+      if (!r) continue;
+      for (const dl of r.layers) result.push(dl.clone({ visible: visibility.detectors }));
+    }
     if (visibility.vehicles) {
       const colorAttrIdx = vehicleColorAttr === 'speed'
         ? -1
@@ -707,7 +780,7 @@ export default function App() {
     performance.mark('layers-build-end');
     performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, polygonLayerResults, poiLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, polygonLayerResults, poiLayerResults, stoppingPlaceLayerResults, detectorLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (

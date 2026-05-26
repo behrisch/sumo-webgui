@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SimStepBin, VehicleTypeDict, LogMessage, NetworkGeometry, PolygonData, GetAttributesResponse } from '../generated/sumo';
+import { SimStepBin, VehicleTypeDict, LogMessage, NetworkGeometry, PolygonData, StoppingPlaceData, DetectorData, GetAttributesResponse } from '../generated/sumo';
 
 const RECONNECT_INITIAL_MS = 100;
 const RECONNECT_MAX_MS = 2000;
@@ -10,6 +10,8 @@ const TYPE_NETWORK      = 5;
 const TYPE_SIMSTEP      = 6;
 const TYPE_VEHICLETYPES = 8;
 const TYPE_POLYGONS     = 9;
+const TYPE_STOPS        = 10;
+const TYPE_DETECTORS    = 11;
 
 // TLS state is folded into SimStepBin (formerly a separate TLSUpdate message).
 // We keep the same {id, state} shape for layer/InfoPanel consumers.
@@ -60,6 +62,8 @@ export interface SimState {
   reconnectAttempt: number;
   network: NetworkGeometry | null;
   polygonData: PolygonData[];
+  stoppingPlaceData: StoppingPlaceData[];
+  detectorData: DetectorData[];
   vehicleSnapshot: VehicleSnapshot | null;
   vehicleTypeTable: VehicleTypeTable | null;
   edgeAttr: EdgeAttrState | null;
@@ -116,6 +120,8 @@ export function useSimSocket(url: string): SimState {
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [network, setNetwork]                 = useState<NetworkGeometry | null>(null);
   const [polygonData, setPolygonData]         = useState<PolygonData[]>([]);
+  const [stoppingPlaceData, setStoppingPlaceData] = useState<StoppingPlaceData[]>([]);
+  const [detectorData, setDetectorData]       = useState<DetectorData[]>([]);
   const [vehicleSnapshot, setVehicleSnapshot] = useState<VehicleSnapshot | null>(null);
   const [vehicleTypeTable, setVehicleTypeTable] = useState<VehicleTypeTable | null>(null);
   const [tlsUpdate, setTlsUpdate]             = useState<TLSUpdate | null>(null);
@@ -340,15 +346,24 @@ export function useSimSocket(url: string): SimState {
             setVehicleSnapshot(null);
             setVehicleTypeTable(null);
             setPolygonData([]);
+            setStoppingPlaceData([]);
+            setDetectorData([]);
             setNetwork(ng);
             break;
           }
           case TYPE_POLYGONS: {
             const pd = PolygonData.decode(payload);
-            // Multiple polygon files → one frame each; append, dedup is not
-            // needed because the bridge keys its cache by source_path and only
-            // emits one frame per source between loads.
             setPolygonData(prev => [...prev, pd]);
+            break;
+          }
+          case TYPE_STOPS: {
+            const sd = StoppingPlaceData.decode(payload);
+            setStoppingPlaceData(prev => [...prev, sd]);
+            break;
+          }
+          case TYPE_DETECTORS: {
+            const dd = DetectorData.decode(payload);
+            setDetectorData(prev => [...prev, dd]);
             break;
           }
         }
@@ -440,7 +455,7 @@ export function useSimSocket(url: string): SimState {
   }, [url]);
 
   return {
-    connected, reconnectAttempt, network, polygonData,
+    connected, reconnectAttempt, network, polygonData, stoppingPlaceData, detectorData,
     vehicleSnapshot, vehicleTypeTable,
     edgeAttr: edgeAttrRef.current, edgeAttrVersion,
     tlsUpdate, logMessages, controlState,

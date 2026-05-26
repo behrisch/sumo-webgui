@@ -78,7 +78,7 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 7  # increment on any incompatible cache format change (network or additionals)
+_CACHE_VERSION = 8  # increment on any incompatible cache format change (network or additionals)
 
 
 def _cache_path(source_file: str, family: str) -> str:
@@ -539,6 +539,381 @@ def _build_polygon_binary(xml_path: str, net) -> str | None:
         f.write(pd.SerializeToString())
     print("Wrote polygon cache: %s (%d polys, %d POIs)"
           % (cache_path, poly_count, poi_count))
+    return cache_path
+
+
+# ---------------------------------------------------------------------------
+# Stopping places / Detectors — both need lane-anchored geometry resolved at
+# build time so the frontend doesn't need access to the lane graph.
+# ---------------------------------------------------------------------------
+
+_STOP_TAGS = {
+    'busStop':         (1, (50, 200, 220, 220)),     # cyan
+    'trainStop':       (2, (110, 160, 220, 220)),    # blue-ish
+    'containerStop':   (3, (220, 160,  80, 220)),    # orange
+    'chargingStation': (4, ( 80, 220, 120, 220)),    # green
+    'parkingArea':     (5, (200, 200, 200, 220)),    # light grey
+}
+
+_E1_TAGS = ('inductionLoop', 'e1Detector')
+_E2_TAGS = ('laneAreaDetector', 'e2Detector')
+_E3_TAGS = ('entryExitDetector', 'e3Detector')
+
+
+def _parse_color_tuple(s: str | None, default):
+    if not s:
+        return default
+    parts = s.split(',')
+    try:
+        r = int(round(float(parts[0])))
+        g = int(round(float(parts[1])))
+        b = int(round(float(parts[2])))
+        a = int(round(float(parts[3]))) if len(parts) > 3 else 255
+        return (max(0, min(255, r)), max(0, min(255, g)),
+                max(0, min(255, b)), max(0, min(255, a)))
+    except (ValueError, IndexError):
+        return default
+
+
+def _lane_segment_rectangle(lane, start_pos: float, end_pos: float, half_width: float):
+    """Walk the lane shape between start_pos..end_pos (positions along the lane,
+    metres from the lane start) and return a closed 4-point rectangle ring
+    [(x,y), ...] in lane-local XY. The ring is built from two parallel offset
+    paths and is suitable for a SolidPolygonLayer with _normalize=true.
+
+    Returns None when the segment is degenerate.
+    """
+    shape = lane.getShape()
+    if not shape or len(shape) < 2:
+        return None
+    L = lane.getLength()
+    if L <= 0:
+        return None
+    sp = max(0.0, min(L, start_pos))
+    ep = max(0.0, min(L, end_pos))
+    if ep <= sp:
+        ep = min(L, sp + 0.5)  # clamp degenerate stops to a minimum length
+    # Walk along the shape collecting points + tangent vectors.
+    pts = []
+    acc = 0.0
+    for i in range(len(shape) - 1):
+        x1, y1 = shape[i][0], shape[i][1]
+        x2, y2 = shape[i + 1][0], shape[i + 1][1]
+        dx, dy = x2 - x1, y2 - y1
+        seg = (dx * dx + dy * dy) ** 0.5
+        if seg <= 0:
+            continue
+        seg_start = acc
+        seg_end   = acc + seg
+        # Skip segments fully outside [sp, ep].
+        if seg_end < sp:
+            acc = seg_end; continue
+        if seg_start > ep:
+            break
+        ux, uy = dx / seg, dy / seg
+        local_s = max(sp - seg_start, 0.0)
+        local_e = min(ep - seg_start, seg)
+        if local_s > 0 and not pts:
+            pts.append((x1 + ux * local_s, y1 + uy * local_s, ux, uy))
+        elif not pts:
+            pts.append((x1, y1, ux, uy))
+        # Always end the segment at local_e (or carry into next segment).
+        if local_e < seg:
+            pts.append((x1 + ux * local_e, y1 + uy * local_e, ux, uy))
+            break
+        else:
+            pts.append((x2, y2, ux, uy))
+        acc = seg_end
+    if len(pts) < 2:
+        return None
+    # Build the rectangle ring from the centreline offset by ±half_width along
+    # the perpendicular (-uy, ux).
+    left  = [(x - uy * half_width, y + ux * half_width) for (x, y, ux, uy) in pts]
+    right = [(x + uy * half_width, y - ux * half_width) for (x, y, ux, uy) in pts]
+    ring = left + right[::-1]
+    return ring
+
+
+def _build_stops_binary(xml_path: str, net) -> str | None:
+    """Pack every stopping-place element found in `xml_path` into a
+    StoppingPlaceData binary cache. Returns the cache path or None.
+    """
+    if net is None:
+        return None
+    geo_ref = net.hasGeoProj()
+
+    def _to_world(x: float, y: float) -> tuple[float, float]:
+        if geo_ref:
+            lon, lat = net.convertXY2LonLat(x, y)
+            return lon, lat
+        return x, y
+
+    kinds      = _array.array('B')
+    xy_starts  = _array.array('I', [0])
+    xy         = _array.array('f')
+    rgba       = _array.array('B')
+    label_xy   = _array.array('f')
+    ids:    list[str] = []
+    names:  list[str] = []
+    lines:  list[str] = []
+
+    try:
+        for _evt, el in ET.iterparse(xml_path, events=('end',)):
+            if el.tag not in _STOP_TAGS:
+                # Free memory for the unrelated elements we skip.
+                if el.tag in ('poly', 'poi') or el.tag in _E1_TAGS or el.tag in _E2_TAGS or el.tag in _E3_TAGS:
+                    el.clear()
+                continue
+            kind_num, default_color = _STOP_TAGS[el.tag]
+            lane_id = el.get('lane')
+            if not lane_id:
+                el.clear(); continue
+            try:
+                lane = net.getLane(lane_id)
+            except Exception:
+                print("Warning: stop %s references unknown lane %s" % (el.get('id'), lane_id))
+                el.clear(); continue
+            try:
+                start_pos = float(el.get('startPos') or '0')
+                end_pos   = float(el.get('endPos')   or str(lane.getLength()))
+            except ValueError:
+                el.clear(); continue
+            # Parking areas can be wider than the lane (roadsideCapacity); cap
+            # at ~3 m so they remain readable but distinguishable from lanes.
+            half_w = max(0.6, lane.getWidth() * 0.5)
+            if el.tag == 'parkingArea':
+                half_w = max(half_w, 2.0)
+            ring = _lane_segment_rectangle(lane, start_pos, end_pos, half_w)
+            if not ring:
+                el.clear(); continue
+
+            kinds.append(kind_num)
+            for (x, y) in ring:
+                wx, wy = _to_world(x, y)
+                xy.append(wx); xy.append(wy)
+            xy_starts.append(len(xy) // 2)
+            rgba.extend(_parse_color_tuple(el.get('color'), default_color))
+            # Mid-point along the segment for label placement.
+            try:
+                mid_pos = 0.5 * (start_pos + end_pos)
+                mx, my = lane.getShape() and (lane.getShape()[0][0], lane.getShape()[0][1]) or (0.0, 0.0)
+                # Use sumolib helper if available; fall back to first ring point.
+                if hasattr(lane, 'interpolate'):
+                    mx, my = lane.interpolate(mid_pos)
+            except Exception:
+                # Fallback: midpoint of ring's left side.
+                hp = ring[len(ring) // 4]
+                mx, my = hp[0], hp[1]
+            wx, wy = _to_world(mx, my)
+            label_xy.append(wx); label_xy.append(wy)
+            ids.append(el.get('id') or '')
+            names.append(el.get('name') or '')
+            lines.append(el.get('lines') or '')
+            el.clear()
+    except (OSError, ET.ParseError) as exc:
+        print("Warning: failed to parse stop source %s: %s" % (xml_path, exc))
+        return None
+
+    count = len(ids)
+    if count == 0:
+        return None
+
+    sd = sumo_pb2.StoppingPlaceData(
+        version=_CACHE_VERSION,
+        geo_referenced=geo_ref,
+        count=count,
+        kind=kinds.tobytes(),
+        xy_starts=xy_starts.tobytes(),
+        xy=xy.tobytes(),
+        rgba=rgba.tobytes(),
+        label_xy=label_xy.tobytes(),
+        ids=ids, names=names, lines=lines,
+    )
+    cache_path = _cache_path(xml_path, 'stops')
+    with open(cache_path, 'wb') as f:
+        f.write(sd.SerializeToString())
+    print("Wrote stops cache: %s (%d stops)" % (cache_path, count))
+    return cache_path
+
+
+def _build_detectors_binary(xml_path: str, net) -> str | None:
+    """Pack every detector (E1/E2/E3) found in `xml_path` into a DetectorData
+    binary cache. Returns the cache path or None.
+    """
+    if net is None:
+        return None
+    geo_ref = net.hasGeoProj()
+
+    def _to_world(x: float, y: float) -> tuple[float, float]:
+        if geo_ref:
+            lon, lat = net.convertXY2LonLat(x, y)
+            return lon, lat
+        return x, y
+
+    def _lane_point_and_angle(lane, pos: float) -> tuple[float, float, float] | None:
+        """Return (x, y, angle_rad) at `pos` metres along `lane`."""
+        shape = lane.getShape()
+        if not shape or len(shape) < 2:
+            return None
+        L = lane.getLength()
+        p = max(0.0, min(L, pos))
+        acc = 0.0
+        for i in range(len(shape) - 1):
+            x1, y1 = shape[i][0], shape[i][1]
+            x2, y2 = shape[i + 1][0], shape[i + 1][1]
+            dx, dy = x2 - x1, y2 - y1
+            seg = (dx * dx + dy * dy) ** 0.5
+            if seg <= 0: continue
+            if acc + seg >= p:
+                t = (p - acc) / seg
+                return (x1 + dx * t, y1 + dy * t, math.atan2(dy, dx))
+            acc += seg
+        # Past end → use last segment direction at lane end.
+        x1, y1 = shape[-2][0], shape[-2][1]
+        x2, y2 = shape[-1][0], shape[-1][1]
+        return (x2, y2, math.atan2(y2 - y1, x2 - x1))
+
+    # E1
+    e1_xy    = _array.array('f')
+    e1_angle = _array.array('f')
+    e1_rgba  = _array.array('B')
+    e1_ids: list[str] = []
+    # E2
+    e2_starts = _array.array('I', [0])
+    e2_xy     = _array.array('f')
+    e2_rgba   = _array.array('B')
+    e2_ids:   list[str] = []
+    # E3
+    e3_xy     = _array.array('f')
+    e3_angle  = _array.array('f')
+    e3_rgba   = _array.array('B')
+    e3_kind   = _array.array('B')
+    e3_parent: list[str] = []
+
+    DEFAULT_E1 = (240, 220, 80, 235)
+    DEFAULT_E2 = (240, 160, 60, 200)
+    DEFAULT_E3_ENTRY = (120, 220, 120, 235)
+    DEFAULT_E3_EXIT  = (220, 120, 120, 235)
+
+    try:
+        for _evt, el in ET.iterparse(xml_path, events=('end',)):
+            tag = el.tag
+            if tag in _E1_TAGS:
+                lane_id = el.get('lane')
+                if not lane_id:
+                    el.clear(); continue
+                try:
+                    lane = net.getLane(lane_id)
+                except Exception:
+                    el.clear(); continue
+                try:
+                    pos = float(el.get('pos') or '0')
+                except ValueError:
+                    el.clear(); continue
+                pa = _lane_point_and_angle(lane, pos)
+                if pa is None:
+                    el.clear(); continue
+                x, y, ang = pa
+                wx, wy = _to_world(x, y)
+                e1_xy.append(wx); e1_xy.append(wy)
+                e1_angle.append(ang)
+                e1_rgba.extend(_parse_color_tuple(el.get('color'), DEFAULT_E1))
+                e1_ids.append(el.get('id') or '')
+                el.clear()
+            elif tag in _E2_TAGS:
+                lane_id = el.get('lane')
+                if not lane_id:
+                    el.clear(); continue
+                try:
+                    lane = net.getLane(lane_id)
+                except Exception:
+                    el.clear(); continue
+                try:
+                    pos    = float(el.get('pos')    or '0')
+                    length = float(el.get('length') or '0')
+                except ValueError:
+                    el.clear(); continue
+                end_pos = pos + length if length > 0 else lane.getLength()
+                half_w = max(0.5, lane.getWidth() * 0.5)
+                ring = _lane_segment_rectangle(lane, pos, end_pos, half_w)
+                if not ring:
+                    el.clear(); continue
+                for (x, y) in ring:
+                    wx, wy = _to_world(x, y)
+                    e2_xy.append(wx); e2_xy.append(wy)
+                e2_starts.append(len(e2_xy) // 2)
+                e2_rgba.extend(_parse_color_tuple(el.get('color'), DEFAULT_E2))
+                e2_ids.append(el.get('id') or '')
+                el.clear()
+            elif tag in _E3_TAGS:
+                parent_id = el.get('id') or ''
+                for child in el:
+                    ctag = child.tag
+                    if ctag not in ('detEntry', 'detExit'):
+                        continue
+                    lane_id = child.get('lane')
+                    if not lane_id:
+                        continue
+                    try:
+                        lane = net.getLane(lane_id)
+                    except Exception:
+                        continue
+                    try:
+                        pos = float(child.get('pos') or '0')
+                    except ValueError:
+                        continue
+                    pa = _lane_point_and_angle(lane, pos)
+                    if pa is None:
+                        continue
+                    x, y, ang = pa
+                    wx, wy = _to_world(x, y)
+                    e3_xy.append(wx); e3_xy.append(wy)
+                    e3_angle.append(ang)
+                    is_exit = (ctag == 'detExit')
+                    e3_kind.append(1 if is_exit else 0)
+                    e3_rgba.extend(_parse_color_tuple(
+                        el.get('color'),
+                        DEFAULT_E3_EXIT if is_exit else DEFAULT_E3_ENTRY,
+                    ))
+                    e3_parent.append(parent_id)
+                el.clear()
+            elif tag in ('poly', 'poi') or tag in _STOP_TAGS:
+                el.clear()
+    except (OSError, ET.ParseError) as exc:
+        print("Warning: failed to parse detector source %s: %s" % (xml_path, exc))
+        return None
+
+    e1_count = len(e1_ids)
+    e2_count = len(e2_ids)
+    e3_count = len(e3_parent)
+    if e1_count == 0 and e2_count == 0 and e3_count == 0:
+        return None
+
+    dd = sumo_pb2.DetectorData(
+        version=_CACHE_VERSION,
+        geo_referenced=geo_ref,
+        e1_count=e1_count,
+        e1_xy=e1_xy.tobytes(),
+        e1_angle=e1_angle.tobytes(),
+        e1_rgba=e1_rgba.tobytes(),
+        e1_ids=e1_ids,
+        e2_count=e2_count,
+        e2_xy_starts=e2_starts.tobytes(),
+        e2_xy=e2_xy.tobytes(),
+        e2_rgba=e2_rgba.tobytes(),
+        e2_ids=e2_ids,
+        e3_bar_count=e3_count,
+        e3_bar_xy=e3_xy.tobytes(),
+        e3_bar_angle=e3_angle.tobytes(),
+        e3_bar_rgba=e3_rgba.tobytes(),
+        e3_bar_kind=e3_kind.tobytes(),
+        e3_bar_parent_ids=e3_parent,
+    )
+    cache_path = _cache_path(xml_path, 'det')
+    with open(cache_path, 'wb') as f:
+        f.write(dd.SerializeToString())
+    print("Wrote detector cache: %s (E1=%d E2=%d E3-bars=%d)"
+          % (cache_path, e1_count, e2_count, e3_count))
     return cache_path
 
 
@@ -1172,39 +1547,51 @@ def main():
 
                 for src in add_files:
                     families = _classify_additional_file(src)
-                    if 'polygons' not in families:
-                        continue
-                    poly_cache = _cache_path(src, 'poly')
                     geo_ref_flag = ng.geo_referenced
-                    needs_build = True
-                    try:
-                        if os.path.getmtime(poly_cache) >= os.path.getmtime(src):
-                            needs_build = False
-                            print("Using cached polygon binary: %s" % poly_cache)
-                    except OSError:
-                        pass
-                    if needs_build:
-                        built = _build_polygon_binary(src, _get_net())
-                        if built is None:
+
+                    # Each (file, family) → at most one notice. Family tuple:
+                    # (family-key in `families` set, cache-tag, builder-fn,
+                    #  proto Family enum).
+                    family_specs = [
+                        ('polygons',  'poly',  _build_polygon_binary,
+                         sumo_pb2.AdditionalsNotice.POLYGONS),
+                        ('stops',     'stops', _build_stops_binary,
+                         sumo_pb2.AdditionalsNotice.STOPS),
+                        ('detectors', 'det',   _build_detectors_binary,
+                         sumo_pb2.AdditionalsNotice.DETECTORS),
+                    ]
+
+                    for fam_key, tag, builder, family_enum in family_specs:
+                        if fam_key not in families:
                             continue
-                        poly_cache = built
-                    notice = sumo_pb2.AdditionalsNotice(
-                        source_path=src,
-                        cache_path=poly_cache,
-                        family=sumo_pb2.AdditionalsNotice.POLYGONS,
-                        geo_referenced=geo_ref_flag,
-                    ).SerializeToString()
-                    pub_additionals.send(notice)
-                    # Re-send like network if no subscriber yet — bridge may not
-                    # have discovered us during this load's tight window.
-                    if pub_additionals.get_subscriber_count() == 0:
-                        def _resend(payload=notice):
-                            for _ in range(60):
-                                time.sleep(1.0)
-                                if pub_additionals.get_subscriber_count() > 0:
-                                    pub_additionals.send(payload)
-                                    break
-                        threading.Thread(target=_resend, daemon=True).start()
+                        cache = _cache_path(src, tag)
+                        needs_build = True
+                        try:
+                            if os.path.getmtime(cache) >= os.path.getmtime(src):
+                                needs_build = False
+                                print("Using cached %s binary: %s" % (tag, cache))
+                        except OSError:
+                            pass
+                        if needs_build:
+                            built = builder(src, _get_net())
+                            if built is None:
+                                continue
+                            cache = built
+                        notice = sumo_pb2.AdditionalsNotice(
+                            source_path=src,
+                            cache_path=cache,
+                            family=family_enum,
+                            geo_referenced=geo_ref_flag,
+                        ).SerializeToString()
+                        pub_additionals.send(notice)
+                        if pub_additionals.get_subscriber_count() == 0:
+                            def _resend(payload=notice):
+                                for _ in range(60):
+                                    time.sleep(1.0)
+                                    if pub_additionals.get_subscriber_count() > 0:
+                                        pub_additionals.send(payload)
+                                        break
+                            threading.Thread(target=_resend, daemon=True).start()
             except Exception as exc:
                 print("ERROR building/publishing additionals: %s" % exc)
                 traceback.print_exc()
