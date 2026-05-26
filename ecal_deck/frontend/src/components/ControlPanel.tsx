@@ -12,6 +12,8 @@ export interface LayerVisibility {
   tls: boolean;
   edgeData: boolean;
   basemap: boolean;
+  polygons: boolean;
+  pois: boolean;
 }
 
 interface Props {
@@ -129,6 +131,8 @@ export function ControlPanel(p: Props) {
           ['containers', 'Containers'],
           ['tls',        'Traffic lights'],
           ...(p.edgeKeys.length ? [['edgeData', 'Edge data']] : []),
+          ['polygons',   'Polygons'],
+          ['pois',       'POIs'],
         ] as [keyof LayerVisibility, string][]).map(([key, label]) => (
           <label key={key} style={{ ...row, cursor: 'pointer' }}>
             <input type="checkbox" checked={p.visibility[key]}

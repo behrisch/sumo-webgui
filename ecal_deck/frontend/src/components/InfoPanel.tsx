@@ -8,7 +8,9 @@ export type SelectedObject =
   | { type: 'container'; id: string }
   | { type: 'edge';      id: string; subtype?: 'internal' | 'crossing' | 'walkingarea' }
   | { type: 'junction';  id: string }
-  | { type: 'tls';       id: string; tlIndex: number };
+  | { type: 'tls';       id: string; tlIndex: number }
+  | { type: 'polygon';   id: string; polyType?: string; filled?: boolean }
+  | { type: 'poi';       id: string; poiType?: string; imageUrl?: string };
 
 interface Props {
   selected: SelectedObject;
@@ -131,6 +133,7 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
   const titles: Record<string, string> = {
     vehicle: 'Vehicle', person: 'Person', container: 'Container',
     edge: 'Edge', junction: 'Junction', tls: 'Signal',
+    polygon: 'Polygon', poi: 'POI',
   };
   const edgeSubtypeTitles: Record<string, string> = {
     internal: 'Internal lane', crossing: 'Crossing', walkingarea: 'Walking area',
@@ -164,6 +167,18 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
       {selected.type === 'edge'      && <EdgeInfo id={selected.id} edgeAttr={edgeAttr} edgeIdToIndex={edgeIdToIndex} />}
       {selected.type === 'tls' && (
         <TLSInfo id={selected.id} tlIndex={selected.tlIndex} tlsLights={tlsLights} />
+      )}
+      {selected.type === 'polygon' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {selected.polyType && row('type', selected.polyType)}
+          {selected.filled !== undefined && row('fill', selected.filled ? 'yes' : 'no')}
+        </div>
+      )}
+      {selected.type === 'poi' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {selected.poiType && row('type', selected.poiType)}
+          {selected.imageUrl && row('image', selected.imageUrl)}
+        </div>
       )}
 
       {/* deep query — on demand */}

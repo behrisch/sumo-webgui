@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SimStepBin, VehicleTypeDict, LogMessage, NetworkGeometry, GetAttributesResponse } from '../generated/sumo';
+import { SimStepBin, VehicleTypeDict, LogMessage, NetworkGeometry, PolygonData, GetAttributesResponse } from '../generated/sumo';
 
 const RECONNECT_INITIAL_MS = 100;
 const RECONNECT_MAX_MS = 2000;
 
 // Binary frame type bytes (must match ecal_ws_bridge.py)
-const TYPE_LOG         = 4;
-const TYPE_NETWORK     = 5;
-const TYPE_SIMSTEP     = 6;
+const TYPE_LOG          = 4;
+const TYPE_NETWORK      = 5;
+const TYPE_SIMSTEP      = 6;
 const TYPE_VEHICLETYPES = 8;
+const TYPE_POLYGONS     = 9;
 
 // TLS state is folded into SimStepBin (formerly a separate TLSUpdate message).
 // We keep the same {id, state} shape for layer/InfoPanel consumers.
@@ -58,6 +59,7 @@ export interface SimState {
   connected: boolean;
   reconnectAttempt: number;
   network: NetworkGeometry | null;
+  polygonData: PolygonData[];
   vehicleSnapshot: VehicleSnapshot | null;
   vehicleTypeTable: VehicleTypeTable | null;
   edgeAttr: EdgeAttrState | null;
@@ -113,6 +115,7 @@ export function useSimSocket(url: string): SimState {
   const [connected, setConnected]             = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [network, setNetwork]                 = useState<NetworkGeometry | null>(null);
+  const [polygonData, setPolygonData]         = useState<PolygonData[]>([]);
   const [vehicleSnapshot, setVehicleSnapshot] = useState<VehicleSnapshot | null>(null);
   const [vehicleTypeTable, setVehicleTypeTable] = useState<VehicleTypeTable | null>(null);
   const [tlsUpdate, setTlsUpdate]             = useState<TLSUpdate | null>(null);
@@ -336,7 +339,16 @@ export function useSimSocket(url: string): SimState {
             prevSeqNumRef.current       = null;
             setVehicleSnapshot(null);
             setVehicleTypeTable(null);
+            setPolygonData([]);
             setNetwork(ng);
+            break;
+          }
+          case TYPE_POLYGONS: {
+            const pd = PolygonData.decode(payload);
+            // Multiple polygon files → one frame each; append, dedup is not
+            // needed because the bridge keys its cache by source_path and only
+            // emits one frame per source between loads.
+            setPolygonData(prev => [...prev, pd]);
             break;
           }
         }
@@ -428,7 +440,7 @@ export function useSimSocket(url: string): SimState {
   }, [url]);
 
   return {
-    connected, reconnectAttempt, network,
+    connected, reconnectAttempt, network, polygonData,
     vehicleSnapshot, vehicleTypeTable,
     edgeAttr: edgeAttrRef.current, edgeAttrVersion,
     tlsUpdate, logMessages, controlState,

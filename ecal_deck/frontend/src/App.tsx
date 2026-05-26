@@ -15,6 +15,8 @@ import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
 import { buildAgentLayer } from './layers/PersonLayer';
 import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
+import { parsePolygonData, buildPolygonLayers, buildPOILayer } from './layers/PolygonLayer';
+import type { ParsedPolygonSource } from './layers/PolygonLayer';
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
 import { LogPane } from './components/LogPane';
@@ -234,7 +236,7 @@ function orthoViewportBounds(vs: OrthographicViewState): [number, number, number
 }
 
 export default function App() {
-  const { connected, reconnectAttempt, network, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
+  const { connected, reconnectAttempt, network, polygonData, vehicleSnapshot, vehicleTypeTable, tlsUpdate,
           edgeAttr, edgeAttrVersion,
           logMessages, controlState, attributeConfig, staleSession, updateAttributeConfig, sendCommand } = useSimSocket(WS_URL);
   const { resetCumulative, ...perf } = usePerfStats();
@@ -448,7 +450,7 @@ export default function App() {
 
   const [visibility, setVisibility] = useState<LayerVisibility>({
     edges: true, junctions: true, vehicles: true, persons: true, containers: true,
-    tls: true, edgeData: true, basemap: true,
+    tls: true, edgeData: true, basemap: true, polygons: true, pois: true,
   });
   const patchVisibility = (patch: Partial<LayerVisibility>) =>
     setVisibility((v) => ({ ...v, ...patch }));
@@ -540,6 +542,22 @@ export default function App() {
   const crossingLayer    = crossingResult?.layer ?? null;
   const crossingLaneIdx  = crossingResult?.laneIndices ?? null;
 
+  // Parsed polygon/POI sources — one entry per additional-file. parsePolygonData
+  // wraps the proto bytes in typed-array views; cheap, but memoise to avoid
+  // rebuilding the SolidPolygon/Path/Scatter layers on unrelated re-renders.
+  const polygonSources: ParsedPolygonSource[] = useMemo(
+    () => polygonData.map(parsePolygonData),
+    [polygonData],
+  );
+  const polygonLayerResults = useMemo(
+    () => polygonSources.map((s, i) => buildPolygonLayers(s, String(i))),
+    [polygonSources],
+  );
+  const poiLayerResults = useMemo(
+    () => polygonSources.map((s, i) => buildPOILayer(s, String(i))),
+    [polygonSources],
+  );
+
   // Helper: any layer whose pickable items map back to a global lane index can
   // share this logic. Returns the edge id, or undefined if the lane index is
   // out of range / lane has no edge.
@@ -594,10 +612,39 @@ export default function App() {
     } else if (layerId === 'tls') {
       const entry = parsed?.tlsEntries[info.index];
       if (entry) setSelectedObject({ type: 'tls', id: entry.tls, tlIndex: entry.tl_index });
+    } else if (layerId?.startsWith('polygons-fill-') || layerId?.startsWith('polygons-outline-')) {
+      // layerId pattern: polygons-(fill|outline)-<sourceIdx>
+      const isFill = layerId.startsWith('polygons-fill-');
+      const sourceIdx = Number(layerId.slice(isFill ? 'polygons-fill-'.length : 'polygons-outline-'.length));
+      const result = polygonLayerResults[sourceIdx];
+      const source = polygonSources[sourceIdx];
+      if (result && source) {
+        const groupIdx = isFill ? result.fillIndices[info.index] : result.outlineIndices[info.index];
+        if (groupIdx !== undefined) {
+          setSelectedObject({
+            type: 'polygon',
+            id: source.polygons.ids[groupIdx],
+            polyType: source.polygons.types[groupIdx] || undefined,
+            filled: (source.polygons.flags[groupIdx] & 1) === 1,
+          });
+        }
+      }
+    } else if (layerId?.startsWith('pois-')) {
+      const sourceIdx = Number(layerId.slice('pois-'.length));
+      const source = polygonSources[sourceIdx];
+      if (source) {
+        const i = info.index;
+        setSelectedObject({
+          type: 'poi',
+          id: source.pois.ids[i],
+          poiType: source.pois.types[i] || undefined,
+          imageUrl: source.pois.imageUrls[i] || undefined,
+        });
+      }
     } else {
       setSelectedObject(null);
     }
-  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId]);
+  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
@@ -620,6 +667,12 @@ export default function App() {
     // Static layers (memoized instances) must always stay in the array — removing and
     // re-adding the same instance causes deck.gl to skip re-initialisation because
     // layer.state already exists from the previous mount. Use the `visible` prop instead.
+    // Polygons render UNDER the road network so SUMO additional shapes (parks,
+    // building outlines, etc.) appear as backdrops, matching sumo-gui ordering.
+    for (const r of polygonLayerResults) {
+      if (!r) continue;
+      for (const pl of r.layers) result.push(pl.clone({ visible: visibility.polygons }));
+    }
     if (junctionLayer)    result.push(junctionLayer.clone({ visible: visibility.junctions }));
     if (walkingAreaLayer) result.push(walkingAreaLayer.clone({ visible: visibility.junctions }));
     if (edgeLayer)        result.push(edgeLayer.clone({ visible: visibility.edges }));
@@ -645,10 +698,16 @@ export default function App() {
         result.push(al);
       }
     }
+    // POIs render on top of everything else — they're point markers for places
+    // of interest and should remain visible above vehicles.
+    for (const r of poiLayerResults) {
+      if (!r) continue;
+      result.push(r.layer.clone({ visible: visibility.pois }));
+    }
     performance.mark('layers-build-end');
     performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, polygonLayerResults, poiLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (
