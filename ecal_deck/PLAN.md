@@ -1338,6 +1338,354 @@ fields `interval_min`/`interval_max` in `SetStepConfigRequest` are reserved for 
 
 ---
 
+### Polygon / POI support (sumo-gui parity) — detailed plan
+
+**Goal.** Render `.poly.xml` shapes (building footprints, parks, areas of
+interest) and POIs (icons + labels) the way sumo-gui does, plus the other
+visual additional-file elements that sumo-gui draws (bus/train/container
+stops, charging stations, parking areas, lane-area + induction-loop detectors).
+Source files are listed in the `.sumocfg` under `<additional-files>` (one or
+more), or can be passed explicitly. All of this data is static — published
+once per load, just like the network — so the work splits cleanly into proto,
+publisher, bridge, and frontend.
+
+#### Scope: what's "visual additional"?
+
+SUMO additional files mix many element types. The visualisation-relevant ones
+fall into three families that need different storage:
+
+| Family | Elements | Geometry source | Proto message |
+|--------|----------|-----------------|---------------|
+| **Free shapes** | `<poly>`, `<poi>` | own `shape` / `(x,y)` coords | `PolygonData` |
+| **Stopping places** | `<busStop>`, `<trainStop>`, `<containerStop>`, `<chargingStation>`, `<parkingArea>` | lane id + `startPos`/`endPos`, derived from network | `StoppingPlaceData` |
+| **Detectors** | `<inductionLoop>` / `<e1Detector>`, `<laneAreaDetector>` / `<e2Detector>`, `<entryExitDetector>` / `<e3Detector>` | lane id + `pos` (point) or `pos`/`endPos` (segment) | `DetectorData` |
+
+Why **separate messages, one shared pipeline**:
+- Free shapes carry their own (x,y) rings — no network dependency. They can
+  load and render before the net is even parsed.
+- Stopping places and detectors are *anchored to lanes*: they need lane id →
+  shape lookup + linear interpolation by `startPos`/`endPos`. Their geometry
+  is derived at cache-build time so the frontend doesn't have to keep the
+  network handy to render them.
+- Per-type colours / icons differ (sumo-gui uses cyan for bus stops, green
+  for charging, blue for parking, yellow squares for inductionLoops, etc.) —
+  keeping the proto split avoids a single mega-message with sparse fields.
+
+All three reuse the same cache-dir + `<X>Notice {cache_path}` + binary-frame
+infrastructure. The publisher scans `<additional-files>` **once** and
+dispatches each element into the appropriate builder, so adding a new family
+later is "new proto + new builder + new layer", not "redo the loader".
+
+#### Why a binary cache, like the network
+
+A single city `.poly.xml` (OSM-derived building footprints for Berlin) can
+hold 100k+ polygons and several MB of coordinates. Re-parsing XML and
+allocating per-polygon Python/JS objects on every load is exactly the cost
+the `NetworkGeometry` cache was created to eliminate. Stopping places and
+detectors are smaller in count but also benefit: their cache holds
+*resolved* world-coordinate geometry, so the frontend never re-runs the
+lane-id lookup + linear-position interpolation that sumolib does. The data
+shape is the same as the network's: many variable-length coordinate rings /
+fixed-length point lists + a few per-entry scalars + optional string
+metadata. The typed-array layout applies directly.
+
+#### Cache directory layout (new — applies to network cache too)
+
+Today the network cache lives next to the input as `<net.xml.gz>.ecaldeck`.
+This works but litters the user's scenario directory, mixes with source files
+in git, and makes it awkward to track multiple cached artifacts (network +
+poly + stops + detectors + future families). Following Python's `__pycache__`
+convention, move all binary caches into a sibling directory:
+
+```
+scenario_dir/
+  scenario.sumocfg
+  net.xml.gz
+  shapes.poly.xml
+  busstops.add.xml
+  __ecaldeck__/
+    net.xml.gz.v8.bin               # NetworkGeometry, version stamped in filename
+    shapes.poly.xml.poly.v1.bin     # PolygonData
+    busstops.add.xml.stops.v1.bin   # StoppingPlaceData
+    busstops.add.xml.det.v1.bin     # DetectorData (when same file has detectors)
+```
+
+Rules:
+- Cache dir = `os.path.join(os.path.dirname(source_file), '__ecaldeck__')`.
+- Filename = `<basename(source)>.<family>.v<VERSION>.bin`. Family tag lets one
+  additional file produce up to one cache per family. Version-in-filename
+  means stale caches don't have to be opened to be rejected — and old
+  versions can be garbage-collected by listing the dir.
+- Created lazily (`os.makedirs(..., exist_ok=True)`) on first write.
+- A `.gitignore` containing `*` is dropped into the dir on creation so users
+  don't accidentally commit caches.
+- Migration: a small helper `_cache_path(source, family, version)` replaces
+  the inline `cache_path = source + '.ecaldeck'` pattern in publisher and
+  bridge. The network path passes `family='net'`. Existing `.ecaldeck` files
+  next to source files are ignored (will be regenerated into the new dir on
+  next load); a one-line stderr hint suggests deletion.
+
+This is a small, self-contained refactor (one helper + two call sites in the
+publisher, two in the bridge) and should land as commit 1 before any
+additional-file work, so the new caches use the new path from day one.
+
+#### Proto additions (`proto/sumo.proto`)
+
+```proto
+message PolygonData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;   // mirrors NetworkGeometry; coords are lon/lat if true
+
+  // --- Filled / outlined polygons ---
+  uint32 poly_count   = 10;
+  bytes  poly_starts  = 11;    // Uint32Array, length poly_count+1, offsets into poly_xy (point index)
+  bytes  poly_xy      = 12;    // Float32Array, interleaved [x,y,x,y,...]
+  bytes  poly_rgba    = 13;    // Uint8Array, 4 bytes per poly
+  bytes  poly_flags   = 14;    // Uint8Array, bit0=fill
+  bytes  poly_layer   = 15;    // Float32Array, z-order (sumo "layer" attr); used only for sort
+  repeated string poly_ids   = 16;
+  repeated string poly_types = 17;
+
+  // --- POIs (points) ---
+  uint32 poi_count   = 30;
+  bytes  poi_xy      = 31;     // Float32Array
+  bytes  poi_rgba    = 32;     // Uint8Array
+  bytes  poi_layer   = 33;     // Float32Array
+  bytes  poi_width   = 34;     // Float32Array (metres; 0 = use default)
+  bytes  poi_height  = 35;     // Float32Array
+  repeated string poi_ids       = 36;
+  repeated string poi_types     = 37;
+  repeated string poi_image_url = 38;   // optional, "" when absent
+}
+
+message StoppingPlaceData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;
+
+  uint32 count       = 10;
+  bytes  kind        = 11;     // Uint8Array, 1=busStop 2=trainStop 3=containerStop 4=chargingStation 5=parkingArea
+  bytes  xy_starts   = 12;     // Uint32Array, length count+1 — each stop's polygon = a thin rectangle along the lane
+  bytes  xy          = 13;     // Float32Array, the resolved rectangle ring vertices
+  bytes  rgba        = 14;     // Uint8Array, sumo-gui per-kind defaults; overridden by element's color attr
+  bytes  label_xy    = 15;     // Float32Array, 2 floats per stop — mid-point for label/icon
+  repeated string ids   = 16;
+  repeated string names = 17;   // human-readable (`name="..."` attr)
+  repeated string lines = 18;   // bus/train lines (space-joined) — for tooltip
+}
+
+message DetectorData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;
+
+  // E1 (point) detectors
+  uint32 e1_count    = 10;
+  bytes  e1_xy       = 11;     // Float32Array
+  bytes  e1_angle    = 12;     // Float32Array radians; perpendicular bar orientation
+  bytes  e1_rgba     = 13;
+  repeated string e1_ids = 14;
+
+  // E2 (lane segment) detectors — store as resolved rectangle ring like stopping places
+  uint32 e2_count    = 30;
+  bytes  e2_xy_starts = 31;
+  bytes  e2_xy       = 32;
+  bytes  e2_rgba     = 33;
+  repeated string e2_ids = 34;
+
+  // E3 detectors are sets of entry/exit cross-sections — render each as an E1-style bar
+  uint32 e3_bar_count = 50;
+  bytes  e3_bar_xy    = 51;     // Float32Array (mid-point per bar)
+  bytes  e3_bar_angle = 52;
+  bytes  e3_bar_rgba  = 53;
+  bytes  e3_bar_kind  = 54;     // Uint8Array, 0=entry 1=exit
+  repeated string e3_bar_parent_ids = 55;   // parent E3 id per bar (for picking)
+}
+
+message AdditionalsNotice {            // sent on sumo/additionals topic, type byte 9
+  string source_path = 1;              // original additional XML path
+  string cache_path  = 2;              // resolved cache file
+  enum Family { POLYGONS = 0; STOPS = 1; DETECTORS = 2; }
+  Family family      = 3;
+  bool   geo_referenced = 4;
+}
+```
+
+Notes:
+- One eCAL topic `sumo/additionals` carries notices for all three families,
+  discriminated by `Family`. Each notice triggers a binary frame whose
+  payload type depends on the family. Frame type bytes: 9 = `PolygonData`,
+  10 = `StoppingPlaceData`, 11 = `DetectorData`.
+- `cache_path` indirection is identical to `NetworkData`: keeps eCAL message
+  size bounded even for 100MB cached polygons.
+- Stopping places and E2 detectors are stored as already-resolved world-space
+  rectangle rings, so the frontend can pass them straight to
+  `SolidPolygonLayer` with no per-frame lane lookup.
+- E1 / E3 cross-sections are stored as (midpoint, angle); the frontend
+  extrudes a fixed-length perpendicular bar at render time, the same way
+  `StopLineLayer` already does for stop lines.
+- No per-vertex colour — additional XML doesn't support it.
+- 3D extrusion (heights) is reserved via `poly_layer` / `poi_height` but not
+  used initially; will be picked up by the existing "3D view" item.
+
+#### Publisher (`sumo_ecal_publisher.py`)
+
+1. `_POLY_CACHE_VERSION = 1`, `_STOPS_CACHE_VERSION = 1`,
+   `_DET_CACHE_VERSION = 1` constants (independent so a change to detector
+   layout doesn't invalidate poly caches).
+2. Resolve additional files at load time:
+   - Read `<additional-files>` from the sumocfg (already parsed via
+     `sumolib.options.readOptions`); split on whitespace/comma.
+   - For each file, do **one** XML pass that classifies each child:
+     `<poly>` / `<poi>` → polygon builder, stopping-place tags → stop
+     builder, detector tags → detector builder. Standard SUMO scenarios mix
+     detectors, rerouters, VTypes, stops, and polygons in the same additional
+     file, so a per-file family bucket is mandatory.
+   - Optional CLI flags `--poly-file PATH`, `--additional-file PATH`
+     (repeatable) augment the sumocfg list.
+3. For each (file, family) pair with at least one element: cache-check
+   (`__ecaldeck__/<base>.<family>.v<N>.bin`), and on miss call the
+   appropriate builder:
+   - **`_build_polygon_binary(elements, net)`** — `sumolib.shapes.polygon`
+     and `.poi` already provide typed `.shape` / `.color` / etc. Pack with
+     `_array.array`. If `net.hasGeoProj()`, run each point through
+     `net.convertXY2LonLat`.
+   - **`_build_stops_binary(elements, net)`** — for each stop, look up the
+     lane via `net.getLane(laneID)`, extract its shape + width, walk to
+     `startPos`/`endPos` along the lane, offset by `±width/2` perpendicular
+     to lane direction, emit a 4-vertex rectangle ring. Resolve label mid-
+     point too. Apply sumo-gui's per-kind default colour, override with
+     element `color` attr if present.
+   - **`_build_detectors_binary(elements, net)`** — E1: midpoint = (lane
+     point at `pos`), angle = lane direction at that pos. E2: same as a
+     stopping-place rectangle. E3: emit one bar per `<detEntry>` / `<detExit>`
+     child.
+4. Write each cache under `__ecaldeck__/`, return path.
+5. Publish an `AdditionalsNotice` per cache on `sumo/additionals`. Multiple
+   files → multiple notices, each carrying its own `cache_path` and family.
+6. Wire-up mirrors the network cache: publisher resolves and publishes
+   before `traci.start()` (so the work happens while we're not GIL-blocked);
+   bridge acks via the same `ack_event` pattern, extended to a per-family
+   set so we don't block on detectors when only polygons are present.
+
+Edge cases:
+- Missing/unreadable additional file → log warning, continue without it
+  (don't fail the whole load).
+- File changes mid-session (`load` called again with same sumocfg) →
+  publisher republishes notices; frontend swaps layer data via the same hook.
+- Stop references a non-existent lane → log warning, skip that stop.
+- `startPos > endPos` or out-of-range positions → clamp to `[0, laneLength]`
+  with a warning, matching sumo-gui's behaviour.
+- Very large coord count (>UINT32 total) → impossible in practice; assert in
+  builder to fail loudly if it ever happens.
+
+#### Bridge (`ecal_ws_bridge.py`)
+
+1. New eCAL subscription `sumo/additionals` → `AdditionalsNotice`.
+2. Handler:
+   - Read `notice.cache_path` from disk (same try/except + size log as
+     `_on_network`).
+   - Forward as binary frame with the family's type byte (9 / 10 / 11).
+     Multiple notices → multiple frames in sequence.
+3. Cache the most recent bytes per `source_path` in a
+   `dict[str, tuple[Family, bytes]]`; flush on `load`. Late-joining
+   clients in `_handle_client` receive a replay of all cached frames, the
+   same way they already get the network.
+
+#### Frontend
+
+1. Generated `PolygonData` / `StoppingPlaceData` / `DetectorData` /
+   `AdditionalsNotice` decoders via existing ts-proto pipeline (no extra
+   tooling — `npm run generate` picks up `sumo.proto`).
+2. New hook field in `useSimSocket.ts`: `additionalSources` —
+   `{ polygons: PolygonSource[], stops: StoppingPlaceSource[], detectors: DetectorSource[] }`,
+   each entry tagged with `sourcePath` (original XML) so the UI can group by
+   file.
+3. New layer builders:
+   - `frontend/src/layers/PolygonLayer.ts`: `buildPolygonLayer` →
+     `SolidPolygonLayer` for filled + `PathLayer` for outline-only (split by
+     `flags & 1`). `buildPOILayer` → `ScatterplotLayer` (or `IconLayer` when
+     `poi_image_url` non-empty; load icons lazily, fall back to a coloured
+     dot until loaded). Pickable.
+   - `frontend/src/layers/StoppingPlaceLayer.ts`: one `SolidPolygonLayer`
+     over all stops (per-kind colour from `rgba`); icon overlay at
+     `label_xy` (`IconLayer` with built-in SVGs per kind). Pickable.
+   - `frontend/src/layers/DetectorLayer.ts`: E1/E3 bars rendered the same
+     way as `StopLineLayer` (perpendicular `LineLayer` with meters→degrees
+     conversion already implemented there); E2 segments as `SolidPolygonLayer`.
+     Pickable.
+   - All builders use the binary attribute API and the `Uint32Array indices`
+     picking-id pattern (info.index → entry index → id).
+4. `App.tsx`:
+   - Memoise per-source layers.
+   - **Render order** (bottom→top): polygons → walking areas → road network →
+     stopping places → edge data → detectors → traffic lights → vehicles →
+     POIs. POIs go on top so icons stay visible above vehicles.
+   - Wire `handleClick` for picks → InfoPanel with
+     `subtype: 'polygon' | 'poi' | 'busStop' | 'parkingArea' | ... | 'e1' | 'e2' | 'e3'`.
+   - Add toggles to `ControlPanel.tsx`: "Polygons", "POIs", "Stops",
+     "Detectors", default on.
+5. `InfoPanel.tsx`: extend the subtype-title map to cover the new types.
+   For stops, show `name`, `lines`, and parent lane id. For detectors, show
+   parent lane id and (for E2) length.
+
+#### Test scenario
+
+Add `tests/sumo_test_env/additionals/` with a small hand-authored network
+(reuse `doe` net) plus three additional files:
+- `shapes.add.xml` — ~10 polygons (one filled, one outline, one geo lat/lon)
+  and ~5 POIs (some with `imgFile`, some without).
+- `transit.add.xml` — ~3 bus stops, 1 train stop, 2 parking areas, 1
+  charging station.
+- `detectors.add.xml` — 2 E1, 2 E2, 1 E3 with 2 entries + 1 exit.
+
+Wire all three as `additional-files`. Manual checklist:
+- Load → polygons, stops, detectors all visible in correct layer order; POIs
+  on top.
+- Click each kind → InfoPanel shows correct subtype title + relevant fields.
+- Toggle each layer independently.
+- Reload same sumocfg → log lines say "Using cached <family> binary".
+- Touch one source file → that file's caches invalidated and rebuilt, others
+  reused.
+- Bump one family's `_*_CACHE_VERSION` and reload → only that family's caches
+  regenerated.
+
+#### Step ordering (recommended commits)
+
+1. **Cache-dir refactor.** Add `_cache_path(source, family, version)`
+   helper, version stamp filename, drop `.gitignore` on dir create. Migrate
+   network cache to use it. No behaviour change beyond file location.
+2. **Proto + publisher (polygons + POIs only).** Add `PolygonData` /
+   `AdditionalsNotice`, the single-pass XML classifier, polygon builder,
+   publish on `sumo/additionals`. Smallest end-to-end slice.
+3. **Bridge.** Subscribe, forward as binary frame, cache for late joiners.
+   Add the family→type-byte switch (only POLYGONS implemented for now).
+4. **Frontend (polygons + POIs).** Hook + `PolygonLayer.ts` + toggles +
+   InfoPanel.
+5. **Stopping places.** Proto + builder + bridge byte + layer + toggle +
+   InfoPanel. (Adds the lane-resolution code path that detectors will reuse.)
+6. **Detectors.** Proto + builder + bridge byte + layer + toggle +
+   InfoPanel.
+7. **Test scenarios + PLAN.md status update.**
+
+This order lets each step land independently with a working build and a
+demonstrable feature, and keeps the lane-resolution code (needed by 5 and 6
+but not 2) out of the first slice.
+
+#### Out of scope (deferred)
+
+- Editing in the GUI (sumo-gui supports add/move/delete in design mode).
+  Read-only is sufficient for now.
+- Animated/dynamic POIs (`type="dynamic"` with TraCI updates). Static only.
+- Live detector readings (counts, occupancies). The infrastructure here only
+  draws the *geometry* of detectors; coupling them to live TraCI output is a
+  separate concern that should reuse the EdgeBin transport.
+- 3D extrusion of polygons and stops (would reuse `poly_layer` / `poi_height`
+  as height). Track under the existing "3D view" item below.
+- Calibrators, rerouters, VSS — they have no native sumo-gui rendering
+  beyond a tag on a lane, and aren't worth a dedicated layer until asked
+  for.
+
+---
+
 ### 3D view
 **Feasibility**: High. deck.gl natively supports 3D via `MapViewState.pitch` (tilt the camera).
 
