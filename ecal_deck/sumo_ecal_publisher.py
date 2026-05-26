@@ -19,7 +19,6 @@ import argparse
 import array as _array
 import math
 import os
-import struct as _struct
 import sys
 import threading
 import time
@@ -58,7 +57,6 @@ def _make_publisher(topic: str, proto_type_name: str) -> ecal_core.Publisher:
     return ecal_core.Publisher(topic, dti)
 
 
-
 def _make_geo_converter(proj_parameter: str, net_offset: str):
     """Build an (x, y) → (lon, lat) converter using sumolib's own implementation.
 
@@ -76,36 +74,6 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
     except Exception as exc:
         print("Warning: could not build geo converter: %s" % exc)
         return None
-
-
-def _end_time_ms_from_cfg(sumocfg_path: str) -> int | None:
-    """Return the configured <time><end> value in milliseconds, or None if absent.
-
-    SUMO supports both plain-seconds ("3600") and HH:MM:SS ("1:00:00") formats;
-    sumolib.miscutils.parseTime handles both.
-    """
-    try:
-        import xml.etree.ElementTree as _ET
-        root = _ET.parse(sumocfg_path).getroot()
-        el   = root.find('.//time/end')
-        if el is not None:
-            val = el.get('value', '').strip()
-            if val:
-                from sumolib.miscutils import parseTime as _parseTime
-                return round(_parseTime(val) * 1000)
-    except Exception:
-        pass
-    return None
-
-
-def _net_file_from_cfg(sumocfg_path: str) -> str:
-    cfg_dir = os.path.dirname(os.path.abspath(sumocfg_path))
-    for inp in sumolib.xml.parse(sumocfg_path, "input"):
-        child = inp.getChild("net-file")
-        if child:
-            return os.path.join(cfg_dir, child[0].getAttribute("value"))
-    raise RuntimeError("Could not locate net-file entry in %s" % sumocfg_path)
-
 
 
 
@@ -376,28 +344,26 @@ def main():
     _log_srv.listen(8)   # generous backlog; server stays open for lifetime of process
     _log_addr = "localhost:%d" % _log_srv.getsockname()[1]
 
-    def _start_log_reader() -> None:
-        """Accept one SUMO connection and forward lines until SUMO closes it."""
-        def _reader():
-            try:
-                conn, _ = _log_srv.accept()
-                with conn.makefile('r', errors='replace') as f:
-                    for line in f:
-                        text = line.rstrip()
-                        if not text:
-                            continue
-                        level = ("WARNING" if "Warning" in text or "warning" in text else
-                                 "ERROR"   if "Error"   in text or "error"   in text else
-                                 "INFO")
-                        try:
-                            pub_log.send(sumo_pb2.LogMessage(
-                                time_ms=round(time.monotonic() * 1000),
-                                level=level, text=text).SerializeToString())
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        threading.Thread(target=_reader, daemon=True).start()
+    def _reader():
+        """Accept one SUMO log connection and forward lines until SUMO closes it."""
+        try:
+            conn, _ = _log_srv.accept()
+            with conn.makefile('r', errors='replace') as f:
+                for line in f:
+                    text = line.rstrip()
+                    if not text:
+                        continue
+                    level = ("WARNING" if "Warning" in text or "warning" in text else
+                             "ERROR"   if "Error"   in text or "error"   in text else
+                             "INFO")
+                    try:
+                        pub_log.send(sumo_pb2.LogMessage(
+                            time_ms=round(time.monotonic() * 1000),
+                            level=level, text=text).SerializeToString())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # --- traci attribute getters (static, defined once) ---
     vehicle_attr_getters = {
@@ -475,23 +441,6 @@ def main():
         _type_id_to_idx[type_id] = idx
         _type_table.append((type_id, length, width, shape, class_byte))
         return idx, True
-
-    def _publish_vehicletypes() -> None:
-        """Build and publish VehicleTypeDict from the current _type_table."""
-        type_id_block  = b''.join(tid.encode() + b'\x00' for tid, *_ in _type_table)
-        type_lengths   = _array.array('f', (row[1] for row in _type_table))
-        type_widths    = _array.array('f', (row[2] for row in _type_table))
-        type_shapes    = b''.join(row[3].encode() + b'\x00' for row in _type_table)
-        type_classes   = _array.array('B', (row[4] for row in _type_table))
-        vtd = sumo_pb2.VehicleTypeDict(
-            type_count=len(_type_table),
-            type_id_block=type_id_block,
-            type_lengths=type_lengths.tobytes(),
-            type_widths=type_widths.tobytes(),
-            type_shapes=type_shapes,
-            type_classes=type_classes.tobytes(),
-        )
-        pub_vehicletypes.send(vtd.SerializeToString())
 
     _step_event = threading.Event()
     _step_thread: list[threading.Thread | None] = [None]
@@ -583,7 +532,15 @@ def main():
             pers_type_idx.append(idx)
 
         if new_types:
-            _publish_vehicletypes()
+            # Republish the full VehicleTypeDict so the bridge/frontend can decode new type indices.
+            pub_vehicletypes.send(sumo_pb2.VehicleTypeDict(
+                type_count=len(_type_table),
+                type_id_block=b''.join(tid.encode() + b'\x00' for tid, *_ in _type_table),
+                type_lengths=_array.array('f', (row[1] for row in _type_table)).tobytes(),
+                type_widths=_array.array('f', (row[2] for row in _type_table)).tobytes(),
+                type_shapes=b''.join(row[3].encode() + b'\x00' for row in _type_table),
+                type_classes=_array.array('B', (row[4] for row in _type_table)).tobytes(),
+            ).SerializeToString())
 
         # --- edge section (empty when no edge attrs configured) ---
         K_e = len(ctrl["edge_attributes"])
@@ -852,9 +809,14 @@ def main():
 
             # start a fresh reader thread — accepts the next connection on the
             # persistent log server (same port every load, no race on reconnect)
-            _start_log_reader()
+            threading.Thread(target=_reader, daemon=True).start()
 
-            net_file   = _net_file_from_cfg(sumocfg_path)
+            cfg_opts   = {opt.name: opt.value for opt in sumolib.options.readOptions(sumocfg_path)}
+            net_value  = cfg_opts.get("net-file")
+            if not net_value:
+                _log("ERROR", "Could not locate net-file entry in %s" % sumocfg_path)
+                return
+            net_file   = os.path.join(os.path.dirname(os.path.abspath(sumocfg_path)), net_value)
             cache_path = net_file + '.ecaldeck'
 
             # Build/read the network cache, publish it to the bridge, then start SUMO.
@@ -926,7 +888,9 @@ def main():
             sim["all_edges"]       = list(ng.edge_ids)
             sim["has_tls"]         = bool(ng.tls_entries)
             sim["edge_id_to_idx"]  = {eid: i for i, eid in enumerate(ng.edge_ids)}
-            sim["end_time_ms"]     = _end_time_ms_from_cfg(sumocfg_path)
+            end_value              = cfg_opts.get("end")
+            sim["end_time_ms"]     = (round(sumolib.miscutils.parseTime(end_value.strip()) * 1000)
+                                      if end_value else None)
             ctrl["sumocfg_path"]   = sumocfg_path
             sim["use_native_ecal"] = bool(_has_native_ecal)
             if sim["use_native_ecal"]:
@@ -1105,7 +1069,7 @@ def main():
                 try: resp.attributes[attr] = getter(vid)
                 except Exception: pass
             return 0, resp.SerializeToString()
-        except Exception as e:
+        except Exception:
             return 0, sumo_pb2.GetVehicleInfoResponse().SerializeToString()
 
     def _on_get_edge_info(_mi, req_bytes):
@@ -1122,7 +1086,7 @@ def main():
                 vehicle_ids=list(traci.edge.getLastStepVehicleIDs(eid)),
             )
             return 0, resp.SerializeToString()
-        except Exception as e:
+        except Exception:
             return 0, sumo_pb2.GetEdgeInfoResponse().SerializeToString()
 
     def _method_info(name, req_cls, resp_cls):
@@ -1180,31 +1144,37 @@ def main():
         else:
             print("Benchmark mode (--benchmark-full): delay=0, autotune enabled.")
         t_wall = time.monotonic()
-        _do_load(args.sumo_cfg)      # blocking in main thread
-        ctrl["paused"] = False       # _do_load leaves it True; override immediately
-        _step_event.set()            # unblock the step thread if it is already waiting
-        if _step_thread[0]:
-            _step_thread[0].join()
-        elapsed = time.monotonic() - t_wall
-        print("Benchmark done: %.2f s wall clock" % elapsed)
+        try:
+            _do_load(args.sumo_cfg)      # blocking in main thread
+            ctrl["paused"] = False       # _do_load leaves it True; override immediately
+            _step_event.set()            # unblock the step thread if it is already waiting
+            if _step_thread[0]:
+                _step_thread[0].join()
+            elapsed = time.monotonic() - t_wall
+            print("Benchmark done: %.2f s wall clock" % elapsed)
 
-        if args.benchmark_full:
-            # Wait for the frontend to report its stats (via bridge → report_frontend_stats service).
-            # The frontend detects sim end via the get_state poll (up to 2 s lag) then calls back.
-            fs_evt = ctrl["frontend_stats_event"]
-            if fs_evt.wait(timeout=15.0):
-                fs = ctrl["frontend_stats"]
-                print("Frontend:")
-                print("  Avg. frame time [ms]: %.2f" % fs["avg_frame_ms"])
-                print("  Avg. skip rate: %.3f" % fs["skip_rate"])
-                print("  Frames rendered: %d" % fs["frames"])
-                if fs.get("breakdown"):
-                    print("  Per-frame breakdown [ms]: %s" % fs["breakdown"])
-            else:
-                print("Frontend: no stats received (bridge/frontend not connected)")
-
-        _release_ecal_objects()
-        ecal_core.finalize()
+            if args.benchmark_full:
+                # Wait for the frontend to report its stats (via bridge → report_frontend_stats service).
+                # The frontend detects sim end via the get_state poll (up to 2 s lag) then calls back.
+                fs_evt = ctrl["frontend_stats_event"]
+                if fs_evt.wait(timeout=15.0):
+                    fs = ctrl["frontend_stats"]
+                    print("Frontend:")
+                    print("  Avg. frame time [ms]: %.2f" % fs["avg_frame_ms"])
+                    print("  Avg. skip rate: %.3f" % fs["skip_rate"])
+                    print("  Frames rendered: %d" % fs["frames"])
+                    if fs.get("breakdown"):
+                        print("  Per-frame breakdown [ms]: %s" % fs["breakdown"])
+                else:
+                    print("Frontend: no stats received (bridge/frontend not connected)")
+        except KeyboardInterrupt:
+            print("Benchmark interrupted.")
+            _step_stop.set(); _step_event.set()
+            if _step_thread[0]:
+                _step_thread[0].join(timeout=2.0)
+        finally:
+            _release_ecal_objects()
+            ecal_core.finalize()
         sys.exit(0)
 
     # auto-load if sumocfg provided on command line
@@ -1218,10 +1188,13 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        pass
-
-    _release_ecal_objects()
-    ecal_core.finalize()
+        print("Shutting down...")
+        _step_stop.set(); _step_event.set()
+        if _step_thread[0]:
+            _step_thread[0].join(timeout=2.0)
+    finally:
+        _release_ecal_objects()
+        ecal_core.finalize()
 
 
 if __name__ == "__main__":
