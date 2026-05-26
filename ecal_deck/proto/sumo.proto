@@ -60,6 +60,51 @@ message NetworkGeometry {
 }
 
 // ---------------------------------------------------------------------------
+// Additional-file content (polygons, POIs, stops, detectors).
+// Same indirection pattern as NetworkData/NetworkGeometry: publisher caches
+// the heavy binary to a file, then sends a Notice with the path. Bridge
+// reads the file and forwards as a binary WS frame.
+// ---------------------------------------------------------------------------
+
+message AdditionalsNotice {
+  enum Family {
+    POLYGONS  = 0;
+    STOPS     = 1;
+    DETECTORS = 2;
+  }
+  string source_path    = 1;  // original additional XML path (also the dedupe key)
+  string cache_path     = 2;  // resolved binary cache file
+  Family family         = 3;
+  bool   geo_referenced = 4;
+}
+
+message PolygonData {
+  uint32 version        = 1;
+  bool   geo_referenced = 2;
+
+  // Filled / outlined polygons
+  uint32          poly_count   = 10;
+  bytes           poly_starts  = 11; // u32[] LE — cumulative vertex index, length poly_count+1
+  bytes           poly_xy      = 12; // f32[] LE — interleaved [x,y,x,y,...]
+  bytes           poly_rgba    = 13; // u8[]  LE — 4 bytes per poly
+  bytes           poly_flags   = 14; // u8[]  LE — bit0=fill
+  bytes           poly_layer   = 15; // f32[] LE — sumo "layer" attr, used for sort
+  repeated string poly_ids     = 16;
+  repeated string poly_types   = 17;
+
+  // POIs (points)
+  uint32          poi_count     = 30;
+  bytes           poi_xy        = 31; // f32[] LE
+  bytes           poi_rgba      = 32; // u8[]  LE
+  bytes           poi_layer     = 33; // f32[] LE
+  bytes           poi_width     = 34; // f32[] LE — metres; 0 = use default
+  bytes           poi_height    = 35; // f32[] LE
+  repeated string poi_ids       = 36;
+  repeated string poi_types     = 37;
+  repeated string poi_image_url = 38; // "" when absent
+}
+
+// ---------------------------------------------------------------------------
 // Service: sumo_control
 // ---------------------------------------------------------------------------
 

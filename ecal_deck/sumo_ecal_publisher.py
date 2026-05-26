@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import xml.etree.ElementTree as ET
 
 # --- path setup ---
 SUMO_HOME = os.environ.get("SUMO_HOME")
@@ -347,6 +348,221 @@ FRONTEND_FRAME_MS_MIN = 1.0
 FRONTEND_FRAME_MS_EMA_ALPHA = 0.4
 
 
+# ---------------------------------------------------------------------------
+# Polygon / POI binary cache (built from <additional-files> entries)
+# ---------------------------------------------------------------------------
+
+def _classify_additional_file(xml_path: str) -> set[str]:
+    """Peek at the root element and report which additional families are present.
+
+    Returns a subset of {'polygons', 'stops', 'detectors'}. Empty if the file
+    has none of those (e.g. pure vType / rerouter / detector-only). Polygon
+    detection covers both <poly> and <poi>.
+    """
+    found: set[str] = set()
+    try:
+        for _evt, el in ET.iterparse(xml_path, events=('start',)):
+            tag = el.tag
+            if tag == 'poly' or tag == 'poi':
+                found.add('polygons')
+            # Stops and detectors come in later steps; tags listed here so this
+            # classifier doesn't need a second pass when those families land.
+            elif tag in ('busStop', 'trainStop', 'containerStop',
+                         'chargingStation', 'parkingArea'):
+                found.add('stops')
+            elif tag in ('inductionLoop', 'e1Detector',
+                         'laneAreaDetector', 'e2Detector',
+                         'entryExitDetector', 'e3Detector'):
+                found.add('detectors')
+            # Early-exit once all three families are detected.
+            if len(found) == 3:
+                break
+    except (OSError, ET.ParseError) as exc:
+        print("Warning: could not classify additional file %s: %s" % (xml_path, exc))
+    return found
+
+
+def _build_polygon_binary(xml_path: str, net) -> str | None:
+    """Parse <poly> and <poi> elements from `xml_path`, project to geo when
+    the network is geo-referenced, pack as typed arrays, write the binary
+    cache and return its path. Returns None if nothing was emitted.
+    """
+    geo_ref = net is not None and net.hasGeoProj()
+
+    def _to_world(x: float, y: float) -> tuple[float, float]:
+        if geo_ref:
+            lon, lat = net.convertXY2LonLat(x, y)
+            return lon, lat
+        return x, y
+
+    poly_starts = _array.array('I', [0])
+    poly_xy     = _array.array('f')
+    poly_rgba   = _array.array('B')
+    poly_flags  = _array.array('B')
+    poly_layer  = _array.array('f')
+    poly_ids:   list[str] = []
+    poly_types: list[str] = []
+
+    poi_xy     = _array.array('f')
+    poi_rgba   = _array.array('B')
+    poi_layer  = _array.array('f')
+    poi_width  = _array.array('f')
+    poi_height = _array.array('f')
+    poi_ids:        list[str] = []
+    poi_types:      list[str] = []
+    poi_image_urls: list[str] = []
+
+    def _parse_color(s: str | None, default=(255, 255, 0, 255)) -> tuple[int, int, int, int]:
+        if not s:
+            return default
+        parts = s.split(',')
+        try:
+            r = int(round(float(parts[0])))
+            g = int(round(float(parts[1])))
+            b = int(round(float(parts[2])))
+            a = int(round(float(parts[3]))) if len(parts) > 3 else 255
+            return (max(0, min(255, r)), max(0, min(255, g)),
+                    max(0, min(255, b)), max(0, min(255, a)))
+        except (ValueError, IndexError):
+            return default
+
+    def _parse_bool(s: str | None, default=False) -> bool:
+        if s is None:
+            return default
+        return s.lower() in ('1', 'true', 'yes', 'on')
+
+    try:
+        for _evt, el in ET.iterparse(xml_path, events=('end',)):
+            if el.tag == 'poly':
+                shape = el.get('shape') or ''
+                pts = []
+                for token in shape.split():
+                    coords = token.split(',')
+                    if len(coords) >= 2:
+                        try:
+                            x = float(coords[0]); y = float(coords[1])
+                        except ValueError:
+                            continue
+                        wx, wy = _to_world(x, y)
+                        pts.append((wx, wy))
+                if not pts:
+                    el.clear()
+                    continue
+                for (wx, wy) in pts:
+                    poly_xy.append(wx); poly_xy.append(wy)
+                poly_starts.append(len(poly_xy) // 2)
+                poly_rgba.extend(_parse_color(el.get('color')))
+                poly_flags.append(1 if _parse_bool(el.get('fill'), default=False) else 0)
+                try:
+                    poly_layer.append(float(el.get('layer') or '0'))
+                except ValueError:
+                    poly_layer.append(0.0)
+                poly_ids.append(el.get('id') or '')
+                poly_types.append(el.get('type') or '')
+                el.clear()
+            elif el.tag == 'poi':
+                # Two coordinate forms: (x,y) on net, or (lon,lat) absolute.
+                lon = el.get('lon'); lat = el.get('lat')
+                if lon is not None and lat is not None:
+                    try:
+                        wx = float(lon); wy = float(lat)
+                    except ValueError:
+                        el.clear(); continue
+                    # If we have a geo network we can use directly; for a
+                    # non-geo net there's no sensible mapping, skip the POI.
+                    if not geo_ref:
+                        el.clear(); continue
+                else:
+                    try:
+                        x = float(el.get('x') or '0')
+                        y = float(el.get('y') or '0')
+                    except ValueError:
+                        el.clear(); continue
+                    wx, wy = _to_world(x, y)
+                poi_xy.append(wx); poi_xy.append(wy)
+                poi_rgba.extend(_parse_color(el.get('color'), default=(255, 0, 0, 255)))
+                try:
+                    poi_layer.append(float(el.get('layer') or '0'))
+                except ValueError:
+                    poi_layer.append(0.0)
+                try:
+                    poi_width.append(float(el.get('width') or '0'))
+                except ValueError:
+                    poi_width.append(0.0)
+                try:
+                    poi_height.append(float(el.get('height') or '0'))
+                except ValueError:
+                    poi_height.append(0.0)
+                poi_ids.append(el.get('id') or '')
+                poi_types.append(el.get('type') or '')
+                poi_image_urls.append(el.get('imgFile') or '')
+                el.clear()
+            elif el.tag in ('busStop', 'trainStop', 'containerStop',
+                            'chargingStation', 'parkingArea',
+                            'inductionLoop', 'e1Detector',
+                            'laneAreaDetector', 'e2Detector',
+                            'entryExitDetector', 'e3Detector'):
+                # Handled by later families; clear so memory doesn't grow.
+                el.clear()
+    except (OSError, ET.ParseError) as exc:
+        print("Warning: failed to parse polygon source %s: %s" % (xml_path, exc))
+        return None
+
+    poly_count = len(poly_ids)
+    poi_count  = len(poi_ids)
+    if poly_count == 0 and poi_count == 0:
+        return None
+
+    pd = sumo_pb2.PolygonData(
+        version=_CACHE_VERSION,
+        geo_referenced=geo_ref,
+        poly_count=poly_count,
+        poly_starts=poly_starts.tobytes(),
+        poly_xy=poly_xy.tobytes(),
+        poly_rgba=poly_rgba.tobytes(),
+        poly_flags=poly_flags.tobytes(),
+        poly_layer=poly_layer.tobytes(),
+        poly_ids=poly_ids,
+        poly_types=poly_types,
+        poi_count=poi_count,
+        poi_xy=poi_xy.tobytes(),
+        poi_rgba=poi_rgba.tobytes(),
+        poi_layer=poi_layer.tobytes(),
+        poi_width=poi_width.tobytes(),
+        poi_height=poi_height.tobytes(),
+        poi_ids=poi_ids,
+        poi_types=poi_types,
+        poi_image_url=poi_image_urls,
+    )
+    cache_path = _cache_path(xml_path, 'poly')
+    with open(cache_path, 'wb') as f:
+        f.write(pd.SerializeToString())
+    print("Wrote polygon cache: %s (%d polys, %d POIs)"
+          % (cache_path, poly_count, poi_count))
+    return cache_path
+
+
+def _resolve_additional_files(sumocfg_path: str, cfg_opts: dict, extra: list[str]) -> list[str]:
+    """Return absolute paths of every additional file referenced by the
+    sumocfg plus any `--additional-file` / `--poly-file` CLI overrides.
+    Tokens are comma- or whitespace-separated, as accepted by sumo.
+    """
+    base = os.path.dirname(os.path.abspath(sumocfg_path))
+    out: list[str] = []
+    seen: set[str] = set()
+    raw = cfg_opts.get("additional-files") or ""
+    for token in raw.replace(',', ' ').split():
+        path = token if os.path.isabs(token) else os.path.join(base, token)
+        path = os.path.abspath(path)
+        if path not in seen and os.path.isfile(path):
+            seen.add(path); out.append(path)
+    for token in extra:
+        path = os.path.abspath(token)
+        if path not in seen and os.path.isfile(path):
+            seen.add(path); out.append(path)
+    return out
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Publish SUMO simulation state via eCAL")
     p.add_argument("--sumo-cfg", default=None,
@@ -364,6 +580,9 @@ def parse_args():
                         "interval, frontend frame_ms, sim/native µs, C++ getStats breakdown). "
                         "Always on in --benchmark / --benchmark-full modes. Off by default to "
                         "keep production logs quiet.")
+    p.add_argument("--additional-file", action="append", default=[], metavar="PATH",
+                   help="Extra SUMO additional XML file(s) to scan for polygons / POIs / stops / "
+                        "detectors. Repeatable. Augments any <additional-files> entry from the sumocfg.")
     return p.parse_args()
 
 
@@ -378,6 +597,7 @@ def main():
     ecal_core.initialize("sumo_publisher")
 
     pub_network      = _make_publisher("sumo/network",      "sumo.NetworkData")
+    pub_additionals  = _make_publisher("sumo/additionals",  "sumo.AdditionalsNotice")
     pub_simstep      = _make_publisher("sumo/simstep",      "sumo.SimStepBin")
     pub_vehicletypes = _make_publisher("sumo/vehicletypes", "sumo.VehicleTypeDict")
     pub_log          = _make_publisher("sumo/log",          "sumo.LogMessage")
@@ -929,6 +1149,66 @@ def main():
                 _log("ERROR", "Network build/load failed — step loop not started. Check output above.")
                 return
 
+            # ------------------------------------------------------------------
+            # Additional files: polygons / POIs (stops & detectors land later).
+            # Each source produces at most one cache per family. We try the
+            # filename-stamped cache first so unchanged files don't even need a
+            # network re-read; on miss we lazily read the net (or reuse the one
+            # already loaded for the network cache miss above).
+            # ------------------------------------------------------------------
+            try:
+                add_files = _resolve_additional_files(sumocfg_path, cfg_opts, args.additional_file)
+                _net_for_proj = None
+                def _get_net():
+                    nonlocal _net_for_proj
+                    if _net_for_proj is None:
+                        # On cache HIT above, 'net' was never read; do it now.
+                        # On cache MISS, the local 'net' from the else-branch is
+                        # already loaded but out of scope here; re-reading is
+                        # acceptable since this only fires when polygon caches
+                        # also need a rebuild (i.e. user edited a poly file).
+                        _net_for_proj = sumolib.net.readNet(net_file, withInternal=False)
+                    return _net_for_proj
+
+                for src in add_files:
+                    families = _classify_additional_file(src)
+                    if 'polygons' not in families:
+                        continue
+                    poly_cache = _cache_path(src, 'poly')
+                    geo_ref_flag = ng.geo_referenced
+                    needs_build = True
+                    try:
+                        if os.path.getmtime(poly_cache) >= os.path.getmtime(src):
+                            needs_build = False
+                            print("Using cached polygon binary: %s" % poly_cache)
+                    except OSError:
+                        pass
+                    if needs_build:
+                        built = _build_polygon_binary(src, _get_net())
+                        if built is None:
+                            continue
+                        poly_cache = built
+                    notice = sumo_pb2.AdditionalsNotice(
+                        source_path=src,
+                        cache_path=poly_cache,
+                        family=sumo_pb2.AdditionalsNotice.POLYGONS,
+                        geo_referenced=geo_ref_flag,
+                    ).SerializeToString()
+                    pub_additionals.send(notice)
+                    # Re-send like network if no subscriber yet — bridge may not
+                    # have discovered us during this load's tight window.
+                    if pub_additionals.get_subscriber_count() == 0:
+                        def _resend(payload=notice):
+                            for _ in range(60):
+                                time.sleep(1.0)
+                                if pub_additionals.get_subscriber_count() > 0:
+                                    pub_additionals.send(payload)
+                                    break
+                        threading.Thread(target=_resend, daemon=True).start()
+            except Exception as exc:
+                print("ERROR building/publishing additionals: %s" % exc)
+                traceback.print_exc()
+
             # Wait for the bridge to ack that it has loaded the network cache into _network_frame.
             # Skipped in headless benchmark (no bridge); falls back to 10 s timeout otherwise.
             evt = ctrl.get("network_ack_event")
@@ -1183,8 +1463,8 @@ def main():
         # Set all eCAL publisher/service references to None so nanobind's refcount reaches
         # zero before ecal_core.finalize() is called. Closures see the update because Python
         # closures capture variables by reference (via cell objects), not values.
-        nonlocal pub_network, pub_simstep, pub_vehicletypes, pub_log, svc
-        pub_network = pub_simstep = pub_vehicletypes = pub_log = svc = None
+        nonlocal pub_network, pub_additionals, pub_simstep, pub_vehicletypes, pub_log, svc
+        pub_network = pub_additionals = pub_simstep = pub_vehicletypes = pub_log = svc = None
         # Release the native libsumo::ECal publishers BEFORE ecal_core.finalize() so the C++
         # destructors run while the shared libecal_core.so process state is still valid.
         if sim.get("use_native_ecal") and _has_native_ecal:
