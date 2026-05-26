@@ -1413,9 +1413,12 @@ scenario_dir/
 Rules:
 - Cache dir = `os.path.join(os.path.dirname(source_file), '__ecaldeck__')`.
 - Filename = `<basename(source)>.<family>.v<VERSION>.bin`. Family tag lets one
-  additional file produce up to one cache per family. Version-in-filename
-  means stale caches don't have to be opened to be rejected — and old
-  versions can be garbage-collected by listing the dir.
+  additional file produce up to one cache per family. A **single
+  `_CACHE_VERSION`** constant (the same one already used by `NetworkGeometry`)
+  stamps every cache file — any incompatible proto / builder change anywhere
+  bumps it and invalidates all cached artefacts together. Version-in-filename
+  means stale caches don't have to be opened to be rejected, and old versions
+  can be garbage-collected by listing the dir.
 - Created lazily (`os.makedirs(..., exist_ok=True)`) on first write.
 - A `.gitignore` containing `*` is dropped into the dir on creation so users
   don't accidentally commit caches.
@@ -1528,9 +1531,12 @@ Notes:
 
 #### Publisher (`sumo_ecal_publisher.py`)
 
-1. `_POLY_CACHE_VERSION = 1`, `_STOPS_CACHE_VERSION = 1`,
-   `_DET_CACHE_VERSION = 1` constants (independent so a change to detector
-   layout doesn't invalidate poly caches).
+1. Reuse the existing `_CACHE_VERSION` constant (currently `7` for
+   `NetworkGeometry`); any change to a polygon/stop/detector field bumps
+   the same number and invalidates **all** caches together. This keeps
+   versioning trivial at the cost of occasionally regenerating untouched
+   caches — acceptable given how cheap they are to rebuild compared to the
+   network.
 2. Resolve additional files at load time:
    - Read `<additional-files>` from the sumocfg (already parsed via
      `sumolib.options.readOptions`); split on whitespace/comma.
@@ -1645,8 +1651,8 @@ Wire all three as `additional-files`. Manual checklist:
 - Reload same sumocfg → log lines say "Using cached <family> binary".
 - Touch one source file → that file's caches invalidated and rebuilt, others
   reused.
-- Bump one family's `_*_CACHE_VERSION` and reload → only that family's caches
-  regenerated.
+- Bump one family's proto layout and reload → `_CACHE_VERSION` bump
+  invalidates all caches; all three families regenerated.
 
 #### Step ordering (recommended commits)
 

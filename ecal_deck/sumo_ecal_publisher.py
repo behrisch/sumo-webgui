@@ -77,15 +77,39 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 7  # increment on any incompatible NetworkGeometry format change
+_CACHE_VERSION = 7  # increment on any incompatible cache format change (network or additionals)
+
+
+def _cache_path(source_file: str, family: str) -> str:
+    """Return the binary cache path for `source_file` and `family` under a
+    `__ecaldeck__/` sibling directory. Filename is
+    `<basename(source)>.<family>.v<VERSION>.bin` so stale caches can be
+    rejected by listing the dir (no need to open them).
+
+    The directory is created lazily and given a `.gitignore` containing `*`
+    so users don't accidentally commit caches.
+    """
+    src_dir  = os.path.dirname(os.path.abspath(source_file))
+    cache_dir = os.path.join(src_dir, '__ecaldeck__')
+    if not os.path.isdir(cache_dir):
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            gi = os.path.join(cache_dir, '.gitignore')
+            if not os.path.exists(gi):
+                with open(gi, 'w') as f:
+                    f.write('*\n')
+        except OSError:
+            pass
+    base = os.path.basename(source_file)
+    return os.path.join(cache_dir, "%s.%s.v%d.bin" % (base, family, _CACHE_VERSION))
 
 
 def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
-    """Serialize NetworkGeometry proto to <net_file>.ecaldeck; return (cache_path, ng).
+    """Serialize NetworkGeometry proto to the cache file; return (cache_path, ng).
 
     Skips regeneration if the cache is newer than the net file and the version matches.
     """
-    cache_path = net_file + '.ecaldeck'
+    cache_path = _cache_path(net_file, 'net')
 
     geo_ref = net.hasGeoProj()
 
@@ -852,7 +876,7 @@ def main():
                 _log("ERROR", "Could not locate net-file entry in %s" % sumocfg_path)
                 return
             net_file   = os.path.join(os.path.dirname(os.path.abspath(sumocfg_path)), net_value)
-            cache_path = net_file + '.ecaldeck'
+            cache_path = _cache_path(net_file, 'net')
 
             # Build/read the network cache, publish it to the bridge, then start SUMO.
             # This must all happen before traci.start() because libsumo holds the Python

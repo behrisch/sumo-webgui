@@ -80,7 +80,7 @@ message GetStateResponse {
   int32  step_interval_current = 4;
   bool   step_at_min_bound     = 5;
   bool   step_at_max_bound     = 6;
-  string network_cache_path    = 7; // path to .ecaldeck file; empty if no network loaded
+  string network_cache_path    = 7; // path to binary network cache file; empty if no network loaded
   bool   simulation_ready      = 8; // true only after libsumo has finished loading and the step loop is running
   bool   benchmark             = 9; // true when publisher was started with --benchmark
 }
