@@ -688,16 +688,15 @@ export default function App() {
   }
 
   return (
-    <div style={{ width: '100vw', height: '100vh' }}>
+    <div style={{ width: '100vw', height: '100vh', background: '#1a1a2e' }}>
       <DeckGL views={new OrthographicView({ id: 'ortho' })} viewState={activeView as OrthographicViewState}
         onViewStateChange={onViewChange} controller layers={layers} onClick={handleClick}
+        style={{ background: '#1a1a2e' }}
         onBeforeRender={() => performance.mark('deck-render-start')}
         onAfterRender={() => {
           performance.mark('deck-render-end');
           performance.measure('deck-render', 'deck-render-start', 'deck-render-end');
-        }}>
-        <div style={{ background: '#1a1a2e', width: '100%', height: '100%' }} />
-      </DeckGL>
+        }} />
       {panel}
       {infoPanel}
       {fileBrowser}
