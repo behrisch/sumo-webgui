@@ -6,7 +6,7 @@ export type SelectedObject =
   | { type: 'vehicle';   id: string }
   | { type: 'person';    id: string }
   | { type: 'container'; id: string }
-  | { type: 'edge';      id: string }
+  | { type: 'edge';      id: string; subtype?: 'internal' | 'crossing' | 'walkingarea' }
   | { type: 'junction';  id: string }
   | { type: 'tls';       id: string; tlIndex: number };
 
@@ -52,7 +52,6 @@ function VehicleInfo({ id, snapshot, attrConfig }: { id: string; snapshot: Vehic
   const attrNames = attrConfig?.vehicle_enabled ?? [];
   return (
     <>
-      {row('id',    id)}
       {row('speed', speed.toFixed(1) + ' m/s (' + (speed * 3.6).toFixed(0) + ' km/h)')}
       {row('angle', angle.toFixed(0) + '°')}
       {attrNames.map((name, k) => {
@@ -68,7 +67,6 @@ function AgentInfo({ id, snapshot }: { id: string; snapshot: VehicleSnapshot | n
   if (idx < 0) return <div style={{ opacity: 0.5 }}>No longer present</div>;
   return (
     <>
-      {row('id',    id)}
       {row('angle', (snapshot!.agent_angles[idx] ?? 0).toFixed(0) + '°')}
     </>
   );
@@ -77,10 +75,9 @@ function AgentInfo({ id, snapshot }: { id: string; snapshot: VehicleSnapshot | n
 function EdgeInfo({ id, edgeAttr, edgeIdToIndex }: { id: string; edgeAttr: EdgeAttrState | null; edgeIdToIndex: Map<string, number> }) {
   const ei = edgeIdToIndex.get(id);
   if (ei === undefined || !edgeAttr || edgeAttr.values.length === 0)
-    return <>{row('id', id)}<div style={{ opacity: 0.5 }}>No edge data collected</div></>;
+    return <div style={{ opacity: 0.5 }}>No edge data collected</div>;
   return (
     <>
-      {row('id', id)}
       {edgeAttr.attrNames.map((name, k) => {
         const val = edgeAttr.values[k][ei];
         return isNaN(val) ? null : row(name, val.toFixed(3));
@@ -135,11 +132,17 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
     vehicle: 'Vehicle', person: 'Person', container: 'Container',
     edge: 'Edge', junction: 'Junction', tls: 'Signal',
   };
+  const edgeSubtypeTitles: Record<string, string> = {
+    internal: 'Internal lane', crossing: 'Crossing', walkingarea: 'Walking area',
+  };
+  const headerTitle = selected.type === 'edge' && selected.subtype
+    ? edgeSubtypeTitles[selected.subtype]
+    : titles[selected.type];
 
   return (
     <div style={panel}>
       <div style={header}>
-        <span style={{ fontWeight: 'bold' }}>{titles[selected.type]} — {selected.id}</span>
+        <span style={{ fontWeight: 'bold' }}>{headerTitle} — {selected.id}</span>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {selected.type === 'vehicle' && (
             <button onClick={onFollow} title={following ? 'Stop following' : 'Follow vehicle'} style={{
@@ -159,7 +162,6 @@ export function InfoPanel({ selected, snapshot, edgeAttr, edgeIdToIndex, attrCon
       {selected.type === 'person'    && <AgentInfo id={selected.id} snapshot={snapshot} />}
       {selected.type === 'container' && <AgentInfo id={selected.id} snapshot={snapshot} />}
       {selected.type === 'edge'      && <EdgeInfo id={selected.id} edgeAttr={edgeAttr} edgeIdToIndex={edgeIdToIndex} />}
-      {selected.type === 'junction'  && row('id', selected.id)}
       {selected.type === 'tls' && (
         <TLSInfo id={selected.id} tlIndex={selected.tlIndex} tlsLights={tlsLights} />
       )}

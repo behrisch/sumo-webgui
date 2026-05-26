@@ -44,6 +44,19 @@ message NetworkGeometry {
   // Lane permission class — one byte per lane:
   //   0 = pedestrian/other  1 = bicycle only  2 = motorised (passenger/bus/truck/…)
   bytes           lane_perm_class          = 23; // u8[]  LE — one byte per lane
+
+  // Stop line marker — one byte per lane, 1 if the lane ends at a stop-controlled
+  // approach (priority_stop, allway_stop, rail_signal, rail_crossing). TLS
+  // approaches are not marked here because the TLSLayer already draws a runtime
+  // bar at the lane end.
+  bytes           lane_has_stopline        = 24; // u8[]  LE — one byte per lane
+
+  // Lane function — one byte per lane:
+  //   0 = normal road lane
+  //   1 = internal junction connector (curved arc through intersection)
+  //   2 = pedestrian crossing
+  //   3 = walking area
+  bytes           lane_function            = 25; // u8[]  LE — one byte per lane
 }
 
 // ---------------------------------------------------------------------------

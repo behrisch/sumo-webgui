@@ -8,7 +8,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
-import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer } from './layers/NetworkLayer';
+import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer, buildCrossingLayer, buildWalkingAreaLayer } from './layers/NetworkLayer';
+import { buildStopLineLayer } from './layers/StopLineLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
 import { buildAgentLayer } from './layers/PersonLayer';
@@ -63,6 +64,10 @@ export interface ParsedNetwork {
   laneArrowDirs: Uint8Array;
   // permission class — one byte per lane: 0=pedestrian, 1=bike, 2=motorised
   lanePermClass: Uint8Array;
+  // stop-line marker — one byte per lane: 1 if lane ends at a stop-controlled junction
+  laneHasStopline: Uint8Array;
+  // lane function — one byte per lane: 0=normal, 1=internal, 2=crossing, 3=walkingarea
+  laneFunction: Uint8Array;
 }
 
 // ts-proto decodes bytes fields as Uint8Array with a potentially non-zero byteOffset
@@ -113,6 +118,16 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   const lanePermClass = msg.lane_perm_class instanceof Uint8Array
     ? msg.lane_perm_class
     : new Uint8Array(msg.lane_perm_class);
+
+  // Stop-line marker — one byte per lane
+  const laneHasStopline = msg.lane_has_stopline instanceof Uint8Array
+    ? msg.lane_has_stopline
+    : new Uint8Array(msg.lane_has_stopline);
+
+  // Lane function — one byte per lane (0=normal, 1=internal, 2=crossing, 3=walkingarea)
+  const laneFunction = msg.lane_function instanceof Uint8Array
+    ? msg.lane_function
+    : new Uint8Array(msg.lane_function);
 
   // Per-lane bounding boxes for viewport culling, plus overall network bbox.
   const laneCount0 = msg.lane_ids.length;
@@ -195,6 +210,8 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
     dashedMarkingPositions,
     laneArrowDirs,
     lanePermClass,
+    laneHasStopline,
+    laneFunction,
   };
 }
 
@@ -480,6 +497,58 @@ export default function App() {
     });
   }, [vehicleSnapshot, following, selectedObject, parsed]);
 
+  // Static network layers — memoized on parsed only so the layer instances are stable
+  // across frames. deck.gl skips GPU re-upload and junction re-tessellation when the
+  // same instance is passed again.
+  const [edgeLayer, junctionLayer, laneIndexMap] = useMemo(() => {
+    if (!parsed) return [null, null, null] as const;
+    return buildNetworkLayer(parsed);
+  }, [parsed]);
+
+  const [autotune, setAutotune] = useState(true);
+  const [intervalCurrent, setIntervalCurrent] = useState(1);
+  const sendStepConfig = (tune: boolean) =>
+    sendCommand('set_step_config', { autotune: tune });
+
+  // Lane markings and turning arrows — also static, memoized on parsed.
+  const markingLayers = useMemo(() => {
+    if (!parsed) return [];
+    return buildMarkingLayer(parsed);
+  }, [parsed]);
+  const arrowLayer = useMemo(() => {
+    if (!parsed) return null;
+    return buildArrowLayer(parsed);
+  }, [parsed]);
+  const stopLineResult = useMemo(() => {
+    if (!parsed) return null;
+    return buildStopLineLayer(parsed);
+  }, [parsed]);
+  const stopLineLayer    = stopLineResult?.layer ?? null;
+  const stopLineLaneIdx  = stopLineResult?.laneIndices ?? null;
+
+  const walkingAreaResult = useMemo(() => {
+    if (!parsed) return null;
+    return buildWalkingAreaLayer(parsed);
+  }, [parsed]);
+  const walkingAreaLayer    = walkingAreaResult?.layer ?? null;
+  const walkingAreaLaneIdx  = walkingAreaResult?.laneIndices ?? null;
+
+  const crossingResult = useMemo(() => {
+    if (!parsed) return null;
+    return buildCrossingLayer(parsed);
+  }, [parsed]);
+  const crossingLayer    = crossingResult?.layer ?? null;
+  const crossingLaneIdx  = crossingResult?.laneIndices ?? null;
+
+  // Helper: any layer whose pickable items map back to a global lane index can
+  // share this logic. Returns the edge id, or undefined if the lane index is
+  // out of range / lane has no edge.
+  const laneIndexToEdgeId = useCallback((li: number | undefined) => {
+    if (li === undefined || !parsed) return undefined;
+    const edgeIdx = parsed.laneEdgeIndices[li];
+    return edgeIdx !== undefined ? parsed.edgeIds[edgeIdx] : undefined;
+  }, [parsed]);
+
   const handleClick = useCallback((info: PickingInfo) => {
     const layerId = info.layer?.id;
     if (!layerId || !info.picked) { setSelectedObject(null); return; }
@@ -498,9 +567,27 @@ export default function App() {
       const id = vehicleSnapshot?.agent_ids[info.index];
       if (id) setSelectedObject({ type: 'container', id });
     } else if (layerId === 'lanes' || layerId === 'edgedata') {
-      const edgeIdx = parsed?.laneEdgeIndices[info.index];
-      const id = edgeIdx !== undefined ? parsed?.edgeIds[edgeIdx] : undefined;
+      // For 'lanes', info.index is into the filtered drivable subset; translate
+      // back to the global lane index via laneIndexMap. The 'edgedata' layer
+      // uses its own filtered ordering — see EdgeDataLayer for how that case
+      // already maps back via parsed.edgeIds.
+      const li = layerId === 'lanes' && laneIndexMap
+        ? laneIndexMap[info.index]
+        : info.index;
+      const id = laneIndexToEdgeId(li);
+      if (id) {
+        const subtype = parsed?.laneFunction?.[li] === 1 ? 'internal' : undefined;
+        setSelectedObject({ type: 'edge', id, ...(subtype && { subtype }) });
+      }
+    } else if (layerId === 'stop-lines' && stopLineLaneIdx) {
+      const id = laneIndexToEdgeId(stopLineLaneIdx[info.index]);
       if (id) setSelectedObject({ type: 'edge', id });
+    } else if (layerId === 'walking-areas' && walkingAreaLaneIdx) {
+      const id = laneIndexToEdgeId(walkingAreaLaneIdx[info.index]);
+      if (id) setSelectedObject({ type: 'edge', id, subtype: 'walkingarea' });
+    } else if (layerId === 'crossings' && crossingLaneIdx) {
+      const id = laneIndexToEdgeId(crossingLaneIdx[info.index]);
+      if (id) setSelectedObject({ type: 'edge', id, subtype: 'crossing' });
     } else if (layerId === 'junctions') {
       const id = parsed?.junctionIds[info.index];
       if (id) setSelectedObject({ type: 'junction', id });
@@ -510,30 +597,7 @@ export default function App() {
     } else {
       setSelectedObject(null);
     }
-  }, [vehicleSnapshot, parsed]);
-
-  const [autotune, setAutotune] = useState(true);
-  const [intervalCurrent, setIntervalCurrent] = useState(1);
-  const sendStepConfig = (tune: boolean) =>
-    sendCommand('set_step_config', { autotune: tune });
-
-  // Static network layers — memoized on parsed only so the layer instances are stable
-  // across frames. deck.gl skips GPU re-upload and junction re-tessellation when the
-  // same instance is passed again.
-  const [edgeLayer, junctionLayer] = useMemo(() => {
-    if (!parsed) return [null, null];
-    return buildNetworkLayer(parsed);
-  }, [parsed]);
-
-  // Lane markings and turning arrows — also static, memoized on parsed.
-  const markingLayers = useMemo(() => {
-    if (!parsed) return [];
-    return buildMarkingLayer(parsed);
-  }, [parsed]);
-  const arrowLayer = useMemo(() => {
-    if (!parsed) return null;
-    return buildArrowLayer(parsed);
-  }, [parsed]);
+  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
@@ -556,11 +620,14 @@ export default function App() {
     // Static layers (memoized instances) must always stay in the array — removing and
     // re-adding the same instance causes deck.gl to skip re-initialisation because
     // layer.state already exists from the previous mount. Use the `visible` prop instead.
-    if (junctionLayer) result.push(junctionLayer.clone({ visible: visibility.junctions }));
-    if (edgeLayer)     result.push(edgeLayer.clone({ visible: visibility.edges }));
+    if (junctionLayer)    result.push(junctionLayer.clone({ visible: visibility.junctions }));
+    if (walkingAreaLayer) result.push(walkingAreaLayer.clone({ visible: visibility.junctions }));
+    if (edgeLayer)        result.push(edgeLayer.clone({ visible: visibility.edges }));
     for (const ml of markingLayers) result.push(ml.clone({ visible: visibility.edges }));
     if (edgeDataLayer) result.push(edgeDataLayer);
     if (arrowLayer)    result.push(arrowLayer.clone({ visible: visibility.edges }));
+    if (stopLineLayer) result.push(stopLineLayer.clone({ visible: visibility.edges }));
+    if (crossingLayer) result.push(crossingLayer.clone({ visible: visibility.edges }));
     if (visibility.tls)
       result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
     if (visibility.vehicles) {
@@ -581,7 +648,7 @@ export default function App() {
     performance.mark('layers-build-end');
     performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, edgeDataLayer, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (

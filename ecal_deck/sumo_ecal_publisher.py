@@ -77,7 +77,7 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 4  # increment on any incompatible NetworkGeometry format change
+_CACHE_VERSION = 7  # increment on any incompatible NetworkGeometry format change
 
 
 def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
@@ -120,11 +120,26 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                             'bus', 'truck', 'trailer', 'motorcycle', 'moped', 'taxi', 'evehicle'})
     lane_perm_cls = _array.array('B')  # uint8 LE
 
+    # stop-line marker: per sumo-gui, a white stop bar is drawn for every
+    # outgoing link in state 'm' (minor), 's' (stop), 'w' (allway-stop), or
+    # '=' (equal). TLS-controlled links are intentionally excluded — those
+    # are visualised by the runtime TLSLayer. The decision is per-CONNECTION,
+    # not per-junction-type: a single priority junction has minor approaches
+    # (which get a bar) AND major approaches (which don't).
+    _STOPLINE_LINK_STATES = frozenset({'m', 's', 'w', '='})
+    lane_has_stopline = _array.array('B')  # uint8 LE
+
+    # lane function: 0=normal, 1=internal connector, 2=crossing, 3=walkingarea
+    _FUNC_CODE = {'': 0, 'internal': 1, 'crossing': 2, 'walkingarea': 3}
+    lane_function = _array.array('B')  # uint8 LE
+
     for ei, edge in enumerate(net.getEdges()):
         edge_ids.append(edge.getID())
         lanes = edge.getLanes()
         n_lanes = len(lanes)
-        is_internal = edge.getID().startswith(':')
+        edge_func = edge.getFunction()  # "", "internal", "crossing", "walkingarea", ...
+        func_code = _FUNC_CODE.get(edge_func, 1)
+        is_internal = func_code != 0
         for li, lane in enumerate(lanes):
             lane_ids.append(lane.getID())
             lane_edge_idx.append(ei)
@@ -167,12 +182,21 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                             dashed_mark_pos.append(y)
                         dashed_cur += len(lb)
 
-            # --- arrow direction bitmask ---
+            # --- arrow direction bitmask + stop-line marker ---
+            # Both derive from outgoing connections, so iterate once.
             outgoing = lane.getOutgoing()
             dirs = 0
-            for conn in outgoing:
-                dirs |= _DIR_BIT.get(conn.getDirection(), 0)
+            stopline = 0
+            if not is_internal:
+                for conn in outgoing:
+                    dirs |= _DIR_BIT.get(conn.getDirection(), 0)
+                    if conn.getState() in _STOPLINE_LINK_STATES:
+                        stopline = 1
             lane_arrow_dirs.append(dirs)
+            lane_has_stopline.append(stopline)
+
+            # --- lane function (normal / internal / crossing / walkingarea) ---
+            lane_function.append(func_code)
 
             # --- permission class ---
             try:
@@ -256,14 +280,22 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
         dashed_marking_positions=dashed_mark_pos.tobytes(),
         lane_arrow_directions=lane_arrow_dirs.tobytes(),
         lane_perm_class=lane_perm_cls.tobytes(),
+        lane_has_stopline=lane_has_stopline.tobytes(),
+        lane_function=lane_function.tobytes(),
     )
     data = ng.SerializeToString()
     with open(cache_path, 'wb') as f:
         f.write(data)
     print("Built network binary: %d edges, %d lanes, %d junctions, %d tls, "
-          "%d solid markings, %d dashed markings, %d bytes" % (
+          "%d solid markings, %d dashed markings, %d stop lines, "
+          "%d internal/%d crossing/%d walkingarea lanes, %d bytes" % (
               len(edge_ids), len(lane_ids), len(junc_ids), len(tls_entries),
-              len(solid_mark_starts) - 1, len(dashed_mark_starts) - 1, len(data)))
+              len(solid_mark_starts) - 1, len(dashed_mark_starts) - 1,
+              sum(lane_has_stopline),
+              sum(1 for f in lane_function if f == 1),
+              sum(1 for f in lane_function if f == 2),
+              sum(1 for f in lane_function if f == 3),
+              len(data)))
     return cache_path, ng
 
 
@@ -510,7 +542,10 @@ def main():
                 except Exception:
                     veh_attrs[k].append(0.0)
             lane = traci.vehicle.getLaneID(vid)
-            active_edges.add(lane[:lane.rfind("_")] if "_" in lane else lane)
+            eid = lane[:lane.rfind("_")] if "_" in lane else lane
+            # Skip internal edges (vehicles inside junctions) — they don't carry useful edge data
+            if not eid.startswith(':'):
+                active_edges.add(eid)
 
         # --- person section ---
         pers_ids = list(traci.person.getIDList())
@@ -843,7 +878,7 @@ def main():
                 if cached_geometry:
                     cp, ng = cache_path, cached_geometry
                 else:
-                    net = sumolib.net.readNet(net_file, withInternal=False)
+                    net = sumolib.net.readNet(net_file, withInternal=True)
                     cp, ng = _build_network_binary(net, net_file,
                                                    include_tls=len(net.getTrafficLights()) > 0)
 
@@ -885,7 +920,10 @@ def main():
 
             sim["geo_referenced"]  = ng.geo_referenced
             sim["converter"]       = _make_geo_converter(ng.proj_parameter, ng.net_offset)
-            sim["all_edges"]       = list(ng.edge_ids)
+            # NetworkGeometry includes internal/crossing/walkingarea edges (for rendering),
+            # but live edge-data (occupancy, vehicle counts, ...) only makes sense for normal
+            # edges, so the "all_edges" iteration list filters them out.
+            sim["all_edges"]       = [e for e in ng.edge_ids if not e.startswith(':')]
             sim["has_tls"]         = bool(ng.tls_entries)
             sim["edge_id_to_idx"]  = {eid: i for i, eid in enumerate(ng.edge_ids)}
             end_value              = cfg_opts.get("end")

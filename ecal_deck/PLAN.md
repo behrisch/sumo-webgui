@@ -561,22 +561,42 @@ Each item below requires a proto field addition, a `_build_network_binary` chang
 
 | Element | How to store | Notes |
 |---------|-------------|-------|
-| **Stopping lines** | `bytes lane_has_stopline` — u8 bit per lane (1 = has stop line); frontend derives the two endpoints from the lane's last shape point + perpendicular direction + lane width | Displayed as short perpendicular white bars at lane ends before junctions; highly visible in real traffic maps |
-| **Internal lane geometry** | Include `:` lanes in `lane_positions` / `lane_widths` / `lane_starts`; add `bool lane_is_internal` mask or use the existing `lane_perm_class` sentinel | Required before C++ EdgeBin can use all edges; internal lanes are curved arcs through junctions |
-| **Crosswalks** | `bytes crosswalk_starts` + `bytes crosswalk_positions` (f64[] LE) — one polygon per pedestrian crossing; derived from lanes with `allow="pedestrian"` that cross junction entries | Rendered as striped rectangles (zebra crossing pattern) or solid rectangles |
-| **Sidewalk / footpath distinction** | Extend `lane_perm_class` encoding (currently 0=pedestrian/other, 1=bicycle, 2=motorised) to separate 0=other, 1=pedestrian, 2=bicycle, 3=motorised | Allows frontend to render footpaths in a distinct style (narrower, different colour) |
+| **Stopping lines** ✅ implemented (cache v7) | `bytes lane_has_stopline` — u8 byte per lane (1 = stop line). The decision is per-outgoing-CONNECTION using the same link-state rule sumo-gui follows: a lane gets a stop bar if any outgoing connection has link state ∈ {`m` minor, `s` stop, `w` allway-stop, `=` equal}. TLS-controlled links are excluded (TLSLayer draws coloured runtime bars for those). Frontend (`StopLineLayer.ts`) derives the two endpoints from the lane's last shape point + perpendicular × half-width, converting the perpendicular offset back to degrees in geo mode (÷ 111 000, ÷ cos(lat) for longitude). | Renders as a white bar across every uncontrolled minor approach, matching sumo-gui. v7 widens the rule from the v5/v6 junction-type list to the per-connection link state. |
+| **Internal lane geometry** ✅ implemented (cache v6) | Publisher calls `sumolib.net.readNet(..., withInternal=True)`. `bytes lane_function` (u8 per lane) tags each lane as 0=normal, 1=internal connector, 2=crossing, 3=walkingarea. The main `lanes` PathLayer is built from a filtered subset that keeps normal+internal lanes (`sliceLanes(parsed, li => fn[li] <= 1)`); crossings get their own zebra layer; walking areas are dropped entirely (see follow-on below). `buildNetworkLayer` returns an extra `laneIndexMap: Uint32Array` so `App.handleClick` can translate the filtered-subset PickingInfo.index back to the global lane index. Markings, arrows, and stop lines are suppressed on non-normal lanes. | Internal connectors visualise traffic flow through junctions. Live edge-data (occupancy etc.) still filters out internal edges in `sim["all_edges"]` and `active_edges` — keeping EdgeBin payloads small. See "Internal edges in EdgeBin" below. |
+| **Crosswalks** ✅ implemented (cache v6) | Comes along with `withInternal=True`; crossing edges have `function="crossing"` so the `lane_function` byte tags them as 2. `NetworkLayer.buildCrossingLayer` renders them as a dashed `PathLayer` at lane width — `getDashArray: [2, 2]` (pixels) + `dashJustified: true` gives a tight zebra pattern that holds up across the useful zoom range. | `PathStyleExtension.dashGapUnits` doesn't yet support metres, so dashes are pixel-sized. If a true zoom-stable zebra is desired, switch to a `SolidPolygonLayer` of pre-computed stripe rectangles per crossing. |
+| **Walking-area pavement** ✅ implemented (cache v6) | For walking-area edges sumolib loads exactly one lane whose shape is the CCW boundary polygon (verified on doe). `NetworkLayer.buildWalkingAreaLayer` slices those lanes (`fn === 3`) and renders them as a `SolidPolygonLayer` (`_normalize: true`, grey fill 140/200) beneath the lanes layer. | Earlier doubts about "lane shape is a per-walk-path centerline" were wrong — the bright diagonals attributed to walking-areas were actually the stop-line meters-vs-degrees bug. |
+| **Sidewalk / footpath distinction** | Extend `lane_perm_class` encoding (currently 0=pedestrian/other, 1=bicycle, 2=motorised) to separate 0=other, 1=pedestrian, 2=bicycle, 3=motorised | Allows frontend to render footpaths in a distinct style (narrower, different colour). Still pending; would complement the walking-area styling already added in v6. |
 
-**Recommended order**: stopping lines first (high visual value, self-contained), then internal
-lane geometry (unblocks full EdgeBin coverage), then crosswalks, then sidewalk distinction.
+**Recommended order**: ~~stopping lines~~ ✅ (2026-05-26), ~~internal lane
+geometry~~ ✅ (2026-05-26), ~~crossings~~ ✅ (2026-05-26), then sidewalk
+distinction.
+
+**Open follow-on for stop lines**: extend the rule to cover unsignalised `priority` /
+`right_before_left` approaches with thinner / grey bars if a user requests a more
+sumo-gui-like look. Current rule deliberately stays minimal to avoid clutter on
+city-scale networks where almost every lane would otherwise get a marking.
+
+**Open follow-on for crossings**: render true zebra stripes (alternating
+white/transparent bars perpendicular to the crossing direction) via a custom
+`PolygonLayer` or a `PathStyleExtension({ dash: true })` configured to look like
+zebra crossings. Current solid-white rendering is functionally adequate but
+less visually distinctive.
 
 #### Internal edges in EdgeBin (follow-on to Phase A C++ publisher)
 
-Once internal lane geometry is in NetworkGeometry:
-1. Remove the `:` filter in the C++ edge pass — `MSEdgeControl::getEdges()` already includes all edges
-2. Update `_build_network_binary` to write `edge_ids` in `MSNet::getEdgeControl().getEdges()`
-   order (all edges including internal), replacing the current sumolib iteration
-3. Update the Python fallback EdgeBin path to use the same full edge list
-4. Bump `NetworkGeometry.version`
+Once internal lane geometry is in NetworkGeometry: ✅ internal lanes ship in
+`NetworkGeometry` since cache v6 (2026-05-26), and `edge_ids` already includes
+all `:` edges in `MSNet::getEdgeControl().getEdges()` order. The live EdgeBin
+path still filters internal edges (publisher-side `sim["all_edges"]` /
+`active_edges` skip `:` IDs) to keep payloads small. The remaining work to
+actually publish live edge data for internal edges is:
+1. Decide whether internal-edge metrics (occupancy, vehicle count, waiting
+   time) are useful enough to surface — most use cases don't care about per-
+   junction-arc statistics.
+2. If yes: remove the `:` filters in `sim["all_edges"]` and `active_edges`, and
+   verify EdgeBin payload growth is acceptable on city-scale networks.
+3. If yes: remove the `:` filter in the C++ edge pass — `MSEdgeControl::getEdges()`
+   already includes all edges.
 
 #### Configurable position mode (publisher → frontend coordinate system)
 
