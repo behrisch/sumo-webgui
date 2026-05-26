@@ -8,6 +8,8 @@ Accepts incoming JSON command messages and forwards them to the publisher via eC
 Binary frame layout: [u8 msg_type][protobuf payload bytes]
   4 = LogMessage, 5 = NetworkGeometry
   6 = SimStepBin (carries vehicles + persons + edges + TLS), 8 = VehicleTypeDict
+  9 = PolygonData (one per additional file that contains <poly>/<poi>)
+  10/11 reserved for stops / detectors
 
 Commands and responses remain JSON text frames (unchanged).
 
@@ -61,12 +63,22 @@ _TYPE_LOG           = 4
 _TYPE_NETWORK       = 5
 _TYPE_SIMSTEP       = 6
 _TYPE_VEHICLETYPES  = 8
+_TYPE_POLYGONS      = 9
+# 10/11 reserved for stops/detectors (later commits)
 
 TOPICS = {
     "sumo/simstep":      _TYPE_SIMSTEP,
     "sumo/log":          _TYPE_LOG,
     "sumo/network":      _TYPE_NETWORK,
     "sumo/vehicletypes": _TYPE_VEHICLETYPES,
+    "sumo/additionals":  -1,   # placeholder: family-discriminated in callback
+}
+
+# AdditionalsNotice.Family → binary type byte
+_ADDITIONALS_TYPE_BY_FAMILY = {
+    sumo_pb2.AdditionalsNotice.POLYGONS:  _TYPE_POLYGONS,
+    # sumo_pb2.AdditionalsNotice.STOPS:     10,
+    # sumo_pb2.AdditionalsNotice.DETECTORS: 11,
 }
 
 # ---------------------------------------------------------------------------
@@ -76,6 +88,9 @@ _connected: set = set()
 _network_frame: bytes | None = None             # cached type-5 frame for late joiners
 _simstep_snapshot_frame: bytes | None = None    # cached type-6 full-snapshot frame for late joiners
 _vehicletypes_frame: bytes | None = None        # cached type-8 frame for late joiners
+# Additional-file caches keyed by source_path so editing one file replaces only
+# its own entry; late joiners receive every cached frame on connect.
+_additionals_frames: dict[str, bytes] = {}
 _loop: asyncio.AbstractEventLoop | None = None
 _poller_task: asyncio.Task | None = None        # current _network_poller task
 
@@ -92,7 +107,27 @@ def _make_callback(topic: str, type_byte: int):
     def _cb(publisher_id, data_type_info, data):
         global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame
         try:
-            buf   = bytes(data.buffer)
+            buf = bytes(data.buffer)
+
+            if topic == "sumo/additionals":
+                notice = sumo_pb2.AdditionalsNotice()
+                notice.ParseFromString(buf)
+                tb = _ADDITIONALS_TYPE_BY_FAMILY.get(notice.family)
+                if tb is None:
+                    return  # family not yet supported (stops / detectors)
+                try:
+                    with open(notice.cache_path, 'rb') as f:
+                        payload = f.read()
+                except OSError as exc:
+                    print("bridge: failed to read additionals cache %r: %s"
+                          % (notice.cache_path, exc))
+                    return
+                addl_frame = bytes([tb]) + payload
+                _additionals_frames[notice.source_path] = addl_frame
+                if _loop is not None:
+                    _loop.call_soon_threadsafe(_reliable_send_bytes, addl_frame)
+                return
+
             frame = bytes([type_byte]) + buf
 
             if type_byte == _TYPE_NETWORK:
@@ -280,6 +315,10 @@ async def _send_initial_state(websocket) -> None:
                 await websocket.send(_vehicletypes_frame)
             if _simstep_snapshot_frame is not None:
                 await websocket.send(_simstep_snapshot_frame)
+            # Replay every cached additional-file frame (polygons / stops / detectors)
+            # so a freshly-connected client sees the same scene as long-running ones.
+            for addl in list(_additionals_frames.values()):
+                await websocket.send(addl)
         except Exception:
             return
 
@@ -318,6 +357,7 @@ async def _handler(websocket) -> None:
                     _network_frame = None
                     _simstep_snapshot_frame = None
                     _vehicletypes_frame = None
+                    _additionals_frames.clear()
                     if _poller_task and not _poller_task.done():
                         _poller_task.cancel()
                     _poller_task = asyncio.create_task(_network_poller())
