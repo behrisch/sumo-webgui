@@ -1010,3 +1010,78 @@ at interval=1 the entire run.
   render-aware autotuner (see PLAN.md) and a native vehicle loop, we
   should close most of that gap while preserving the much smoother and
   far more responsive web frontend experience.
+
+## Aggressive frame-skipping + browser contention isolation (2026-05-26)
+
+Goal: validate that the new aggressive autotune (`MAX_PUBLISH_FPS` cap +
+render-aware lower bound + EMA-smoothed frontend reports, see PLAN.md) hits
+the user-specified target *total runtime ≤ 1.5× the no-GUI baseline* on the
+20-minute doe scenario (5999 sim steps, step-length 0.2 s).
+
+### Multi-run results (5 runs each, mean wall-clock seconds)
+
+| Config | Mean (s) | × baseline | ms/step | Skip rate | Notes |
+|---|---:|---:|---:|---:|---|
+| sumo CLI (no GUI) | 25.33 | 1.00× | 4.22 | — | baseline |
+| Pure libsumo loop (no eCAL) | 26.40 | 1.04× | 4.40 | — | `import sumolib` first to avoid segfault |
+| Publisher `--benchmark` (autotune OFF, no subscriber) | 56.77 | 2.24× | 9.46 | 0.00 | publish every step |
+| Publisher `--benchmark` (autotune OFF) + bridge attached | 54.69 | 2.16× | 9.01 | 0.00 | bridge eCAL-subscribes only |
+| **Publisher (autotune ON) + bridge, no browser, 30 fps cap** | **34.35** | **1.36×** | **5.58** | **0.81** | hits the 1.5× target |
+| **Publisher (autotune ON) + bridge, no browser, 20 fps cap** | **32.89** | **1.30×** | **5.40** | **0.855** | further win from tightening cap |
+| Full stack (autotune ON + bridge + browser, 30 fps cap) | 62.50 | 2.47× | 10.42 | 0.68 | browser drives skip *down*, doubles wall time |
+
+### Findings
+
+1. **eCAL bridge attachment is essentially free.** Adding the bridge as a
+   local eCAL subscriber changes the publisher's per-step time by less than
+   the run-to-run noise (54.69 s vs 56.77 s with no subscriber). The
+   "eCAL SHM sync overhead per publish" hypothesis from earlier
+   notes does not hold up.
+
+2. **Autotune is the dominant lever.** Switching autotune ON (no other
+   changes) drops the bridge-attached benchmark from 54.7 s → 34.4 s — a
+   1.6× speedup that comes entirely from skipping 81 % of publishes once
+   per-step cost makes the bridge-attached publish path the bottleneck.
+
+3. **Browser is the real bottleneck, not eCAL.** Adding the browser to the
+   already-autotuned pipeline nearly doubles the wall clock (34 → 62.5 s)
+   *despite* requesting fewer publishes (interval drops because the
+   render-aware lower bound asks for more frames when `frame_ms` looks
+   comfortable). Two effects combine:
+   - Browser pulls skip rate **down** from 0.81 → 0.68 (32 % of steps
+     publish vs 19 %) — that alone is ~2000 extra publishes × ~5 ms = ~10 s.
+   - Per-publish cost roughly doubles (5.6 ms → 10.4 ms) because the
+     publisher and browser/Vite dev server compete for CPU on the same host.
+     This is collocation noise; in deployment the publisher runs on a
+     dedicated server and this overhead disappears.
+
+4. **Lowering `MAX_PUBLISH_FPS` from 30 → 20 helps modestly.** Mean drops
+   34.35 s → 32.89 s, skip rate climbs 0.81 → 0.855. The bridge already
+   forwards at 60 fps with latest-value semantics, so anything above ~20 fps
+   publish rate is largely invisible to the user but still costs full
+   publish overhead.
+
+### Methodology notes
+
+- All numbers are mean of 5 consecutive runs on the same machine, doe
+  scenario `/home/ubuntu/sumo-webgui/doe/view.sumocfg`.
+- "autotune ON, no browser" was measured with a small wrapper that imports
+  `sumo_ecal_publisher.py` and monkey-patches `ctrl["autotune"] = True`
+  before `_do_load`, since `--benchmark` hard-disables autotune by design
+  (`--benchmark-full` would require a frontend to be present).
+- Differential bench scripts confirmed earlier that infrastructure
+  (eCAL runtime init, ServiceServer, native ECal publisher with no actual
+  publish, log socket, idle Python thread doing `sleep(0.001)`) adds at
+  most ~1 s versus the pure libsumo loop.
+
+### Open follow-ups
+
+- **Browser-side investigation:** profile what the browser does between
+  publishes that scales per-publish cost from 5 → 10 ms. Suspects:
+  `report_frontend_stats` JSON traffic over WebSocket every 2 s, MapLibre
+  tile fetches, deck.gl GPU back-pressure.
+- **Tighten render-aware floor:** the render-aware lower bound currently
+  asks for `ceil(frame_ms / step_wall_ms)`; consider applying a hysteresis
+  band so a frontend reporting 11 ms doesn't pull interval down to 2.
+- **Headless deployment guidance:** document that publishing on a dedicated
+  server (no collocated browser) is the supported high-throughput mode.

@@ -437,81 +437,63 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 |----------|-------------|-------|---------------|
 | ~~High~~ | ~~**Investigate 35ms frontend baseline**~~ — addressed by step 11 binary typed-array transport; per-vehicle accessor callbacks and JS object allocation eliminated; `SimpleMeshLayer` binary attribute API removes the remaining accessor overhead | — | **implemented — see step 11** |
 | ~~High~~ | ~~**Phase B: binary WebSocket + binary network cache**~~ | — | **implemented — see below** |
-| Med | **Aggressive frame skipping milestone** (see below): `max_publish_fps` knob + render-aware autotune + frontend interpolation | `sumo_ecal_publisher.py` + `App.tsx` | ~27× RTF on doe full stack (vs 17× today), matching sumo-gui's 33× ballpark without sacrificing smoothness |
+| Low | **Frontend interpolation between publishes** — keep prev+current `VehicleSnapshot`, interpolate per-vehicle position per rAF tick. Deferred from the aggressive frame-skipping milestone now that interval ≈ 3 (≈ 30 fps) is usually smooth enough. | `useInterpolatedSnapshot.ts` + `App.tsx` | smooths visual stutter when MIN_FPS=10 floor kicks in |
 | Low | **Bridge timer precision** — replace `asyncio.sleep(1/60)` with wall-clock tracking | `ecal_ws_bridge.py` | msg/s: 100 → 60 (cosmetic given RAF sync) |
 
-#### Aggressive frame skipping (planned milestone)
+#### Aggressive frame skipping milestone
 
-Benchmark numbers show our pipeline running at ~50 % publisher skip on the
-full doe stack, while sumo-gui hits ~75 % on the same scenario. The
-publisher cap is conservative on purpose (smooth at the cost of CPU
-headroom), but the three tunables below bundled together would let us
-match or exceed sumo-gui's throughput while keeping the frontend smooth.
+**Status: implemented.** The publisher now enforces a 10–30 fps publish-rate
+band on top of the existing 1.5× overhead budget, and consumes rolling rAF
+frame times from the frontend to avoid publishing faster than the browser can
+render. See `MAX_PUBLISH_FPS` / `MIN_PUBLISH_FPS` in `sumo_ecal_publisher.py`.
 
-##### 1. `max_publish_fps` config knob
+Policy (applied inside the existing autotune block, every published step):
 
-Currently the autotuner has no notion of "useful publish rate" — it just
-tries to keep publisher overhead ≤ ⅓ of step time, so on cheap publishes
-it refuses to skip more even when no one would notice. Above ~30–60 fps
-of data updates humans cannot perceive the difference, so everything
-beyond is pure serialize + send + bridge-drop waste.
-
-Add a `max_publish_fps` to step config (default ~30). The autotuner gains
-a lower bound on interval:
-
-```python
-min_interval_fps_cap = max(1, ceil(steps_per_wall_second / max_publish_fps))
-interval = max(interval, min_interval_fps_cap)
+```
+interval_new = max(autotuned,            # ⅓-of-step-time budget
+                   max_fps_lower,        # ceil(steps_per_wall_sec / 30)
+                   frontend_lower)       # ceil(EMA(frontend_frame_ms) / step_wall_ms)
+interval_new = min(interval_new,
+                   min_fps_upper)        # ceil(steps_per_wall_sec / 10)
 ```
 
-For doe full stack (steps_per_wall_second ≈ 85, target 30 fps), that's
-interval = 3 → 67 % skip, matching sumo-gui territory.
+`MAX_FPS` is a hard cap to avoid wasting CPU on frames the bridge would drop
+("don't drop data frames to make things look faster than visible"). `MIN_FPS`
+is a *soft* visual-quality floor: when very fast sims would otherwise publish
+below 10 fps the floor wins, even if that pushes overhead past 1.5×. The
+priority order is encoded in the `interval_binding` flag (`budget` /
+`max_fps` / `min_fps` / `frontend`) and printed in the 5 s publisher report.
 
-##### 2. Render-aware autotune (already in this doc, above)
+Frontend integration: `App.tsx` posts `report_frontend_stats` every 2 s while
+running with `rolling_frame_ms` = the last-1-s rAF average from
+`usePerfStats`. The publisher EMA-smooths the value
+(`FRONTEND_FRAME_MS_EMA_ALPHA = 0.4`) so a single noisy 1 s sample doesn't
+oscillate the interval. `rolling_frame_ms == 0` means "no signal yet" and is
+ignored. Cumulative end-of-run reports (sent on `simulation_ready → false`)
+continue to drive the benchmark output and are distinguished by `frames > 0`
+so periodic reports don't clobber the benchmark snapshot.
 
-When the frontend reports its rolling `frame_time_ms`, push interval up
-so `publish_period ≥ frontend_frame_ms`. Otherwise the bridge drops
-frames the publisher just spent CPU producing.
+Cold-start guard: FPS bounds are skipped until the 5 s report window has at
+least 0.5 s of wall time, so a burst of cheap steps right after load can't pin
+the interval at a huge value before the steady-state rate is known.
 
-##### 3. Frontend interpolation between publishes
+Expected effect on doe full stack: publisher skip ~50 % → ~67 % (interval ≈ 3
+at ~85 steps/s × 30 fps cap); RTF ~17× → ~25–27×, matching sumo-gui range.
+Frontend interpolation between sparser snapshots is deferred — at 30 fps the
+visual stutter is small enough to leave the work until someone notices.
 
-Aggressive skipping alone makes vehicles visibly "jump" between frames:
-at interval=4, 0.2 s/step, RTF=17×, a 25 m/s car teleports 5 m every
-47 ms wall. sumo-gui hides this because sim and render share memory —
-render reads positions at "now" regardless of when sim last advanced. We
-don't. So aggressive skipping costs visual smoothness *unless* we
-interpolate on the frontend.
-
-Sketch:
-
-- Keep the previous `VehicleSnapshot` alongside the current one
-  (`prevSnapshot` ref, swapped on each new SimStep).
-- Each RAF tick, compute `t = (now - currentSnapshot.received_at_ms) /
-  (publishPeriodMs)`, clamped to `[0, 1]` (or slightly past 1 for
-  extrapolation when frames drop).
-- Per vehicle, interpolate position linearly using the snapshot's speed +
-  angle as a velocity fallback when prev/curr IDs match by index; for
-  vehicles that changed indices (insert/exit), no interpolation —
-  appear/disappear at the position from `currentSnapshot`.
-- Angles are already snake-case-snapped via `veh_angles`; linearly
-  interpolate with wrap-around handling.
-
-Approximate work: ~100 lines in `App.tsx` / a new
-`useInterpolatedSnapshot.ts` hook. Vehicle positions in
-`Float64Array(N×3)` are already in the right layout for a tight loop.
-
-##### Combined effect
-
-| | Now | + fps cap | + render-aware | + interpolation |
-| - | - | - | - | - |
-| Pub skip on doe full stack | 27 % | ~67 % | ~67 % | ~67 % |
-| Expected RTF | 17× | ~27× | ~27× | ~27× |
-| Visual smoothness | smooth | stuttery | stuttery | smooth |
-| Frontend skip rate | 14 % | <5 % | ~0 % | ~0 % |
-
-All three should ship together, ordered (1) → (2) → (3): (1) gives the
-RTF win but breaks smoothness, (2) prevents wasted publishes when the
-frontend lags, (3) restores smoothness so the RTF win is "free".
+**Update 2026-05-26.** `MAX_PUBLISH_FPS` lowered 30 → 20 after multi-run
+benchmarking showed that capping at 20 fps gives a measurable additional win
+without visible stutter (bridge already flushes at 60 fps with latest-value
+semantics, so anything above ~20 fps publish is largely invisible). Headless
+publisher + bridge with autotune ON now runs the 20-min doe scenario in **32.9 s
+(1.30× baseline, skip 0.855)** — comfortably inside the 1.5× target. See
+BENCHMARKING.md "Aggressive frame-skipping + browser contention isolation
+(2026-05-26)" for the full table. Full-stack with browser still costs ~62 s
+because of *browser CPU contention with a collocated publisher* (per-publish
+cost roughly doubles 5 ms → 10 ms when the browser shares the host); this gap
+disappears in deployments where publisher and viewer run on different
+machines.
 
 
 ---
@@ -519,6 +501,45 @@ frontend lags, (3) restores smoothness so the RTF win is "free".
 ## Open Items
 
 ### Near-term
+
+#### Browser CPU contention investigation (collocated publisher + viewer)
+
+**Motivation.** Multi-run benchmarks on 2026-05-26 showed that the headless
+pipeline (publisher + bridge + autotune, no browser) hits the 1.5× target
+(32.9 s vs 25.3 s baseline on doe 20-min) but adding a browser on the same host
+nearly doubles wall time (62.5 s, 2.47×). Per-publish cost grows 5 ms → 10 ms
+and the autotune asks for *more* publishes because frame_ms still looks healthy.
+The hypothesis is plain CPU contention from the browser + Vite dev server, not
+a fundamental cost in our pipeline.
+
+**Cheap experiments to try, in order:**
+
+1. **Production bundle benchmark.** Run `cd frontend && npm run build && npm
+   run preview` (Vite preview serves the built bundle on a static port) and
+   re-run `--benchmark-full` 5× against this static frontend instead of `npm
+   run dev`. Expected: HMR / dev-server / source-map overhead drops out, giving
+   a tighter upper bound on the inherent browser cost.
+2. **Cross-machine benchmark.** Run the publisher + bridge on one host and
+   open the browser on another (point it at `ws://<host>:8765`). Expected:
+   removes CPU contention entirely; full-stack time should approach the
+   headless 33 s.
+3. **Chrome DevTools Performance trace** during a 30 s window of the full-stack
+   benchmark. Identifies the actual heavy work: protobuf parse, React
+   reconciliation, deck.gl render, MapLibre tile fetches, or the
+   `report_frontend_stats` / `get_state` JSON traffic.
+4. **Hysteresis on render-aware floor.** The current rule
+   `frontend_lower = ceil(frame_ms / step_wall_ms)` pulls interval down to 2
+   whenever the browser reports comfortable frame times — add a dead-band so
+   the floor only relaxes when frame_ms is consistently below e.g. 0.7 ×
+   step_wall_ms.
+
+**Tauri is not on this list.** Tauri reuses the OS WebView (WebKit/WebView2)
+running the same deck.gl + WebGL + React stack, so per-frame cost is
+essentially unchanged. It is a packaging/UX win (single binary, native file
+picker, no separate Vite server), not a perf lever. The cheap experiments
+above subsume the perf benefit Tauri would deliver. See `TAURI.md` for the
+packaging rationale and integration plan, which remains scheduled for after
+the web frontend is feature-complete.
 
 #### NetworkGeometry extensions
 

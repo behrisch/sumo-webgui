@@ -142,14 +142,22 @@ message VehicleTypeDict {
 }
 
 // Frontend-side performance stats (rAF cadence and frame drop fraction).
+// Sent both periodically during a run (rolling values, used by the publisher's
+// render-aware autotune) and once at the end of a run (cumulative values, used
+// for benchmark reporting).
 message ReportFrontendStatsRequest {
-  double avg_frame_ms = 1;  // average time between rAF callbacks (ms)
-  double skip_rate    = 2;  // fraction of SimStepBin frames dropped (0–1)
-  int32  frames       = 3;  // total rAF frames rendered
+  double avg_frame_ms = 1;  // cumulative average time between rAF callbacks (ms)
+  double skip_rate    = 2;  // cumulative fraction of SimStepBin frames dropped (0–1)
+  int32  frames       = 3;  // cumulative rAF frames rendered
   // Free-form "key=value " pairs of average per-frame phase timings (ms),
   // e.g. "parse=0.3 veh_build=0.5 drain=0.1 layers=2.0 edge_build=1.8 deck=6.5".
   // Empty when the frontend did not collect a breakdown.
   string breakdown    = 4;
+  // Rolling (last ~1 s) values used by the publisher's render-aware autotune.
+  // 0 means "no rolling data available; ignore" — the publisher will not let
+  // these constrain the publish interval in that case.
+  double rolling_frame_ms = 5;
+  double rolling_skip_rate = 6;
 }
 
 // Unified high-frequency simulation snapshot — the sole payload on the

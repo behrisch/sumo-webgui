@@ -264,6 +264,28 @@ export default function App() {
     }
   }, [controlState]);
 
+  // Periodically push rolling rAF stats to the publisher so its autotune can
+  // avoid publishing faster than the frontend can actually render (and thus
+  // avoid wasting CPU on frames the bridge will drop). Only active while a
+  // simulation is running; the cumulative end-of-run report continues to fire
+  // separately in watchEndPollRef.
+  useEffect(() => {
+    if (!simReady || paused) return;
+    const id = setInterval(() => {
+      const p = perfRef.current;
+      sendCommand('report_frontend_stats', {
+        avg_frame_ms:      0,           // periodic reports don't update the cumulative average
+        skip_rate:         0,
+        frames:            0,
+        breakdown:         '',
+        rolling_frame_ms:  p.frameMs,   // last ~1 s rAF frame time (ms)
+        rolling_skip_rate: p.skipRate,
+      });
+    }, 2000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simReady, paused]);
+
   const vehicleKeys = attributeConfig?.vehicle_enabled ?? [];
   const edgeKeys    = attributeConfig?.edge_enabled    ?? [];
 

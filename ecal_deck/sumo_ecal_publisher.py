@@ -17,6 +17,7 @@ Service: sumo_control
 
 import argparse
 import array as _array
+import math
 import os
 import struct as _struct
 import sys
@@ -302,6 +303,26 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
 # main
 # ---------------------------------------------------------------------------
 
+# Publish-rate policy for the autotuner (see _step_loop).
+#   MAX_PUBLISH_FPS:  hard cap. The bridge keeps only the latest frame per topic
+#                     and flushes at 60 fps, but in practice the browser renderer
+#                     and bridge can't usefully consume more than ~20 fps without
+#                     measurable per-publish cost inflation (see BENCHMARKING.md
+#                     "Browser CPU contention" finding). Enforced as an interval
+#                     lower bound.
+#   MIN_PUBLISH_FPS:  soft floor for perceived smoothness. Enforced as an interval
+#                     upper bound; this may push collection overhead above the
+#                     1.5× no-GUI target if the simulation is very fast.
+#   FRONTEND_FPS_FLOOR_FOR_AUTOTUNE: ignore the render-aware lower bound when the
+#                     frontend's rolling frame time is implausibly fast (≤ 1 ms),
+#                     which usually means "no rolling sample yet".
+MAX_PUBLISH_FPS = 20.0
+MIN_PUBLISH_FPS = 10.0
+FRONTEND_FRAME_MS_MIN = 1.0
+# EMA smoothing factor for incoming rolling_frame_ms reports (0..1, higher = faster reaction).
+FRONTEND_FRAME_MS_EMA_ALPHA = 0.4
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Publish SUMO simulation state via eCAL")
     p.add_argument("--sumo-cfg", default=None,
@@ -402,6 +423,7 @@ def main():
         "network_cache_path":   "",
         "autotune":             True,
         "interval_current":     1,
+        "interval_binding":     "init",  # which clamp last bound the autotune: budget|max_fps|min_fps|frontend
         "needs_full_edge_snapshot": False,  # set to True to publish a full edge baseline next step
         "simulation_ready":       False,  # True only after libsumo has finished loading
         "network_ack_event":      None,   # set after each network publish; bridge acks when cache loaded
@@ -409,6 +431,9 @@ def main():
         "benchmark_headless":     args.benchmark,       # publisher-only: skip network_ack and frontend waits
         "frontend_stats":         None,   # set by report_frontend_stats service call from bridge
         "frontend_stats_event":   threading.Event(),
+        # Rolling render-aware autotune inputs (smoothed EMA). 0 = no signal yet.
+        "frontend_rolling_frame_ms":  0.0,
+        "frontend_rolling_skip_rate": 0.0,
     }
 
     # per-simulation state (replaced on each load)
@@ -682,14 +707,62 @@ def main():
                 # When delay_ms ≥ avg_collect the sleep already absorbs the collection cost and
                 # the step time is delay-dominated regardless of interval — skipping frames would
                 # just lengthen the sleep without speeding up the simulation.
+                #
+                # On top of the budget target we enforce three publish-rate policies (see
+                # MAX_PUBLISH_FPS / MIN_PUBLISH_FPS constants):
+                #   1. MAX_FPS lower bound on interval: never publish faster than the bridge
+                #      can usefully forward — extra frames would be dropped at the bridge
+                #      ("don't drop data frames to make things look faster than visible").
+                #   2. Render-aware lower bound: if the frontend reports its rolling rAF
+                #      frame_ms, don't publish faster than the frontend can render either.
+                #   3. MIN_FPS upper bound on interval: guarantee at least 10 fps of visual
+                #      updates even when that means exceeding the 1.5× overhead budget. This
+                #      is a deliberate trade-off — user preference over budget.
                 if ctrl["autotune"] and len(_collect_times) >= 5:
                     avg_collect = sum(_collect_times) / len(_collect_times)
                     if avg_collect <= ctrl["delay_ms"]:
-                        ctrl["interval_current"] = 1
+                        autotuned = 1
                     else:
                         step_time_ms = ((time.monotonic() - _t_report) * 1000 - total_sleep) / max(steps_since, 1)
                         target_budget = max(step_time_ms / 3, 1.0)
-                        ctrl["interval_current"] = max(1, int(avg_collect / target_budget) + 1)
+                        autotuned = max(1, int(avg_collect / target_budget) + 1)
+
+                    # rolling steps/wall-second over the report window. Skip the FPS
+                    # bounds until the window has enough wall time for the rate to be
+                    # stable — otherwise a cold-start burst (few steps in a few ms)
+                    # could pin the interval at hundreds for many seconds.
+                    elapsed_window = max(time.monotonic() - _t_report, 1e-3)
+                    if elapsed_window < 0.5:
+                        ctrl["interval_current"] = autotuned
+                        ctrl["interval_binding"] = "budget"
+                    else:
+                        steps_per_wall_sec = steps_since / elapsed_window
+                        step_wall_ms = 1000.0 / steps_per_wall_sec if steps_per_wall_sec > 0 else 0.0
+
+                        max_fps_lower = max(1, int(math.ceil(steps_per_wall_sec / MAX_PUBLISH_FPS)))
+                        min_fps_upper = max(max_fps_lower, int(math.ceil(steps_per_wall_sec / MIN_PUBLISH_FPS)))
+
+                        frontend_lower = 1
+                        fr_ms = ctrl.get("frontend_rolling_frame_ms", 0.0)
+                        if fr_ms > FRONTEND_FRAME_MS_MIN and step_wall_ms > 0:
+                            frontend_lower = max(1, int(math.ceil(fr_ms / step_wall_ms)))
+
+                        # Apply in priority order: MAX-FPS cap, then render-aware floor,
+                        # then MIN-FPS upper bound (which wins if it conflicts — see policy note).
+                        interval_new = max(autotuned, max_fps_lower, frontend_lower)
+                        interval_new = min(interval_new, min_fps_upper)
+
+                        # remember which bound is currently binding, for the 5s report log
+                        if interval_new == min_fps_upper and min_fps_upper < max(autotuned, frontend_lower):
+                            ctrl["interval_binding"] = "min_fps"
+                        elif interval_new == frontend_lower and frontend_lower > autotuned and frontend_lower > max_fps_lower:
+                            ctrl["interval_binding"] = "frontend"
+                        elif interval_new == max_fps_lower and max_fps_lower > autotuned:
+                            ctrl["interval_binding"] = "max_fps"
+                        else:
+                            ctrl["interval_binding"] = "budget"
+
+                        ctrl["interval_current"] = interval_new
 
             step        += 1
             steps_since += 1
@@ -713,8 +786,10 @@ def main():
                         native_breakdown = "  " + _ecal_native.getStats(True)
                     except Exception:
                         pass
-                _log("INFO", "%.0f steps/s  (%.2f ms/step)  interval=%d  | sim=%.0fus native=%.0fus%s" % (
+                _log("INFO", "%.0f steps/s  (%.2f ms/step)  interval=%d [%s] frontend=%.1fms  | sim=%.0fus native=%.0fus%s" % (
                     rate, 1000.0 / rate if rate else 0, ctrl["interval_current"],
+                    ctrl.get("interval_binding", "?"),
+                    ctrl.get("frontend_rolling_frame_ms", 0.0),
                     sim_us, native_us, native_breakdown))
                 steps_since = 0
                 _t_report   = now
@@ -864,6 +939,12 @@ def main():
             _type_table.clear()
             if ctrl["edge_attributes"]:
                 ctrl["needs_full_edge_snapshot"] = True
+            # Reset render-aware autotune state so a new run doesn't inherit
+            # frame_ms readings from the previous (possibly unrelated) frontend.
+            ctrl["frontend_rolling_frame_ms"]  = 0.0
+            ctrl["frontend_rolling_skip_rate"] = 0.0
+            ctrl["interval_binding"]           = "init"
+            ctrl["interval_current"]           = 1
 
             _step_thread[0] = threading.Thread(target=_step_loop, daemon=True)
             _step_thread[0].start()
@@ -931,13 +1012,29 @@ def main():
         try:
             req = sumo_pb2.ReportFrontendStatsRequest()
             req.ParseFromString(req_bytes)
-            ctrl["frontend_stats"] = {
-                "avg_frame_ms": req.avg_frame_ms,
-                "skip_rate":    req.skip_rate,
-                "frames":       req.frames,
-                "breakdown":    req.breakdown,
-            }
-            ctrl["frontend_stats_event"].set()
+            # Cumulative end-of-run reports always carry frames > 0; periodic
+            # rolling-only reports leave frames == 0 and must not overwrite the
+            # cumulative snapshot or fire the wait event used by the benchmark.
+            if req.frames > 0:
+                ctrl["frontend_stats"] = {
+                    "avg_frame_ms": req.avg_frame_ms,
+                    "skip_rate":    req.skip_rate,
+                    "frames":       req.frames,
+                    "breakdown":    req.breakdown,
+                }
+                ctrl["frontend_stats_event"].set()
+            # Smooth rolling frame_ms with an EMA so the autotuner doesn't oscillate
+            # on a single 1 s noisy sample. rolling_frame_ms == 0 means "no sample
+            # available" — ignore so we don't decay an existing estimate to zero.
+            if req.rolling_frame_ms > FRONTEND_FRAME_MS_MIN:
+                prev = ctrl.get("frontend_rolling_frame_ms", 0.0) or 0.0
+                if prev <= 0.0:
+                    ctrl["frontend_rolling_frame_ms"] = req.rolling_frame_ms
+                else:
+                    a = FRONTEND_FRAME_MS_EMA_ALPHA
+                    ctrl["frontend_rolling_frame_ms"] = a * req.rolling_frame_ms + (1 - a) * prev
+            if req.rolling_skip_rate >= 0:
+                ctrl["frontend_rolling_skip_rate"] = req.rolling_skip_rate
             return _ack()
         except Exception as e:
             return _ack(False, str(e))
