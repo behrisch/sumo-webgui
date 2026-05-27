@@ -19,6 +19,8 @@ class TLSLayer;
 class StopLineLayer;
 class RailLayer;
 class EdgeColorLayer;
+class StoppingPlaceLayer;
+class DetectorLayer;
 
 class NetworkView : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -55,7 +57,8 @@ private:
     void drawInfoBox (QPainter& p);
     void pickAt(double pxX, double pxY);
 
-    enum class PickKind { None, Vehicle, Person, TLS, Polygon, Lane, Junction };
+    enum class PickKind { None, Vehicle, Person, TLS, Polygon, Lane, Junction,
+                          StoppingPlace, Detector };
     struct Picked {
         PickKind kind = PickKind::None;
         QString  title;
@@ -69,6 +72,8 @@ private:
     std::unique_ptr<EdgeColorLayer>  m_edgeColorLayer;
     std::unique_ptr<RailLayer>       m_railLayer;
     std::unique_ptr<StopLineLayer>   m_stopLineLayer;
+    std::unique_ptr<StoppingPlaceLayer> m_stoppingPlaceLayer;
+    std::unique_ptr<DetectorLayer>   m_detectorLayer;
     std::unique_ptr<PolygonLayer>    m_polygonLayer;
     std::unique_ptr<TLSLayer>        m_tlsLayer;
     std::unique_ptr<VehicleLayer>    m_vehicleLayer;

@@ -7,9 +7,14 @@
 
 #pragma push_macro("signals")
 #undef signals
+#include <libsumo/BusStop.h>
+#include <libsumo/ChargingStation.h>
+#include <libsumo/InductionLoop.h>
 #include <libsumo/Junction.h>
 #include <libsumo/Lane.h>
+#include <libsumo/LaneArea.h>
 #include <libsumo/POI.h>
+#include <libsumo/ParkingArea.h>
 #include <libsumo/Polygon.h>
 #include <libsumo/Simulation.h>
 #include <libsumo/TraCIDefs.h>
@@ -208,6 +213,118 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
     } catch (...) {
         // No TLS; harmless.
     }
+
+    // ---- Stopping places + detectors: longitudinal position on a lane ----
+    // Build a per-lane offset map first.
+    std::unordered_map<std::string, std::size_t> laneIdx;
+    laneIdx.reserve(ng->lane_count());
+    for (std::size_t i = 0; i < ng->lane_count(); ++i) {
+        laneIdx.emplace(ng->lane_ids[i], i);
+    }
+
+    auto laneInterp = [&](const std::string& laneId, double s,
+                          float& x, float& y, float& dx, float& dy,
+                          float& width) -> bool {
+        auto it = laneIdx.find(laneId);
+        if (it == laneIdx.end()) return false;
+        const std::size_t li = it->second;
+        const std::uint32_t a = ng->lane_offsets[li];
+        const std::uint32_t b = ng->lane_offsets[li + 1];
+        if (b - a < 2) return false;
+        width = ng->lane_widths[li];
+        // Walk segments until cumulative length >= s.
+        double accum = 0.0;
+        for (std::uint32_t k = a; k + 1 < b; ++k) {
+            const float x0 = ng->lane_points[k * 2];
+            const float y0 = ng->lane_points[k * 2 + 1];
+            const float x1 = ng->lane_points[(k + 1) * 2];
+            const float y1 = ng->lane_points[(k + 1) * 2 + 1];
+            const double ex = x1 - x0, ey = y1 - y0;
+            const double slen = std::sqrt(ex * ex + ey * ey);
+            if (s <= accum + slen || k + 2 == b) {
+                const double t = slen > 1e-6 ? (s - accum) / slen : 0.0;
+                const double tc = std::clamp(t, 0.0, 1.0);
+                x = static_cast<float>(x0 + tc * ex);
+                y = static_cast<float>(y0 + tc * ey);
+                const double n = slen > 1e-6 ? slen : 1.0;
+                dx = static_cast<float>(ex / n);
+                dy = static_cast<float>(ey / n);
+                return true;
+            }
+            accum += slen;
+        }
+        return false;
+    };
+
+    auto addStop = [&](std::uint8_t kind, const std::string& id,
+                       const std::string& lane, double s0, double s1) {
+        const double mid = 0.5 * (s0 + s1);
+        const double len = std::max(0.5, s1 - s0);
+        float x, y, dx, dy, w;
+        if (!laneInterp(lane, mid, x, y, dx, dy, w)) return;
+        ng->stop_x.push_back(x);
+        ng->stop_y.push_back(y);
+        ng->stop_dx.push_back(dx);
+        ng->stop_dy.push_back(dy);
+        ng->stop_len.push_back(static_cast<float>(len));
+        ng->stop_w.push_back(w);
+        ng->stop_kind.push_back(kind);
+        ng->stop_ids.push_back(id);
+    };
+
+    auto enumerateStops = [&](std::uint8_t kind, auto idListFn,
+                              auto laneFn, auto startFn, auto endFn) {
+        try {
+            for (const auto& id : idListFn()) {
+                try {
+                    addStop(kind, id, laneFn(id), startFn(id), endFn(id));
+                } catch (...) {}
+            }
+        } catch (...) {}
+    };
+    enumerateStops(0, libsumo::BusStop::getIDList,
+                   libsumo::BusStop::getLaneID,
+                   libsumo::BusStop::getStartPos,
+                   libsumo::BusStop::getEndPos);
+    enumerateStops(1, libsumo::ChargingStation::getIDList,
+                   libsumo::ChargingStation::getLaneID,
+                   libsumo::ChargingStation::getStartPos,
+                   libsumo::ChargingStation::getEndPos);
+    enumerateStops(2, libsumo::ParkingArea::getIDList,
+                   libsumo::ParkingArea::getLaneID,
+                   libsumo::ParkingArea::getStartPos,
+                   libsumo::ParkingArea::getEndPos);
+
+    auto addDet = [&](std::uint8_t kind, const std::string& id,
+                      const std::string& lane, double s, double len) {
+        float x, y, dx, dy, w;
+        if (!laneInterp(lane, s + 0.5 * len, x, y, dx, dy, w)) return;
+        (void)w;
+        ng->det_x.push_back(x);
+        ng->det_y.push_back(y);
+        ng->det_dx.push_back(dx);
+        ng->det_dy.push_back(dy);
+        ng->det_len.push_back(static_cast<float>(len));
+        ng->det_kind.push_back(kind);
+        ng->det_ids.push_back(id);
+    };
+    try {
+        for (const auto& id : libsumo::InductionLoop::getIDList()) {
+            try {
+                addDet(0, id, libsumo::InductionLoop::getLaneID(id),
+                       libsumo::InductionLoop::getPosition(id), 0.0);
+            } catch (...) {}
+        }
+    } catch (...) {}
+    try {
+        for (const auto& id : libsumo::LaneArea::getIDList()) {
+            try {
+                addDet(1, id, libsumo::LaneArea::getLaneID(id),
+                       libsumo::LaneArea::getPosition(id),
+                       libsumo::LaneArea::getLength(id));
+            } catch (...) {}
+        }
+    } catch (...) {}
 
     if (!std::isfinite(minX)) {
         // Empty network — fall back to net boundary.

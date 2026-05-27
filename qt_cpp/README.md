@@ -65,6 +65,5 @@ What additionally works after Phase 3b:
 Render order matches the deck.gl frontend: junctions+roads → edge-attribute
 overlay → rails → polygons → stop lines → TLS heads → vehicles → persons.
 
-Next (not started): stopping places (BusStop/ChargingStation/ParkingArea),
-detectors (InductionLoop/LaneArea/MultiEntryExit), crossings styling beyond
-the base tint, mode toggle to lock/follow a vehicle.
+Next (not started): distinct crossings/walking-area striping, follow-vehicle
+mode, MultiEntryExit detectors, OverheadWire, Calibrator markers.

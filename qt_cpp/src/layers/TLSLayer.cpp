@@ -18,17 +18,28 @@ layout(location=0) in vec2 a_local;
 layout(location=1) in vec2 a_pos;
 layout(location=2) in vec4 a_color;
 uniform mat4 u_proj;
+uniform float u_half;
 out vec4 v_color;
+out vec2 v_local;
 void main() {
     gl_Position = u_proj * vec4(a_pos + a_local, 0.0, 1.0);
     v_color = a_color;
+    v_local = a_local / u_half;
 }
 )";
 
 constexpr const char* kFS = R"(#version 330 core
 in vec4 v_color;
+in vec2 v_local;
 out vec4 frag;
-void main() { frag = v_color; }
+void main() {
+    float r = length(v_local);
+    if (r > 1.0) discard;
+    // Soft edge + faint dark rim for definition.
+    float edge = smoothstep(1.0, 0.92, r);
+    vec3 rim = mix(v_color.rgb * 0.35, v_color.rgb, smoothstep(0.85, 0.78, r));
+    frag = vec4(rim, v_color.a * edge);
+}
 )";
 
 struct Rgba { std::uint8_t r, g, b, a; };
@@ -58,6 +69,10 @@ void TLSLayer::initGL(QOpenGLFunctions_3_3_Core* gl) {
     m_program = buildProgram(*m_gl, kVS, kFS);
     if (!m_program) return;
     m_locProj = m_gl->glGetUniformLocation(m_program, "u_proj");
+    const int locHalf = m_gl->glGetUniformLocation(m_program, "u_half");
+    m_gl->glUseProgram(m_program);
+    m_gl->glUniform1f(locHalf, kHalf);
+    m_gl->glUseProgram(0);
 
     m_vao.create();
     m_quadVbo.create();

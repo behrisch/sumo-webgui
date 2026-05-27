@@ -54,6 +54,28 @@ struct NetworkGeometry {
     std::vector<std::string>  tls_ids;
     std::vector<std::uint32_t> tls_state_index;
 
+    // Stopping places (bus stops + charging stations + parking areas).
+    // Stored as offset bands beside their lane: position = mid-point of the
+    // band, (dx,dy) = unit tangent at mid-point, length = end_pos - start_pos,
+    // width = lane width. Lane id index recorded for picking.
+    std::vector<float>        stop_x;
+    std::vector<float>        stop_y;
+    std::vector<float>        stop_dx;
+    std::vector<float>        stop_dy;
+    std::vector<float>        stop_len;
+    std::vector<float>        stop_w;
+    std::vector<std::uint8_t> stop_kind;   // 0=bus, 1=charging, 2=parking
+    std::vector<std::string>  stop_ids;
+
+    // Detectors: induction loops (point) and lane-area (band).
+    std::vector<float>        det_x;
+    std::vector<float>        det_y;
+    std::vector<float>        det_dx;
+    std::vector<float>        det_dy;
+    std::vector<float>        det_len;     // 0 for loops, >0 for lane-area
+    std::vector<std::uint8_t> det_kind;    // 0=loop, 1=lanearea
+    std::vector<std::string>  det_ids;
+
     // Network bounding box in SUMO XY.
     float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
 
@@ -62,6 +84,8 @@ struct NetworkGeometry {
     [[nodiscard]] std::size_t polygon_count() const noexcept { return polygon_filled.size(); }
     [[nodiscard]] std::size_t tls_marker_count() const noexcept { return tls_ids.size(); }
     [[nodiscard]] std::size_t stopline_count() const noexcept { return stopline_x.size(); }
+    [[nodiscard]] std::size_t stop_count()     const noexcept { return stop_ids.size(); }
+    [[nodiscard]] std::size_t det_count()      const noexcept { return det_ids.size(); }
 };
 
 // Populates the structure by calling libsumo. Must be invoked on the thread

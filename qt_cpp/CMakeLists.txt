@@ -26,6 +26,8 @@ add_executable(qt_cpp
     src/Camera.h
     src/gl/Shader.cpp
     src/gl/Shader.h
+    src/layers/DetectorLayer.cpp
+    src/layers/DetectorLayer.h
     src/layers/EdgeColorLayer.cpp
     src/layers/EdgeColorLayer.h
     src/layers/NetworkLayer.cpp
@@ -38,6 +40,8 @@ add_executable(qt_cpp
     src/layers/RailLayer.h
     src/layers/StopLineLayer.cpp
     src/layers/StopLineLayer.h
+    src/layers/StoppingPlaceLayer.cpp
+    src/layers/StoppingPlaceLayer.h
     src/layers/TLSLayer.cpp
     src/layers/TLSLayer.h
     src/layers/VehicleLayer.cpp
