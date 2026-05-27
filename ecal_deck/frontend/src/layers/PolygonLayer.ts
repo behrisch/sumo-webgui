@@ -88,23 +88,36 @@ export function buildPolygonLayers(
     if (group.length === 0) return null;
     let pts = 0;
     for (const i of group) pts += p.starts[i + 1] - p.starts[i];
-    const starts    = new Uint32Array(group.length + 1);
-    const positions = new Float32Array(pts * 2);
-    const rgba      = new Uint8Array(group.length * 4);
+    const starts        = new Uint32Array(group.length + 1);
+    const positions     = new Float32Array(pts * 2);
+    const rgba          = new Uint8Array(group.length * 4);
+    // Per-vertex copy of the colors; SolidPolygonLayer's auto-detection of
+    // per-feature vs per-vertex binary color attributes is unreliable, so we
+    // expand explicitly. PathLayer (outline) is happy with per-feature.
+    const rgbaPerVertex = new Uint8Array(pts * 4);
     let w = 0;
     for (let g = 0; g < group.length; g++) {
       const i = group[g];
       const s = p.starts[i], e = p.starts[i + 1];
       positions.set(p.xy.subarray(s * 2, e * 2), w * 2);
       starts[g] = w;
+      const r = p.rgba[i * 4    ];
+      const gC = p.rgba[i * 4 + 1];
+      const b = p.rgba[i * 4 + 2];
+      const a = p.rgba[i * 4 + 3];
+      rgba[g * 4    ] = r;
+      rgba[g * 4 + 1] = gC;
+      rgba[g * 4 + 2] = b;
+      rgba[g * 4 + 3] = a;
+      for (let v = 0; v < e - s; v++) {
+        const o = (w + v) * 4;
+        rgbaPerVertex[o] = r; rgbaPerVertex[o + 1] = gC;
+        rgbaPerVertex[o + 2] = b; rgbaPerVertex[o + 3] = a;
+      }
       w += e - s;
-      rgba[g * 4    ] = p.rgba[i * 4    ];
-      rgba[g * 4 + 1] = p.rgba[i * 4 + 1];
-      rgba[g * 4 + 2] = p.rgba[i * 4 + 2];
-      rgba[g * 4 + 3] = p.rgba[i * 4 + 3];
     }
     starts[group.length] = w;
-    return { starts, positions, rgba };
+    return { starts, positions, rgba, rgbaPerVertex };
   };
 
   const layers: (SolidPolygonLayer | PathLayer)[] = [];
@@ -119,7 +132,7 @@ export function buildPolygonLayers(
         startIndices: fs.starts,
         attributes: {
           getPolygon: { value: fs.positions, size: 2 },
-          getFillColor: { value: fs.rgba, size: 4, normalized: true },
+          getFillColor: { value: fs.rgbaPerVertex, size: 4, normalized: true },
         },
       },
       _normalize: true,

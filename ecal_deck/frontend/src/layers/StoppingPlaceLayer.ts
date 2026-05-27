@@ -44,19 +44,42 @@ export function stopKindName(k: number): string {
   return KIND_NAMES[k] ?? 'stop';
 }
 
+// Expand per-feature rgba to per-vertex by repeating each feature's 4 bytes
+// across all of its ring vertices. Necessary because SolidPolygonLayer's
+// auto-detection of per-feature vs per-vertex binary color attributes is
+// unreliable when feature counts equal certain vertex totals; supplying a
+// per-vertex buffer is unambiguous.
+function expandRgbaPerVertex(rgba: Uint8Array, starts: Uint32Array, count: number): Uint8Array {
+  const totalV = starts[count];
+  const out = new Uint8Array(totalV * 4);
+  for (let f = 0; f < count; f++) {
+    const s = starts[f], e = starts[f + 1];
+    const r = rgba[f * 4    ];
+    const g = rgba[f * 4 + 1];
+    const b = rgba[f * 4 + 2];
+    const a = rgba[f * 4 + 3];
+    for (let v = s; v < e; v++) {
+      const o = v * 4;
+      out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = a;
+    }
+  }
+  return out;
+}
+
 export function buildStoppingPlaceLayer(
   source: ParsedStops,
   layerIdSuffix: string,
 ) {
   if (source.count === 0) return null;
+  const rgbaPerVertex = expandRgbaPerVertex(source.rgba, source.starts, source.count);
   const layer = new SolidPolygonLayer({
     id: `stops-${layerIdSuffix}`,
     data: {
       length: source.count,
       startIndices: source.starts,
       attributes: {
-        getPolygon:   { value: source.xy,   size: 2 },
-        getFillColor: { value: source.rgba, size: 4, normalized: true },
+        getPolygon:   { value: source.xy,    size: 2 },
+        getFillColor: { value: rgbaPerVertex, size: 4, normalized: true },
       },
     },
     _normalize: true,

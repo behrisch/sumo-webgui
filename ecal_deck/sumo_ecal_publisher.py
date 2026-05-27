@@ -78,7 +78,7 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 8  # increment on any incompatible cache format change (network or additionals)
+_CACHE_VERSION = 9  # increment on any incompatible cache format change (network or additionals)
 
 
 def _cache_path(source_file: str, family: str) -> str:
@@ -631,6 +631,12 @@ def _lane_segment_rectangle(lane, start_pos: float, end_pos: float, half_width: 
     left  = [(x - uy * half_width, y + ux * half_width) for (x, y, ux, uy) in pts]
     right = [(x + uy * half_width, y - ux * half_width) for (x, y, ux, uy) in pts]
     ring = left + right[::-1]
+    # Explicitly close the ring by repeating the first vertex. SolidPolygonLayer
+    # with `_normalize: true` would otherwise append a closing vertex itself,
+    # which would not be covered by our per-vertex color buffer and render as
+    # a black corner.
+    if ring:
+        ring.append(ring[0])
     return ring
 
 

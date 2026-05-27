@@ -112,14 +112,28 @@ export function buildDetectorLayers(
 
   // E2 — filled rectangles like stopping places.
   if (source.e2.count > 0) {
+    // Expand per-feature rgba to per-vertex for SolidPolygonLayer reliability.
+    const totalV = source.e2.starts[source.e2.count];
+    const rgbaPV = new Uint8Array(totalV * 4);
+    for (let f = 0; f < source.e2.count; f++) {
+      const s = source.e2.starts[f], e = source.e2.starts[f + 1];
+      const r = source.e2.rgba[f * 4    ];
+      const g = source.e2.rgba[f * 4 + 1];
+      const b = source.e2.rgba[f * 4 + 2];
+      const a = source.e2.rgba[f * 4 + 3];
+      for (let v = s; v < e; v++) {
+        const o = v * 4;
+        rgbaPV[o] = r; rgbaPV[o + 1] = g; rgbaPV[o + 2] = b; rgbaPV[o + 3] = a;
+      }
+    }
     layers.push(new SolidPolygonLayer({
       id: `detectors-e2-${layerIdSuffix}`,
       data: {
         length: source.e2.count,
         startIndices: source.e2.starts,
         attributes: {
-          getPolygon:   { value: source.e2.xy,   size: 2 },
-          getFillColor: { value: source.e2.rgba, size: 4, normalized: true },
+          getPolygon:   { value: source.e2.xy, size: 2 },
+          getFillColor: { value: rgbaPV,       size: 4, normalized: true },
         },
       },
       _normalize: true,
