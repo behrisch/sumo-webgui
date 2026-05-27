@@ -24,6 +24,7 @@ import type { ParsedDetectors } from './layers/DetectorLayer';
 import { ControlPanel } from './components/ControlPanel';
 import { FileBrowser } from './components/FileBrowser';
 import { LogPane } from './components/LogPane';
+import ScaleBar from './ScaleBar';
 import { InfoPanel } from './components/InfoPanel';
 import type { SelectedObject } from './components/InfoPanel';
 import type { PickingInfo } from '@deck.gl/core';
@@ -157,8 +158,8 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
   let initialViewState: MapViewState | OrthographicViewState;
   if (!Number.isFinite(minX)) {
     initialViewState = msg.geo_referenced
-      ? { longitude: 0, latitude: 0, zoom: 2, pitch: 0, bearing: 0 } as MapViewState
-      : { target: [0, 0, 0], zoom: 0 } as OrthographicViewState;
+      ? { longitude: 0, latitude: 0, zoom: 2, pitch: 0, bearing: 0, maxZoom: 24 } as MapViewState
+      : { target: [0, 0, 0], zoom: 0, maxZoom: 24 } as OrthographicViewState;
   } else {
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     const spanX = maxX - minX || 0.01, spanY = maxY - minY || 0.01;
@@ -167,16 +168,16 @@ function parseNetworkGeometry(msg: NetworkGeometry): ParsedNetwork {
         const { longitude, latitude, zoom } = new WebMercatorViewport({
           width: window.innerWidth, height: window.innerHeight,
         }).fitBounds([[minX, minY], [maxX, maxY]], { padding: 24 });
-        initialViewState = { longitude, latitude, zoom, pitch: 0, bearing: 0 } as MapViewState;
+        initialViewState = { longitude, latitude, zoom, pitch: 0, bearing: 0, maxZoom: 24 } as MapViewState;
       } catch {
         // Degenerate bounds (point network etc.) — fall back to centre + rough zoom.
         const zoom = Math.max(1, Math.min(20,
           Math.floor(Math.log2(360 / Math.max(spanX, spanY))) - 1));
-        initialViewState = { longitude: cx, latitude: cy, zoom, pitch: 0, bearing: 0 } as MapViewState;
+        initialViewState = { longitude: cx, latitude: cy, zoom, pitch: 0, bearing: 0, maxZoom: 24 } as MapViewState;
       }
     } else {
       const zoom = Math.log2(Math.min(window.innerWidth / spanX, window.innerHeight / spanY)) - 0.5;
-      initialViewState = { target: [cx, cy, 0], zoom } as OrthographicViewState;
+      initialViewState = { target: [cx, cy, 0], zoom, maxZoom: 24 } as OrthographicViewState;
     }
   }
 
@@ -882,6 +883,28 @@ export default function App() {
     />
   );
 
+  const resetButton = (
+    <button
+      onClick={() => { setViewState(null); setFollowing(false); }}
+      title="Reset view"
+      style={{
+        position: 'absolute',
+        right: 8,
+        bottom: 64,
+        padding: '4px 8px',
+        background: 'rgba(255, 255, 255, 0.85)',
+        color: '#000',
+        border: '1px solid #999',
+        borderRadius: 4,
+        fontFamily: 'monospace',
+        fontSize: 11,
+        cursor: 'pointer',
+      }}
+    >
+      ⟲ Reset view
+    </button>
+  );
+
   if (parsed.geoReferenced) {
     return (
       <div style={{ width: '100vw', height: '100vh' }}>
@@ -897,6 +920,8 @@ export default function App() {
         {panel}
         {infoPanel}
         {fileBrowser}
+        {resetButton}
+        <ScaleBar metersPerPixel={metersPerPixel} />
         <LogPane messages={logMessages} />
       </div>
     );
@@ -915,6 +940,8 @@ export default function App() {
       {panel}
       {infoPanel}
       {fileBrowser}
+      {resetButton}
+      <ScaleBar metersPerPixel={metersPerPixel} />
       <LogPane messages={logMessages} />
     </div>
   );
