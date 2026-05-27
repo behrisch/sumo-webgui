@@ -78,7 +78,7 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 9  # increment on any incompatible cache format change (network or additionals)
+_CACHE_VERSION = 1  # increment on any incompatible cache format change (network or additionals)
 
 
 def _cache_path(source_file: str, family: str) -> str:
@@ -140,9 +140,11 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
     _DIR_BIT = {'s': 1, 'l': 2, 'r': 4, 't': 8, 'L': 16, 'R': 32}
     lane_arrow_dirs = _array.array('B')  # uint8 LE
 
-    # permission class: 0=pedestrian/other, 1=bicycle-only, 2=motorised
+    # permission class: 0=pedestrian/other, 1=bicycle-only, 2=motorised, 3=rail
     _MOTORISED = frozenset({'passenger', 'private', 'emergency', 'authority', 'army', 'vip',
                             'bus', 'truck', 'trailer', 'motorcycle', 'moped', 'taxi', 'evehicle'})
+    _RAIL = frozenset({'rail', 'rail_urban', 'rail_electric', 'rail_fast',
+                       'tram', 'cable_car', 'subway'})
     lane_perm_cls = _array.array('B')  # uint8 LE
 
     # stop-line marker: per sumo-gui, a white stop bar is drawn for every
@@ -228,8 +230,14 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                 perms = frozenset(lane.getPermissions() or [])
             except Exception:
                 perms = frozenset()
-            if not perms or perms & _MOTORISED:
-                perm_cls = 2  # motorised (or unrestricted)
+            if not perms:
+                perm_cls = 2  # unrestricted → motorised
+            elif (perms & _RAIL) and (perms & _MOTORISED):
+                perm_cls = 4  # embedded rail (tram + cars on shared lane)
+            elif perms & _MOTORISED:
+                perm_cls = 2  # motorised
+            elif perms & _RAIL:
+                perm_cls = 3  # rail-only
             elif 'bicycle' in perms:
                 perm_cls = 1  # bicycle only
             else:

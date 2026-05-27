@@ -8,7 +8,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
-import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer, buildCrossingLayer, buildWalkingAreaLayer } from './layers/NetworkLayer';
+import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer, buildCrossingLayer, buildWalkingAreaLayer, buildRailLayer } from './layers/NetworkLayer';
 import { buildStopLineLayer } from './layers/StopLineLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
@@ -547,6 +547,13 @@ export default function App() {
   const crossingLayer    = crossingResult?.layer ?? null;
   const crossingLaneIdx  = crossingResult?.laneIndices ?? null;
 
+  const railResult = useMemo(() => {
+    if (!parsed) return null;
+    return buildRailLayer(parsed);
+  }, [parsed]);
+  const railLayers      = railResult?.layers ?? null;
+  const railSleeperIdx  = railResult?.sleeperLaneIndices ?? null;
+
   // Parsed polygon/POI sources — one entry per additional-file. parsePolygonData
   // wraps the proto bytes in typed-array views; cheap, but memoise to avoid
   // rebuilding the SolidPolygon/Path/Scatter layers on unrelated re-renders.
@@ -631,6 +638,12 @@ export default function App() {
     } else if (layerId === 'crossings' && crossingLaneIdx) {
       const id = laneIndexToEdgeId(crossingLaneIdx[info.index]);
       if (id) setSelectedObject({ type: 'edge', id, subtype: 'crossing' });
+    } else if (layerId?.startsWith('rail-sleepers-') && railSleeperIdx) {
+      const map = railSleeperIdx[layerId];
+      if (map) {
+        const id = laneIndexToEdgeId(map[info.index]);
+        if (id) setSelectedObject({ type: 'edge', id });
+      }
     } else if (layerId === 'junctions') {
       const id = parsed?.junctionIds[info.index];
       if (id) setSelectedObject({ type: 'junction', id });
@@ -706,7 +719,7 @@ export default function App() {
     } else {
       setSelectedObject(null);
     }
-  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources, stoppingPlaceSources, detectorSources]);
+  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, railSleeperIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources, stoppingPlaceSources, detectorSources]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
@@ -738,6 +751,9 @@ export default function App() {
     if (junctionLayer)    result.push(junctionLayer.clone({ visible: visibility.junctions }));
     if (walkingAreaLayer) result.push(walkingAreaLayer.clone({ visible: visibility.junctions }));
     if (edgeLayer)        result.push(edgeLayer.clone({ visible: visibility.edges }));
+    if (railLayers) {
+      for (const rl of railLayers) result.push(rl.clone({ visible: visibility.edges }));
+    }
     for (const ml of markingLayers) result.push(ml.clone({ visible: visibility.edges }));
     if (edgeDataLayer) result.push(edgeDataLayer);
     if (arrowLayer)    result.push(arrowLayer.clone({ visible: visibility.edges }));
@@ -780,7 +796,7 @@ export default function App() {
     performance.mark('layers-build-end');
     performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, edgeDataLayer, polygonLayerResults, poiLayerResults, stoppingPlaceLayerResults, detectorLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, railLayers, edgeDataLayer, polygonLayerResults, poiLayerResults, stoppingPlaceLayerResults, detectorLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (
