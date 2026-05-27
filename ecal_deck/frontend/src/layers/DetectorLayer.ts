@@ -119,7 +119,7 @@ export function buildDetectorLayers(
         startIndices: source.e2.starts,
         attributes: {
           getPolygon:   { value: source.e2.xy,   size: 2 },
-          getFillColor: { value: source.e2.rgba, size: 4 },
+          getFillColor: { value: source.e2.rgba, size: 4, normalized: true },
         },
       },
       _normalize: true,
@@ -137,7 +137,7 @@ export function buildDetectorLayers(
         startIndices: bars.starts,
         attributes: {
           getPath:  { value: bars.positions, size: 2 },
-          getColor: { value: source.e1.rgba, size: 4 },
+          getColor: { value: source.e1.rgba, size: 4, normalized: true },
         },
       },
       _pathType: 'open',
@@ -158,7 +158,7 @@ export function buildDetectorLayers(
         startIndices: bars.starts,
         attributes: {
           getPath:  { value: bars.positions, size: 2 },
-          getColor: { value: source.e3.rgba, size: 4 },
+          getColor: { value: source.e3.rgba, size: 4, normalized: true },
         },
       },
       _pathType: 'open',

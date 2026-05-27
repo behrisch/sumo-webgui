@@ -56,7 +56,7 @@ export function buildStoppingPlaceLayer(
       startIndices: source.starts,
       attributes: {
         getPolygon:   { value: source.xy,   size: 2 },
-        getFillColor: { value: source.rgba, size: 4 },
+        getFillColor: { value: source.rgba, size: 4, normalized: true },
       },
     },
     _normalize: true,

@@ -119,7 +119,7 @@ export function buildPolygonLayers(
         startIndices: fs.starts,
         attributes: {
           getPolygon: { value: fs.positions, size: 2 },
-          getFillColor: { value: fs.rgba, size: 4 },
+          getFillColor: { value: fs.rgba, size: 4, normalized: true },
         },
       },
       _normalize: true,
@@ -155,7 +155,7 @@ export function buildPolygonLayers(
         startIndices: new Uint32Array(closedStarts),
         attributes: {
           getPath: { value: new Float32Array(closedPos), size: 2 },
-          getColor: { value: ls.rgba, size: 4 },
+          getColor: { value: ls.rgba, size: 4, normalized: true },
         },
       },
       _pathType: 'open',  // we've already closed the ring manually
@@ -203,7 +203,7 @@ export function buildPOILayer(
       length: p.count,
       attributes: {
         getPosition: { value: pos64, size: 2 },
-        getFillColor: { value: p.rgba, size: 4 },
+        getFillColor: { value: p.rgba, size: 4, normalized: true },
         getRadius:   { value: radius, size: 1 },
       },
     },
