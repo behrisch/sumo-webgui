@@ -29,14 +29,15 @@ import xml.etree.ElementTree as ET
 SUMO_HOME = os.environ.get("SUMO_HOME")
 if not SUMO_HOME:
     sys.exit("SUMO_HOME is not set")
+os.add_dll_directory(os.path.join(os.environ["SUMO_HOME"], "bin"))
 sys.path.insert(0, os.path.join(SUMO_HOME, "tools"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 try:
     import libsumo as traci
     print("libsumo found.")
-except ImportError:
-    print("libsumo not found.")
+except ImportError as e:
+    print("libsumo not found (%s)." % e)
     import traci
 
 import sumolib
