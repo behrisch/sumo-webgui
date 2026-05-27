@@ -9,6 +9,7 @@
 // Qt defines `signals` as a macro; libsumo has a parameter named `signals`.
 #pragma push_macro("signals")
 #undef signals
+#include <libsumo/Lane.h>
 #include <libsumo/Person.h>
 #include <libsumo/Simulation.h>
 #include <libsumo/TrafficLight.h>
@@ -57,7 +58,8 @@ void SimWorker::loadScenario(const QString& sumocfgPath) {
         m_open = true;
         m_stepCount = 0;
         emit scenarioLoaded(sumocfgPath);
-        emit networkReady(buildNetworkGeometry());
+        m_ng = buildNetworkGeometry();
+        emit networkReady(m_ng);
         // First step so the user has vehicles to look at.
         stepOnce();
     } catch (const std::exception& e) {
@@ -142,6 +144,61 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
                     tid, libsumo::TrafficLight::getRedYellowGreenState(tid));
             } catch (...) {}
         }
+
+        // Edge attribute coloring (per-lane). Skipped when mode==None to
+        // keep step cost low on big networks.
+        if (m_colorMode != 0 && m_ng) {
+            const std::size_t nLanes = m_ng->lane_count();
+            snap->lane_attr_rgba.assign(nLanes * 4, 0);
+            auto setCol = [&](std::size_t i, float r, float g, float b) {
+                snap->lane_attr_rgba[i * 4]     = static_cast<std::uint8_t>(r * 255);
+                snap->lane_attr_rgba[i * 4 + 1] = static_cast<std::uint8_t>(g * 255);
+                snap->lane_attr_rgba[i * 4 + 2] = static_cast<std::uint8_t>(b * 255);
+                snap->lane_attr_rgba[i * 4 + 3] = 220;
+            };
+            auto ramp = [](float t, float& r, float& g, float& b) {
+                // 0=red, 0.5=yellow, 1=green. Clamp & smooth.
+                if (t < 0) t = 0; if (t > 1) t = 1;
+                if (t < 0.5f) {
+                    const float u = t * 2.0f;
+                    r = 1.0f; g = u; b = 0.0f;
+                } else {
+                    const float u = (t - 0.5f) * 2.0f;
+                    r = 1.0f - u; g = 1.0f; b = 0.0f;
+                }
+            };
+            for (std::size_t i = 0; i < nLanes; ++i) {
+                const auto& id = m_ng->lane_ids[i];
+                float t = 0.0f;
+                try {
+                    switch (m_colorMode) {
+                        case 1: {  // mean speed normalized by allowed max.
+                            const double v = libsumo::Lane::getLastStepMeanSpeed(id);
+                            const double vmax = libsumo::Lane::getMaxSpeed(id);
+                            t = vmax > 0.1 ? static_cast<float>(v / vmax) : 0.0f;
+                            break;
+                        }
+                        case 2: {  // occupancy 0..1 (already a fraction)
+                            t = 1.0f - static_cast<float>(
+                                libsumo::Lane::getLastStepOccupancy(id));
+                            break;
+                        }
+                        case 3: {  // halting vehicles count, log scale up to 10.
+                            const int h = libsumo::Lane::getLastStepHaltingNumber(id);
+                            t = 1.0f - std::min(1.0f, std::log10(1.0f + h) / 1.0f);
+                            break;
+                        }
+                    }
+                } catch (...) { t = 0.0f; }
+                float r, g, b; ramp(t, r, g, b);
+                setCol(i, r, g, b);
+            }
+            switch (m_colorMode) {
+                case 1: snap->lane_attr_label = "mean speed (red=slow, green=at limit)"; break;
+                case 2: snap->lane_attr_label = "occupancy (red=full, green=empty)";     break;
+                case 3: snap->lane_attr_label = "halting count (red=many, green=none)";  break;
+            }
+        }
     } catch (const std::exception& e) {
         emit errorOccurred(QString::fromUtf8(e.what()));
     }
@@ -179,6 +236,10 @@ void SimWorker::setDelayMs(int ms) {
 
 void SimWorker::onTimerTick() {
     if (m_playing) stepOnce();
+}
+
+void SimWorker::setColorMode(int mode) {
+    m_colorMode = mode;
 }
 
 void SimWorker::shutdown() {

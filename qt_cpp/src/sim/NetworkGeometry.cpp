@@ -53,12 +53,36 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
         ng->lane_ids.reserve(laneIds.size());
         ng->lane_offsets.reserve(laneIds.size() + 1);
         ng->lane_widths.reserve(laneIds.size());
+        ng->lane_kind.reserve(laneIds.size());
         for (const auto& id : laneIds) {
             ng->lane_ids.push_back(id);
             ng->lane_widths.push_back(static_cast<float>(libsumo::Lane::getWidth(id)));
             appendShape(libsumo::Lane::getShape(id),
                         ng->lane_points, ng->lane_offsets,
                         minX, minY, maxX, maxY);
+
+            // Classify by allowed vehicle classes.
+            std::uint8_t kind = 0;
+            const bool internal = !id.empty() && id.front() == ':';
+            try {
+                const auto allowed = libsumo::Lane::getAllowed(id);
+                bool hasRail = false, hasPed = false, hasRoad = false;
+                for (const auto& vc : allowed) {
+                    if (vc.find("rail") != std::string::npos
+                        || vc == "tram" || vc == "cable_car"
+                        || vc == "subway" || vc == "light_rail") hasRail = true;
+                    else if (vc == "pedestrian") hasPed = true;
+                    else hasRoad = true;
+                }
+                if (allowed.empty()) hasRoad = true;
+                if      (hasRail && !hasRoad) kind = 1;
+                else if (hasPed  && !hasRoad && !hasRail) kind = internal ? 3 : 2;
+                else if (internal)                         kind = 4;
+                else                                       kind = 0;
+            } catch (...) {
+                kind = internal ? 4 : 0;
+            }
+            ng->lane_kind.push_back(kind);
         }
         ng->lane_offsets.push_back(static_cast<std::uint32_t>(ng->lane_points.size() / 2));
     }
@@ -117,18 +141,28 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
     // of its fromLane (closest to the stop line). Fallback to junction
     // center if the lane isn't found.
     try {
-        // Build a fromLane -> endpoint XY map from the already-extracted lane
-        // shapes. (Avoids a second libsumo round trip.)
-        std::unordered_map<std::string, std::pair<float, float>> laneEnds;
+        // Build a fromLane -> (endpoint, tangent, width, laneIdx) map from
+        // the already-extracted lane shapes.
+        struct LaneEnd { float x, y, dx, dy, w; std::size_t idx; };
+        std::unordered_map<std::string, LaneEnd> laneEnds;
         laneEnds.reserve(ng->lane_count());
         for (std::size_t i = 0; i < ng->lane_count(); ++i) {
             const std::uint32_t s = ng->lane_offsets[i];
             const std::uint32_t e = ng->lane_offsets[i + 1];
-            if (e == s) continue;
+            if (e - s < 1) continue;
             const std::uint32_t last = e - 1;
+            const float lx = ng->lane_points[last * 2];
+            const float ly = ng->lane_points[last * 2 + 1];
+            float dx = 1.0f, dy = 0.0f;
+            if (e - s >= 2) {
+                const std::uint32_t prev = e - 2;
+                dx = lx - ng->lane_points[prev * 2];
+                dy = ly - ng->lane_points[prev * 2 + 1];
+                const float n = std::sqrt(dx * dx + dy * dy);
+                if (n > 1e-6f) { dx /= n; dy /= n; } else { dx = 1.0f; dy = 0.0f; }
+            }
             laneEnds.emplace(ng->lane_ids[i],
-                std::make_pair(ng->lane_points[last * 2],
-                               ng->lane_points[last * 2 + 1]));
+                LaneEnd{lx, ly, dx, dy, ng->lane_widths[i], i});
         }
 
         const auto tlsIds = libsumo::TrafficLight::getIDList();
@@ -139,12 +173,14 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
             for (std::size_t i = 0; i < links.size(); ++i) {
                 float x = 0.0f, y = 0.0f;
                 bool have = false;
+                const LaneEnd* le = nullptr;
                 if (!links[i].empty()) {
                     const auto& lk = links[i].front();
                     auto it = laneEnds.find(lk.fromLane);
                     if (it != laneEnds.end()) {
-                        x = it->second.first;
-                        y = it->second.second;
+                        x = it->second.x;
+                        y = it->second.y;
+                        le = &it->second;
                         have = true;
                     }
                 }
@@ -159,6 +195,14 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
                 ng->tls_y.push_back(y);
                 ng->tls_ids.push_back(tid);
                 ng->tls_state_index.push_back(static_cast<std::uint32_t>(i));
+
+                if (le) {
+                    ng->stopline_x.push_back(le->x);
+                    ng->stopline_y.push_back(le->y);
+                    ng->stopline_dx.push_back(le->dx);
+                    ng->stopline_dy.push_back(le->dy);
+                    ng->stopline_w.push_back(le->w);
+                }
             }
         }
     } catch (...) {

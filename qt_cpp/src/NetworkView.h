@@ -3,7 +3,9 @@
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QString>
 #include <memory>
+#include <vector>
 
 #include "Camera.h"
 #include "sim/SimSnapshot.h"
@@ -14,6 +16,9 @@ class VehicleLayer;
 class PersonLayer;
 class PolygonLayer;
 class TLSLayer;
+class StopLineLayer;
+class RailLayer;
+class EdgeColorLayer;
 
 class NetworkView : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -46,10 +51,24 @@ protected:
 private:
     void drawOverlays(QPainter& p);
     void drawScaleBar(QPainter& p);
+    void drawLegend  (QPainter& p);
+    void drawInfoBox (QPainter& p);
+    void pickAt(double pxX, double pxY);
+
+    enum class PickKind { None, Vehicle, Person, TLS, Polygon, Lane, Junction };
+    struct Picked {
+        PickKind kind = PickKind::None;
+        QString  title;
+        std::vector<QString> lines;
+    } m_picked;
 
     Camera m_cam;
     std::shared_ptr<NetworkGeometry> m_ng;
+    SimSnapshotPtr                   m_snap;
     std::unique_ptr<NetworkLayer>    m_networkLayer;
+    std::unique_ptr<EdgeColorLayer>  m_edgeColorLayer;
+    std::unique_ptr<RailLayer>       m_railLayer;
+    std::unique_ptr<StopLineLayer>   m_stopLineLayer;
     std::unique_ptr<PolygonLayer>    m_polygonLayer;
     std::unique_ptr<TLSLayer>        m_tlsLayer;
     std::unique_ptr<VehicleLayer>    m_vehicleLayer;
@@ -57,8 +76,11 @@ private:
     SimSnapshotPtr                   m_pendingSnap;
     bool                             m_snapDirty = false;
 
-    bool   m_panning = false;
+    bool   m_panning   = false;
+    bool   m_mouseDown = false;
+    bool   m_didDrag   = false;
     QPoint m_lastMouse;
+    QPoint m_downPos;
 
     bool   m_hasBounds = false;
     double m_minX = 0, m_minY = 0, m_maxX = 0, m_maxY = 0;

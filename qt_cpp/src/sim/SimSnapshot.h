@@ -32,6 +32,11 @@ struct SimSnapshot {
     std::vector<float>       person_y;
     std::vector<std::uint8_t> person_rgba;
 
+    // Optional per-lane attribute coloring. When color mode is "None" this
+    // vector is empty; otherwise size() == 4 * lane_count.
+    std::vector<std::uint8_t> lane_attr_rgba;
+    std::string               lane_attr_label;  // e.g. "speed [0..50 km/h]"
+
     // Traffic-light states, keyed by TLS id. value is the raw RYG string.
     std::unordered_map<std::string, std::string> tls_states;
 

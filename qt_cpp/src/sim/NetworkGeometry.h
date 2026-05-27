@@ -32,6 +32,20 @@ struct NetworkGeometry {
     std::vector<std::uint8_t>  polygon_rgba;     // 4 bytes per polygon
     std::vector<std::uint8_t>  polygon_filled;   // 1 byte per polygon
 
+    // Per-lane classification:
+    //   0 = road, 1 = rail, 2 = sidewalk, 3 = walkingarea/crossing,
+    //   4 = internal road, 5 = other.
+    std::vector<std::uint8_t> lane_kind;
+
+    // Stop lines (one per TLS-controlled approach). Center XY + unit tangent
+    // along the lane direction; line is drawn perpendicular to (dx,dy) with
+    // width equal to the lane width.
+    std::vector<float>        stopline_x;
+    std::vector<float>        stopline_y;
+    std::vector<float>        stopline_dx;
+    std::vector<float>        stopline_dy;
+    std::vector<float>        stopline_w;
+
     // Traffic-light heads: one marker per controlled link.
     // tls_ids[i] is the TLS controlling marker i; tls_state_index[i] is the
     // character offset into that TLS's state string for this link.
@@ -47,6 +61,7 @@ struct NetworkGeometry {
     [[nodiscard]] std::size_t junction_count() const noexcept { return junction_ids.size(); }
     [[nodiscard]] std::size_t polygon_count() const noexcept { return polygon_filled.size(); }
     [[nodiscard]] std::size_t tls_marker_count() const noexcept { return tls_ids.size(); }
+    [[nodiscard]] std::size_t stopline_count() const noexcept { return stopline_x.size(); }
 };
 
 // Populates the structure by calling libsumo. Must be invoked on the thread

@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <QAction>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QLabel>
 #include <QMenuBar>
@@ -82,6 +83,22 @@ void MainWindow::buildMenusAndToolbar() {
     m_delay->setFixedWidth(160);
     toolbar->addWidget(m_delay);
     connect(m_delay, &QSlider::valueChanged, this, &MainWindow::onDelayChanged);
+
+    toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr("  Color by: "), this));
+    m_colorMode = new QComboBox(this);
+    m_colorMode->addItem(tr("None"));
+    m_colorMode->addItem(tr("Mean speed"));
+    m_colorMode->addItem(tr("Occupancy"));
+    m_colorMode->addItem(tr("Halting count"));
+    toolbar->addWidget(m_colorMode);
+    connect(m_colorMode,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+        QMetaObject::invokeMethod(
+            m_sim, "setColorMode", Qt::QueuedConnection, Q_ARG(int, idx));
+    });
 
     toolbar->addSeparator();
     toolbar->addAction(resetAct);

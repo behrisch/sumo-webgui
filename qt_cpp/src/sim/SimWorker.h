@@ -23,6 +23,7 @@ public slots:
     void play();
     void pause();
     void setDelayMs(int ms);
+    void setColorMode(int mode);  // 0=None, 1=Speed, 2=Occupancy, 3=Halting
     void shutdown();
 
 signals:
@@ -45,4 +46,6 @@ private:
     bool    m_open       = false;
     bool    m_playing    = false;
     qint64  m_stepCount  = 0;
+    int     m_colorMode  = 0;
+    std::shared_ptr<NetworkGeometry> m_ng;
 };

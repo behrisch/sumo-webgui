@@ -35,22 +35,36 @@ Phase 0 (skeleton) — done.
 Phase 1 (network rendering + camera + scale bar + reset view) — done.
 Phase 2 (live simulation, vehicle rendering, play/pause/step/delay/FPS) — done.
 Phase 3a (polygons + persons + traffic-light heads) — done.
+Phase 3b (lane classification + rails with sleepers, stop lines,
+edge-attribute coloring + legend, click-to-inspect info box) — done.
 
 Locale fix: `main.cpp` resets `LC_NUMERIC=C` after Qt initialization so
 libsumo's `std::stod`-based option/XML parsing works under comma-decimal
 locales (e.g. de_DE).
 
-What additionally works after Phase 3a:
-- Static polygons from `.poly.xml`: filled (triangle fan about centroid)
-  or unfilled (line strip), colored from libsumo
-- Traffic-light heads: one small square per controlled link, position taken
-  from the end of each `fromLane`, color updated per step from
-  `TrafficLight::getRedYellowGreenState` (r/y/g/G/s/u/o handled)
-- Persons: instanced small squares at `Person::getPosition`, colored by type
+What additionally works after Phase 3b:
+- Per-lane classification (road / rail / sidewalk / walkingarea·crossing /
+  internal) derived from `Lane::getAllowed`
+- **Rails**: dedicated `RailLayer` draws two steel-coloured rails offset by
+  half the standard gauge (1.435 m) plus periodic perpendicular sleepers
+  (every 3.5 m) for every rail lane
+- **Stop lines**: short white perpendicular bars at the end of each
+  TLS-controlled approach lane, oriented from the lane's last segment
+- **Edge attribute coloring**: toolbar "Color by" dropdown with
+  *None / Mean speed / Occupancy / Halting count*. Per-lane colours are
+  computed on the worker thread (only when a mode is active, to keep step
+  cost low on 9k-lane networks) and re-uploaded as a per-vertex colour
+  attribute via `EdgeColorLayer`. A bottom-left legend overlay shows the
+  attribute name with a red→yellow→green gradient.
+- **Picking + info box**: left-click on the map selects the nearest
+  vehicle / person / TLS head / polygon / lane / junction (in that order)
+  within a ~8 pixel tolerance and shows a floating info box at the top-left
+  with the id, position/heading/state/etc. A short drag still pans without
+  selecting; only static clicks pick.
 
-Render order matches the deck.gl frontend: junctions+roads → polygons →
-TLS heads → vehicles → persons.
+Render order matches the deck.gl frontend: junctions+roads → edge-attribute
+overlay → rails → polygons → stop lines → TLS heads → vehicles → persons.
 
-Next (not started): rails with sleepers, edge attribute coloring + legend,
-crossings/walking-area styling, stop lines, stopping places, detectors,
-picking/tooltips.
+Next (not started): stopping places (BusStop/ChargingStation/ParkingArea),
+detectors (InductionLoop/LaneArea/MultiEntryExit), crossings styling beyond
+the base tint, mode toggle to lock/follow a vehicle.

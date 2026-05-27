@@ -9,6 +9,7 @@ class QThread;
 class QLabel;
 class QAction;
 class QSlider;
+class QComboBox;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -42,6 +43,7 @@ private:
     QAction* m_pauseAct = nullptr;
     QAction* m_stepAct  = nullptr;
     QSlider* m_delay    = nullptr;
+    QComboBox* m_colorMode = nullptr;
 
     QLabel* m_status  = nullptr;
     QLabel* m_fpsLbl  = nullptr;
