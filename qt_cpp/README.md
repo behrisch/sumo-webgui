@@ -35,8 +35,10 @@ Phase 0 (skeleton) — done.
 Phase 1 (network rendering + camera + scale bar + reset view) — done.
 Phase 2 (live simulation, vehicle rendering, play/pause/step/delay/FPS) — done.
 Phase 3a (polygons + persons + traffic-light heads) — done.
-Phase 3b (lane classification + rails with sleepers, stop lines,
-edge-attribute coloring + legend, click-to-inspect info box) — done.
+Phase 3c (round TLS heads, stopping places, induction-loop / lane-area
+detectors) — done.
+Phase 4 (POIs, MultiEntryExit detectors, sidewalk/walking-area tinting,
+follow-vehicle camera mode) — done.
 
 Locale fix: `main.cpp` resets `LC_NUMERIC=C` after Qt initialization so
 libsumo's `std::stod`-based option/XML parsing works under comma-decimal
@@ -63,7 +65,20 @@ What additionally works after Phase 3b:
   selecting; only static clicks pick.
 
 Render order matches the deck.gl frontend: junctions+roads → edge-attribute
-overlay → rails → polygons → stop lines → TLS heads → vehicles → persons.
+overlay → pedestrian areas → rails → polygons → POIs → stopping places →
+detectors → stop lines → TLS heads → vehicles → persons.
 
-Next (not started): distinct crossings/walking-area striping, follow-vehicle
-mode, MultiEntryExit detectors, OverheadWire, Calibrator markers.
+What additionally works after Phase 4:
+- **POIs** rendered as small coloured discs (`POILayer`), picked with their
+  id, type, and position
+- **MultiEntryExit detectors**: entries shown as green bars, exits as red
+  bars (`DetectorLayer` kinds 2/3); also covered by picking
+- **Pedestrian areas**: sidewalks drawn in warm tan and walking-areas /
+  crossings in light grey on top of the road base (`PedAreaLayer`) so they
+  visually separate from car lanes
+- **Follow-vehicle mode**: pick a vehicle, then `Follow selected` (Ctrl+F)
+  locks the camera onto it for every subsequent snapshot. `Unfollow` (Esc)
+  clears the lock; following also auto-clears when the vehicle leaves.
+
+Next (not started): zebra striping on crossings, vehicle shape by type
+(bus/truck/etc.), OverheadWire and Calibrator markers.

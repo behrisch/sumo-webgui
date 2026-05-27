@@ -76,16 +76,27 @@ void DetectorLayer::rebuild() {
         const float px = -dy, py = dx;
         std::uint8_t r, g, b, a;
         float halfL, halfW;
-        if (m_ng->det_kind[i] == 0) {
-            // Induction loop: bright magenta short bar.
-            r = 240; g = 60; b = 200; a = 230;
-            halfL = kPointBar;
-            halfW = kBandHalfWidth;
-        } else {
-            // Lane-area: translucent magenta band along the lane.
-            r = 240; g = 60; b = 200; a = 150;
-            halfL = 0.5f * std::max(0.5f, len);
-            halfW = kBandHalfWidth * 0.6f;
+        switch (m_ng->det_kind[i]) {
+            case 0:  // Induction loop: bright magenta short bar.
+                r = 240; g = 60;  b = 200; a = 230;
+                halfL = kPointBar;
+                halfW = kBandHalfWidth;
+                break;
+            case 1:  // Lane-area: translucent magenta band.
+                r = 240; g = 60;  b = 200; a = 150;
+                halfL = 0.5f * std::max(0.5f, len);
+                halfW = kBandHalfWidth * 0.6f;
+                break;
+            case 2:  // Multi-entry-exit ENTRY: green bar.
+                r = 60;  g = 220; b = 90;  a = 240;
+                halfL = kPointBar;
+                halfW = kBandHalfWidth;
+                break;
+            default: // Multi-entry-exit EXIT: red bar.
+                r = 230; g = 50;  b = 50;  a = 240;
+                halfL = kPointBar;
+                halfW = kBandHalfWidth;
+                break;
         }
         const float hx = dx * halfL, hy = dy * halfL;
         const float kx = px * halfW, ky = py * halfW;

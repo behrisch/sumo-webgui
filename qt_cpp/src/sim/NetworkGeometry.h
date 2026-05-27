@@ -32,6 +32,13 @@ struct NetworkGeometry {
     std::vector<std::uint8_t>  polygon_rgba;     // 4 bytes per polygon
     std::vector<std::uint8_t>  polygon_filled;   // 1 byte per polygon
 
+    // Points of Interest (POIs from .poi.xml). One coloured marker per POI.
+    std::vector<float>         poi_x;
+    std::vector<float>         poi_y;
+    std::vector<std::uint8_t>  poi_rgba;
+    std::vector<std::string>   poi_ids;
+    std::vector<std::string>   poi_types;
+
     // Per-lane classification:
     //   0 = road, 1 = rail, 2 = sidewalk, 3 = walkingarea/crossing,
     //   4 = internal road, 5 = other.
@@ -82,6 +89,7 @@ struct NetworkGeometry {
     [[nodiscard]] std::size_t lane_count()     const noexcept { return lane_ids.size(); }
     [[nodiscard]] std::size_t junction_count() const noexcept { return junction_ids.size(); }
     [[nodiscard]] std::size_t polygon_count() const noexcept { return polygon_filled.size(); }
+    [[nodiscard]] std::size_t poi_count()     const noexcept { return poi_ids.size(); }
     [[nodiscard]] std::size_t tls_marker_count() const noexcept { return tls_ids.size(); }
     [[nodiscard]] std::size_t stopline_count() const noexcept { return stopline_x.size(); }
     [[nodiscard]] std::size_t stop_count()     const noexcept { return stop_ids.size(); }

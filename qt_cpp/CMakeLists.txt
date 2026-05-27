@@ -32,8 +32,12 @@ add_executable(qt_cpp
     src/layers/EdgeColorLayer.h
     src/layers/NetworkLayer.cpp
     src/layers/NetworkLayer.h
+    src/layers/PedAreaLayer.cpp
+    src/layers/PedAreaLayer.h
     src/layers/PersonLayer.cpp
     src/layers/PersonLayer.h
+    src/layers/POILayer.cpp
+    src/layers/POILayer.h
     src/layers/PolygonLayer.cpp
     src/layers/PolygonLayer.h
     src/layers/RailLayer.cpp

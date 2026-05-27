@@ -13,6 +13,7 @@
 #include <libsumo/Junction.h>
 #include <libsumo/Lane.h>
 #include <libsumo/LaneArea.h>
+#include <libsumo/MultiEntryExit.h>
 #include <libsumo/POI.h>
 #include <libsumo/ParkingArea.h>
 #include <libsumo/Polygon.h>
@@ -140,6 +141,34 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
             static_cast<std::uint32_t>(ng->polygon_points.size() / 2));
     } catch (...) {
         // No polygons loaded; harmless.
+    }
+
+    // POIs (Points of Interest).
+    try {
+        const auto poiIds = libsumo::POI::getIDList();
+        for (const auto& id : poiIds) {
+            libsumo::TraCIPosition p;
+            try { p = libsumo::POI::getPosition(id); }
+            catch (...) { continue; }
+            libsumo::TraCIColor c(220, 220, 60, 255);
+            try { c = libsumo::POI::getColor(id); } catch (...) {}
+            std::string ty;
+            try { ty = libsumo::POI::getType(id); } catch (...) {}
+            ng->poi_x.push_back(static_cast<float>(p.x));
+            ng->poi_y.push_back(static_cast<float>(p.y));
+            ng->poi_rgba.push_back(static_cast<std::uint8_t>(c.r));
+            ng->poi_rgba.push_back(static_cast<std::uint8_t>(c.g));
+            ng->poi_rgba.push_back(static_cast<std::uint8_t>(c.b));
+            ng->poi_rgba.push_back(static_cast<std::uint8_t>(c.a));
+            ng->poi_ids.push_back(id);
+            ng->poi_types.push_back(std::move(ty));
+            const float x = static_cast<float>(p.x);
+            const float y = static_cast<float>(p.y);
+            minX = std::min(minX, x); minY = std::min(minY, y);
+            maxX = std::max(maxX, x); maxY = std::max(maxY, y);
+        }
+    } catch (...) {
+        // No POIs loaded; harmless.
     }
 
     // Traffic light heads. Place one marker per controlled link at the end
@@ -322,6 +351,24 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
                 addDet(1, id, libsumo::LaneArea::getLaneID(id),
                        libsumo::LaneArea::getPosition(id),
                        libsumo::LaneArea::getLength(id));
+            } catch (...) {}
+        }
+    } catch (...) {}
+    try {
+        for (const auto& id : libsumo::MultiEntryExit::getIDList()) {
+            try {
+                const auto eLanes = libsumo::MultiEntryExit::getEntryLanes(id);
+                const auto ePos   = libsumo::MultiEntryExit::getEntryPositions(id);
+                for (std::size_t i = 0; i < eLanes.size() && i < ePos.size(); ++i) {
+                    addDet(2, id + ":in" + std::to_string(i),
+                           eLanes[i], ePos[i], 0.0);
+                }
+                const auto xLanes = libsumo::MultiEntryExit::getExitLanes(id);
+                const auto xPos   = libsumo::MultiEntryExit::getExitPositions(id);
+                for (std::size_t i = 0; i < xLanes.size() && i < xPos.size(); ++i) {
+                    addDet(3, id + ":out" + std::to_string(i),
+                           xLanes[i], xPos[i], 0.0);
+                }
             } catch (...) {}
         }
     } catch (...) {}

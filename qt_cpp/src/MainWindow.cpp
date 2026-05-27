@@ -102,6 +102,14 @@ void MainWindow::buildMenusAndToolbar() {
 
     toolbar->addSeparator();
     toolbar->addAction(resetAct);
+
+    auto* followAct = toolbar->addAction(tr("Follow selected"));
+    followAct->setShortcut(QKeySequence(tr("Ctrl+F")));
+    followAct->setToolTip(tr("Lock the camera onto the currently picked vehicle (Ctrl+F)"));
+    connect(followAct, &QAction::triggered, m_view, &NetworkView::setFollowSelected);
+    auto* unfollowAct = toolbar->addAction(tr("Unfollow"));
+    unfollowAct->setShortcut(QKeySequence(Qt::Key_Escape));
+    connect(unfollowAct, &QAction::triggered, m_view, &NetworkView::clearFollow);
 }
 
 void MainWindow::buildStatusBar() {

@@ -14,7 +14,9 @@
 #include "layers/DetectorLayer.h"
 #include "layers/EdgeColorLayer.h"
 #include "layers/NetworkLayer.h"
+#include "layers/PedAreaLayer.h"
 #include "layers/PersonLayer.h"
+#include "layers/POILayer.h"
 #include "layers/PolygonLayer.h"
 #include "layers/RailLayer.h"
 #include "layers/StopLineLayer.h"
@@ -43,6 +45,8 @@ NetworkView::~NetworkView() {
     m_stoppingPlaceLayer.reset();
     m_detectorLayer.reset();
     m_polygonLayer.reset();
+    m_pedAreaLayer.reset();
+    m_poiLayer.reset();
     m_tlsLayer.reset();
     m_vehicleLayer.reset();
     m_personLayer.reset();
@@ -65,6 +69,8 @@ void NetworkView::initializeGL() {
     m_stoppingPlaceLayer->initGL(this);
     m_detectorLayer  = std::make_unique<DetectorLayer>();  m_detectorLayer ->initGL(this);
     m_polygonLayer   = std::make_unique<PolygonLayer>();   m_polygonLayer  ->initGL(this);
+    m_pedAreaLayer   = std::make_unique<PedAreaLayer>();   m_pedAreaLayer  ->initGL(this);
+    m_poiLayer       = std::make_unique<POILayer>();       m_poiLayer      ->initGL(this);
     m_tlsLayer       = std::make_unique<TLSLayer>();       m_tlsLayer      ->initGL(this);
     m_vehicleLayer   = std::make_unique<VehicleLayer>();   m_vehicleLayer  ->initGL(this);
     m_personLayer    = std::make_unique<PersonLayer>();    m_personLayer   ->initGL(this);
@@ -77,6 +83,8 @@ void NetworkView::initializeGL() {
         m_stoppingPlaceLayer->setGeometry(m_ng);
         m_detectorLayer ->setGeometry(m_ng);
         m_polygonLayer  ->setGeometry(m_ng);
+        m_pedAreaLayer  ->setGeometry(m_ng);
+        m_poiLayer      ->setGeometry(m_ng);
         m_tlsLayer      ->setGeometry(m_ng);
     }
     if (m_pendingSnap) {
@@ -117,12 +125,15 @@ void NetworkView::paintGL() {
         m_snapDirty = false;
     }
 
-    // Draw order: junctions+roads -> per-lane color overlay -> rails ->
-    // polygons -> stop lines -> TLS heads -> vehicles -> persons.
+    // Draw order: junctions+roads -> per-lane color overlay -> pedestrian
+    // areas -> rails -> polygons -> POIs -> stop lines -> TLS heads ->
+    // vehicles -> persons.
     if (m_networkLayer)   m_networkLayer  ->draw(proj.data());
     if (m_edgeColorLayer) m_edgeColorLayer->draw(proj.data());
+    if (m_pedAreaLayer)   m_pedAreaLayer  ->draw(proj.data());
     if (m_railLayer)      m_railLayer     ->draw(proj.data());
     if (m_polygonLayer)   m_polygonLayer  ->draw(proj.data());
+    if (m_poiLayer)       m_poiLayer      ->draw(proj.data());
     if (m_stoppingPlaceLayer) m_stoppingPlaceLayer->draw(proj.data());
     if (m_detectorLayer)  m_detectorLayer ->draw(proj.data());
     if (m_stopLineLayer)  m_stopLineLayer ->draw(proj.data());
@@ -145,6 +156,34 @@ void NetworkView::paintGL() {
 void NetworkView::setSnapshot(SimSnapshotPtr snap) {
     m_pendingSnap = std::move(snap);
     m_snapDirty = true;
+    if (!m_followId.isEmpty() && m_pendingSnap) {
+        const std::string fid = m_followId.toStdString();
+        bool found = false;
+        for (std::size_t i = 0; i < m_pendingSnap->vehicle_count(); ++i) {
+            if (m_pendingSnap->ids[i] == fid) {
+                m_cam.setCenter(m_pendingSnap->x[i], m_pendingSnap->y[i]);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Vehicle has left the network; stop following.
+            m_followId.clear();
+        }
+    }
+    update();
+}
+
+void NetworkView::setFollowSelected() {
+    if (m_picked.kind == PickKind::Vehicle && !m_picked.id.isEmpty()) {
+        m_followId = m_picked.id;
+        update();
+    }
+}
+
+void NetworkView::clearFollow() {
+    if (m_followId.isEmpty()) return;
+    m_followId.clear();
     update();
 }
 
@@ -174,6 +213,8 @@ void NetworkView::setNetwork(std::shared_ptr<NetworkGeometry> ng) {
         if (m_stoppingPlaceLayer) m_stoppingPlaceLayer->setGeometry(m_ng);
         if (m_detectorLayer)  m_detectorLayer ->setGeometry(m_ng);
         if (m_polygonLayer)   m_polygonLayer  ->setGeometry(m_ng);
+        if (m_pedAreaLayer)   m_pedAreaLayer  ->setGeometry(m_ng);
+        if (m_poiLayer)       m_poiLayer      ->setGeometry(m_ng);
         if (m_tlsLayer)       m_tlsLayer      ->setGeometry(m_ng);
         doneCurrent();
     }
@@ -296,8 +337,8 @@ void NetworkView::pickAt(double pxX, double pxY) {
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
             best.kind = PickKind::Vehicle;
-            best.title = QString("Vehicle  %1").arg(
-                QString::fromStdString(m_snap->ids[bestIdx]));
+            best.id = QString::fromStdString(m_snap->ids[bestIdx]);
+            best.title = QString("Vehicle  %1").arg(best.id);
             best.lines.push_back(QString("position  %1, %2 m")
                 .arg(m_snap->x[bestIdx], 0, 'f', 1)
                 .arg(m_snap->y[bestIdx], 0, 'f', 1));
@@ -380,7 +421,32 @@ void NetworkView::pickAt(double pxX, double pxY) {
         }
     }
 
-    // 3b) Stopping places: closest within half of band length.
+    // 3b) POIs (small static markers).
+    if (best.kind == PickKind::None) {
+        float bestD2 = std::numeric_limits<float>::infinity();
+        std::size_t bestIdx = 0;
+        for (std::size_t i = 0; i < m_ng->poi_count(); ++i) {
+            const float dx = m_ng->poi_x[i] - fx;
+            const float dy = m_ng->poi_y[i] - fy;
+            const float d2 = dx * dx + dy * dy;
+            const float tol2 = std::max(pickR2, 3.24f);  // 1.8m disc radius
+            if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+        }
+        if (bestD2 < std::numeric_limits<float>::infinity()) {
+            best.kind = PickKind::POI;
+            best.title = QString("POI  %1").arg(
+                QString::fromStdString(m_ng->poi_ids[bestIdx]));
+            if (!m_ng->poi_types[bestIdx].empty()) {
+                best.lines.push_back(QString("type   %1")
+                    .arg(QString::fromStdString(m_ng->poi_types[bestIdx])));
+            }
+            best.lines.push_back(QString("position  %1, %2 m")
+                .arg(m_ng->poi_x[bestIdx], 0, 'f', 1)
+                .arg(m_ng->poi_y[bestIdx], 0, 'f', 1));
+        }
+    }
+
+    // 3c) Stopping places: closest within half of band length.
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
@@ -408,7 +474,7 @@ void NetworkView::pickAt(double pxX, double pxY) {
         }
     }
 
-    // 3c) Detectors.
+    // 3d) Detectors.
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
@@ -422,8 +488,13 @@ void NetworkView::pickAt(double pxX, double pxY) {
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
             best.kind = PickKind::Detector;
-            const char* k = m_ng->det_kind[bestIdx] == 0
-                ? "Induction loop" : "Lane-area detector";
+            const char* k = "Detector";
+            switch (m_ng->det_kind[bestIdx]) {
+                case 0: k = "Induction loop"; break;
+                case 1: k = "Lane-area detector"; break;
+                case 2: k = "MultiEntryExit (entry)"; break;
+                case 3: k = "MultiEntryExit (exit)"; break;
+            }
             best.title = QString("%1  %2").arg(k,
                 QString::fromStdString(m_ng->det_ids[bestIdx]));
             if (m_ng->det_len[bestIdx] > 0)
