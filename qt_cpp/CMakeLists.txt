@@ -28,6 +28,12 @@ add_executable(qt_cpp
     src/gl/Shader.h
     src/layers/NetworkLayer.cpp
     src/layers/NetworkLayer.h
+    src/layers/PersonLayer.cpp
+    src/layers/PersonLayer.h
+    src/layers/PolygonLayer.cpp
+    src/layers/PolygonLayer.h
+    src/layers/TLSLayer.cpp
+    src/layers/TLSLayer.h
     src/layers/VehicleLayer.cpp
     src/layers/VehicleLayer.h
     src/sim/NetworkGeometry.cpp

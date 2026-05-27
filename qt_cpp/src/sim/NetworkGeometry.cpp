@@ -3,11 +3,18 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
+#pragma push_macro("signals")
+#undef signals
 #include <libsumo/Junction.h>
 #include <libsumo/Lane.h>
+#include <libsumo/POI.h>
+#include <libsumo/Polygon.h>
 #include <libsumo/Simulation.h>
 #include <libsumo/TraCIDefs.h>
+#include <libsumo/TrafficLight.h>
+#pragma pop_macro("signals")
 
 namespace {
 
@@ -57,18 +64,105 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
     }
 
     // Junctions
+    std::unordered_map<std::string, std::pair<float, float>> juncCenters;
     {
         const auto juncIds = libsumo::Junction::getIDList();
         ng->junction_ids.reserve(juncIds.size());
         ng->junction_offsets.reserve(juncIds.size() + 1);
         for (const auto& id : juncIds) {
             ng->junction_ids.push_back(id);
+            const std::size_t before = ng->junction_points.size() / 2;
             appendShape(libsumo::Junction::getShape(id),
                         ng->junction_points, ng->junction_offsets,
                         minX, minY, maxX, maxY);
+            const std::size_t after = ng->junction_points.size() / 2;
+            float cx = 0.0f, cy = 0.0f;
+            if (after > before) {
+                for (std::size_t p = before; p < after; ++p) {
+                    cx += ng->junction_points[p * 2];
+                    cy += ng->junction_points[p * 2 + 1];
+                }
+                const float inv = 1.0f / static_cast<float>(after - before);
+                cx *= inv; cy *= inv;
+            }
+            juncCenters.emplace(id, std::make_pair(cx, cy));
         }
         ng->junction_offsets.push_back(
             static_cast<std::uint32_t>(ng->junction_points.size() / 2));
+    }
+
+    // Polygons. Triangulation is done later in PolygonLayer; here we just
+    // record raw shape, color, and filled flag.
+    try {
+        const auto polyIds = libsumo::Polygon::getIDList();
+        ng->polygon_offsets.reserve(polyIds.size() + 1);
+        for (const auto& id : polyIds) {
+            const auto shape = libsumo::Polygon::getShape(id);
+            appendShape(shape, ng->polygon_points, ng->polygon_offsets,
+                        minX, minY, maxX, maxY);
+            const auto c = libsumo::Polygon::getColor(id);
+            ng->polygon_rgba.push_back(static_cast<std::uint8_t>(c.r));
+            ng->polygon_rgba.push_back(static_cast<std::uint8_t>(c.g));
+            ng->polygon_rgba.push_back(static_cast<std::uint8_t>(c.b));
+            ng->polygon_rgba.push_back(static_cast<std::uint8_t>(c.a));
+            ng->polygon_filled.push_back(libsumo::Polygon::getFilled(id) ? 1 : 0);
+        }
+        ng->polygon_offsets.push_back(
+            static_cast<std::uint32_t>(ng->polygon_points.size() / 2));
+    } catch (...) {
+        // No polygons loaded; harmless.
+    }
+
+    // Traffic light heads. Place one marker per controlled link at the end
+    // of its fromLane (closest to the stop line). Fallback to junction
+    // center if the lane isn't found.
+    try {
+        // Build a fromLane -> endpoint XY map from the already-extracted lane
+        // shapes. (Avoids a second libsumo round trip.)
+        std::unordered_map<std::string, std::pair<float, float>> laneEnds;
+        laneEnds.reserve(ng->lane_count());
+        for (std::size_t i = 0; i < ng->lane_count(); ++i) {
+            const std::uint32_t s = ng->lane_offsets[i];
+            const std::uint32_t e = ng->lane_offsets[i + 1];
+            if (e == s) continue;
+            const std::uint32_t last = e - 1;
+            laneEnds.emplace(ng->lane_ids[i],
+                std::make_pair(ng->lane_points[last * 2],
+                               ng->lane_points[last * 2 + 1]));
+        }
+
+        const auto tlsIds = libsumo::TrafficLight::getIDList();
+        for (const auto& tid : tlsIds) {
+            std::vector<std::vector<libsumo::TraCILink>> links;
+            try { links = libsumo::TrafficLight::getControlledLinks(tid); }
+            catch (...) { continue; }
+            for (std::size_t i = 0; i < links.size(); ++i) {
+                float x = 0.0f, y = 0.0f;
+                bool have = false;
+                if (!links[i].empty()) {
+                    const auto& lk = links[i].front();
+                    auto it = laneEnds.find(lk.fromLane);
+                    if (it != laneEnds.end()) {
+                        x = it->second.first;
+                        y = it->second.second;
+                        have = true;
+                    }
+                }
+                if (!have) {
+                    auto jit = juncCenters.find(tid);
+                    if (jit != juncCenters.end()) {
+                        x = jit->second.first;
+                        y = jit->second.second;
+                    }
+                }
+                ng->tls_x.push_back(x);
+                ng->tls_y.push_back(y);
+                ng->tls_ids.push_back(tid);
+                ng->tls_state_index.push_back(static_cast<std::uint32_t>(i));
+            }
+        }
+    } catch (...) {
+        // No TLS; harmless.
     }
 
     if (!std::isfinite(minX)) {

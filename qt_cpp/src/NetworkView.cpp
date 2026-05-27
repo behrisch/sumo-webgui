@@ -10,6 +10,9 @@
 #include <cmath>
 
 #include "layers/NetworkLayer.h"
+#include "layers/PersonLayer.h"
+#include "layers/PolygonLayer.h"
+#include "layers/TLSLayer.h"
 #include "layers/VehicleLayer.h"
 #include "sim/NetworkGeometry.h"
 
@@ -27,7 +30,10 @@ NetworkView::NetworkView(QWidget* parent) : QOpenGLWidget(parent) {
 NetworkView::~NetworkView() {
     makeCurrent();
     m_networkLayer.reset();
+    m_polygonLayer.reset();
+    m_tlsLayer.reset();
     m_vehicleLayer.reset();
+    m_personLayer.reset();
     doneCurrent();
 }
 
@@ -36,15 +42,29 @@ void NetworkView::initializeGL() {
     glClearColor(0.05f, 0.05f, 0.07f, 1.0f);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     m_networkLayer = std::make_unique<NetworkLayer>();
     m_networkLayer->initGL(this);
-    if (m_ng) m_networkLayer->setGeometry(m_ng);
-
+    m_polygonLayer = std::make_unique<PolygonLayer>();
+    m_polygonLayer->initGL(this);
+    m_tlsLayer = std::make_unique<TLSLayer>();
+    m_tlsLayer->initGL(this);
     m_vehicleLayer = std::make_unique<VehicleLayer>();
     m_vehicleLayer->initGL(this);
+    m_personLayer = std::make_unique<PersonLayer>();
+    m_personLayer->initGL(this);
+
+    if (m_ng) {
+        m_networkLayer->setGeometry(m_ng);
+        m_polygonLayer->setGeometry(m_ng);
+        m_tlsLayer->setGeometry(m_ng);
+    }
     if (m_pendingSnap) {
         m_vehicleLayer->setSnapshot(m_pendingSnap);
+        m_personLayer->setSnapshot(m_pendingSnap);
+        m_tlsLayer->setSnapshot(m_pendingSnap);
         m_snapDirty = false;
     }
 }
@@ -61,14 +81,21 @@ void NetworkView::resizeGL(int w, int h) {
 void NetworkView::paintGL() {
     glClear(GL_COLOR_BUFFER_BIT);
     const auto proj = m_cam.projection();
+
+    // Layer order matches the deck.gl frontend:
+    // junctions+roads → polygons → TLS heads → vehicles → persons.
     if (m_networkLayer) m_networkLayer->draw(proj.data());
-    if (m_vehicleLayer) {
-        if (m_snapDirty) {
-            m_vehicleLayer->setSnapshot(m_pendingSnap);
-            m_snapDirty = false;
-        }
-        m_vehicleLayer->draw(proj.data());
+    if (m_polygonLayer) m_polygonLayer->draw(proj.data());
+
+    if (m_snapDirty) {
+        if (m_vehicleLayer) m_vehicleLayer->setSnapshot(m_pendingSnap);
+        if (m_personLayer)  m_personLayer ->setSnapshot(m_pendingSnap);
+        if (m_tlsLayer)     m_tlsLayer    ->setSnapshot(m_pendingSnap);
+        m_snapDirty = false;
     }
+    if (m_tlsLayer)     m_tlsLayer    ->draw(proj.data());
+    if (m_vehicleLayer) m_vehicleLayer->draw(proj.data());
+    if (m_personLayer)  m_personLayer ->draw(proj.data());
 
     // FPS sampling.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -108,6 +135,8 @@ void NetworkView::setNetwork(std::shared_ptr<NetworkGeometry> ng) {
     if (m_networkLayer) {
         makeCurrent();
         m_networkLayer->setGeometry(m_ng);
+        if (m_polygonLayer) m_polygonLayer->setGeometry(m_ng);
+        if (m_tlsLayer)     m_tlsLayer    ->setGeometry(m_ng);
         doneCurrent();
     }
     update();

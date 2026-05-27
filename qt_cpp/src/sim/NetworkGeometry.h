@@ -25,11 +25,28 @@ struct NetworkGeometry {
     std::vector<std::uint32_t> junction_offsets;
     std::vector<std::string>  junction_ids;
 
+    // Polygons (filled or outline) from the loaded .poly.xml etc.
+    // points/offsets identical scheme. colors_rgba is one rgba8 per polygon.
+    std::vector<float>         polygon_points;
+    std::vector<std::uint32_t> polygon_offsets;
+    std::vector<std::uint8_t>  polygon_rgba;     // 4 bytes per polygon
+    std::vector<std::uint8_t>  polygon_filled;   // 1 byte per polygon
+
+    // Traffic-light heads: one marker per controlled link.
+    // tls_ids[i] is the TLS controlling marker i; tls_state_index[i] is the
+    // character offset into that TLS's state string for this link.
+    std::vector<float>        tls_x;
+    std::vector<float>        tls_y;
+    std::vector<std::string>  tls_ids;
+    std::vector<std::uint32_t> tls_state_index;
+
     // Network bounding box in SUMO XY.
     float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
 
     [[nodiscard]] std::size_t lane_count()     const noexcept { return lane_ids.size(); }
     [[nodiscard]] std::size_t junction_count() const noexcept { return junction_ids.size(); }
+    [[nodiscard]] std::size_t polygon_count() const noexcept { return polygon_filled.size(); }
+    [[nodiscard]] std::size_t tls_marker_count() const noexcept { return tls_ids.size(); }
 };
 
 // Populates the structure by calling libsumo. Must be invoked on the thread

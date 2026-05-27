@@ -11,6 +11,9 @@
 struct NetworkGeometry;
 class NetworkLayer;
 class VehicleLayer;
+class PersonLayer;
+class PolygonLayer;
+class TLSLayer;
 
 class NetworkView : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -47,7 +50,10 @@ private:
     Camera m_cam;
     std::shared_ptr<NetworkGeometry> m_ng;
     std::unique_ptr<NetworkLayer>    m_networkLayer;
+    std::unique_ptr<PolygonLayer>    m_polygonLayer;
+    std::unique_ptr<TLSLayer>        m_tlsLayer;
     std::unique_ptr<VehicleLayer>    m_vehicleLayer;
+    std::unique_ptr<PersonLayer>     m_personLayer;
     SimSnapshotPtr                   m_pendingSnap;
     bool                             m_snapDirty = false;
 

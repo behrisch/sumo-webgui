@@ -9,7 +9,9 @@
 // Qt defines `signals` as a macro; libsumo has a parameter named `signals`.
 #pragma push_macro("signals")
 #undef signals
+#include <libsumo/Person.h>
 #include <libsumo/Simulation.h>
+#include <libsumo/TrafficLight.h>
 #include <libsumo/Vehicle.h>
 #include <libsumo/VehicleType.h>
 #pragma pop_macro("signals")
@@ -106,6 +108,39 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
             snap->rgba.push_back(static_cast<std::uint8_t>(c.g));
             snap->rgba.push_back(static_cast<std::uint8_t>(c.b));
             snap->rgba.push_back(static_cast<std::uint8_t>(c.a));
+        }
+
+        // Persons.
+        const auto pids = libsumo::Person::getIDList();
+        snap->person_ids.reserve(pids.size());
+        snap->person_x.reserve(pids.size());
+        snap->person_y.reserve(pids.size());
+        snap->person_rgba.reserve(pids.size() * 4);
+        for (const auto& id : pids) {
+            libsumo::TraCIPosition p;
+            try { p = libsumo::Person::getPosition(id); }
+            catch (...) { continue; }
+            libsumo::TraCIColor c(255, 200, 0, 255);
+            try {
+                const std::string t = libsumo::Person::getTypeID(id);
+                c = libsumo::VehicleType::getColor(t);
+            } catch (...) {}
+            snap->person_ids.push_back(id);
+            snap->person_x.push_back(static_cast<float>(p.x));
+            snap->person_y.push_back(static_cast<float>(p.y));
+            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.r));
+            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.g));
+            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.b));
+            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.a));
+        }
+
+        // Traffic-light states.
+        const auto tlsIds = libsumo::TrafficLight::getIDList();
+        for (const auto& tid : tlsIds) {
+            try {
+                snap->tls_states.emplace(
+                    tid, libsumo::TrafficLight::getRedYellowGreenState(tid));
+            } catch (...) {}
         }
     } catch (const std::exception& e) {
         emit errorOccurred(QString::fromUtf8(e.what()));

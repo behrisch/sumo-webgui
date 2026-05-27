@@ -34,21 +34,23 @@ Or start it with no scenario and use **File → Open .sumocfg…**.
 Phase 0 (skeleton) — done.
 Phase 1 (network rendering + camera + scale bar + reset view) — done.
 Phase 2 (live simulation, vehicle rendering, play/pause/step/delay/FPS) — done.
+Phase 3a (polygons + persons + traffic-light heads) — done.
 
-What works today:
-- File → Open `.sumocfg` or `--sumocfg <path>` on the command line
-- Worker thread loads scenario via libsumo, extracts lanes + junctions +
-  widths, emits the network and an initial snapshot
-- OpenGL 3.3 core rendering with MSAA 4x:
-  - Junctions filled (dark grey)
-  - Lanes CPU-extruded to per-lane-width triangle strips (slightly lighter)
-  - Vehicles drawn via `glDrawArraysInstanced` as oriented 5×2 m quads,
-    coloured by `VehicleType::getColor`
-- Mouse pan (left drag), wheel zoom anchored at cursor, **Ctrl+0** reset
-- Toolbar: Open, Play (Space), Pause, Step (S), Delay slider 0–1000 ms,
-  Reset view
-- Status bar: `step=… t=… s` + permanent FPS counter (500 ms window)
-- Bottom-right semi-transparent scale bar (auto 1/2/5 × 10ᵏ m / km)
+Locale fix: `main.cpp` resets `LC_NUMERIC=C` after Qt initialization so
+libsumo's `std::stod`-based option/XML parsing works under comma-decimal
+locales (e.g. de_DE).
 
-Next (not started): Phase 3 (rails with sleepers, TLS heads, persons,
-polygons, detectors, stopping places, edge attribute coloring + legend).
+What additionally works after Phase 3a:
+- Static polygons from `.poly.xml`: filled (triangle fan about centroid)
+  or unfilled (line strip), colored from libsumo
+- Traffic-light heads: one small square per controlled link, position taken
+  from the end of each `fromLane`, color updated per step from
+  `TrafficLight::getRedYellowGreenState` (r/y/g/G/s/u/o handled)
+- Persons: instanced small squares at `Person::getPosition`, colored by type
+
+Render order matches the deck.gl frontend: junctions+roads → polygons →
+TLS heads → vehicles → persons.
+
+Next (not started): rails with sleepers, edge attribute coloring + legend,
+crossings/walking-area styling, stop lines, stopping places, detectors,
+picking/tooltips.
