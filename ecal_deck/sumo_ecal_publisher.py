@@ -29,7 +29,8 @@ import xml.etree.ElementTree as ET
 SUMO_HOME = os.environ.get("SUMO_HOME")
 if not SUMO_HOME:
     sys.exit("SUMO_HOME is not set")
-os.add_dll_directory(os.path.join(os.environ["SUMO_HOME"], "bin"))
+if hasattr(os, 'add_dll_directory'):
+    os.add_dll_directory(os.path.join(os.environ["SUMO_HOME"], "bin"))
 sys.path.insert(0, os.path.join(SUMO_HOME, "tools"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
@@ -1113,16 +1114,16 @@ def main():
     _step_stop   = threading.Event()
     _load_lock   = threading.Lock()
 
-    # --- libsumo::ECal native fast-path detection ---
+    # --- libsumo::Batch native fast-path detection ---
     # When the libsumo build includes the optional eCAL extension, delegate the entire
     # per-step vehicle/person/edge extraction + protobuf pack + eCAL publish to native C++,
     # bypassing the Python loop below.  The C++ side applies GeoConvHelper::cartesian2geo
     # to vehicle/person positions when the loaded network is geo-referenced, matching the
     # Python converter behaviour.
-    _ecal_native = getattr(traci, "ecal", None)
+    _ecal_native = getattr(traci, "batch", None)
     _has_native_ecal = bool(_ecal_native and getattr(_ecal_native, "available", lambda: False)())
     if _has_native_ecal:
-        print("libsumo.ecal native publisher available — will use for non-geo-referenced networks.")
+        print("libsumo.batch native publisher available — will use for non-geo-referenced networks.")
     sim["use_native_ecal"] = False  # set True per-load by _do_load if native is available
 
     # --- step loop (runs in background thread) ---
@@ -1131,7 +1132,7 @@ def main():
         SimStepBin and publish.  Returns the number of visible vehicles for UPS stats.
 
         When `sim["use_native_ecal"]` is True, delegates the entire packing/publishing
-        to libsumo::ECal in native C++ and returns a cheap getIDCount() for stats."""
+        to libsumo::Batch in native C++ and returns a cheap getIDCount() for stats."""
         if sim.get("use_native_ecal"):
             return _ecal_native.publishSimStep(
                 ctrl["vehicle_attributes"],
@@ -1639,7 +1640,7 @@ def main():
             sim["use_native_ecal"] = bool(_has_native_ecal)
             if sim["use_native_ecal"]:
                 _ecal_native.init("sumo/simstep", "sumo/vehicletypes")
-                _log("INFO", "Using native libsumo::ECal publisher (C++ fast-path%s)."
+                _log("INFO", "Using native libsumo::Batch publisher (C++ fast-path%s)."
                      % (" + geo conversion" if ng.geo_referenced else ""))
             if sim["end_time_ms"] is not None:
                 _log("INFO", "Published network (cache: %s, end time: %.1f s)"
@@ -1867,7 +1868,7 @@ def main():
         # closures capture variables by reference (via cell objects), not values.
         nonlocal pub_network, pub_additionals, pub_simstep, pub_vehicletypes, pub_log, svc
         pub_network = pub_additionals = pub_simstep = pub_vehicletypes = pub_log = svc = None
-        # Release the native libsumo::ECal publishers BEFORE ecal_core.finalize() so the C++
+        # Release the native libsumo::Batch publishers BEFORE ecal_core.finalize() so the C++
         # destructors run while the shared libecal_core.so process state is still valid.
         if sim.get("use_native_ecal") and _has_native_ecal:
             try:
