@@ -2,18 +2,19 @@
 
 #include <QTimer>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Qt defines `signals` as a macro; libsumo has a parameter named `signals`.
 #pragma push_macro("signals")
 #undef signals
+#include <libsumo/Batch.h>
 #include <libsumo/Lane.h>
-#include <libsumo/Person.h>
 #include <libsumo/Simulation.h>
-#include <libsumo/TrafficLight.h>
-#include <libsumo/Vehicle.h>
 #include <libsumo/VehicleType.h>
 #pragma pop_macro("signals")
 
@@ -57,6 +58,7 @@ void SimWorker::loadScenario(const QString& sumocfgPath) {
         libsumo::Simulation::start(cmd);
         m_open = true;
         m_stepCount = 0;
+        m_typeColors.clear();  // fresh per-scenario type registry
         emit scenarioLoaded(sumocfgPath);
         m_ng = buildNetworkGeometry();
         emit networkReady(m_ng);
@@ -75,74 +77,101 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
     snap->simTime = libsumo::Simulation::getTime();
 
     try {
-        const auto ids = libsumo::Vehicle::getIDList();
-        const std::size_t n = ids.size();
-        snap->ids.reserve(n);
-        snap->x.reserve(n);
-        snap->y.reserve(n);
-        snap->cos_a.reserve(n);
-        snap->sin_a.reserve(n);
-        snap->rgba.reserve(n * 4);
+        // ---- in-engine batched extraction (single C++ loop per section) ----
+        // Vehicle/agent attribute lists are empty: the Qt GUI doesn't paint
+        // by per-vehicle attributes, only by per-lane edge data (handled
+        // separately below via Lane::getLastStepMeanSpeed etc).  Passing
+        // empty vectors here skips the attribute columns entirely.
+        libsumo::Batch::beginStep();
+        libsumo::Batch::fillVehicles({}, /*geoReferenced=*/false);
+        libsumo::Batch::fillAgents(/*geoReferenced=*/false);
+        libsumo::Batch::fillTLS();
+        const libsumo::BatchBuffers& buf = libsumo::Batch::buffers();
 
-        for (const auto& id : ids) {
-            libsumo::TraCIPosition p;
-            try { p = libsumo::Vehicle::getPosition(id); }
-            catch (...) { continue; }
-            double ang = 90.0;
-            try { ang = libsumo::Vehicle::getAngle(id); } catch (...) {}
-
-            // SUMO angle: degrees clockwise from north. Convert to a math
-            // angle in the XY plane (counter-clockwise from +x).
-            const double mathAngRad = (90.0 - ang) * M_PI / 180.0;
-
-            libsumo::TraCIColor c(255, 255, 0, 255);
-            try {
-                const std::string t = libsumo::Vehicle::getTypeID(id);
-                c = libsumo::VehicleType::getColor(t);
-            } catch (...) {}
-
-            snap->ids.push_back(id);
-            snap->x.push_back(static_cast<float>(p.x));
-            snap->y.push_back(static_cast<float>(p.y));
-            snap->cos_a.push_back(static_cast<float>(std::cos(mathAngRad)));
-            snap->sin_a.push_back(static_cast<float>(std::sin(mathAngRad)));
-            snap->rgba.push_back(static_cast<std::uint8_t>(c.r));
-            snap->rgba.push_back(static_cast<std::uint8_t>(c.g));
-            snap->rgba.push_back(static_cast<std::uint8_t>(c.b));
-            snap->rgba.push_back(static_cast<std::uint8_t>(c.a));
+        // Grow color cache to cover any newly registered types.  Lazy fill on
+        // first sighting of an index avoids paying VehicleType::getColor for
+        // types that aren't currently visible.
+        const std::uint32_t nTypes = libsumo::Batch::typeCount();
+        if (m_typeColors.size() < nTypes) {
+            m_typeColors.resize(nTypes, TypeColor{255, 255, 0, 255, false});
         }
+        auto colorForType = [&](std::uint32_t idx) -> TypeColor& {
+            TypeColor& tc = m_typeColors[idx];
+            if (!tc.set) {
+                try {
+                    const std::string tid = libsumo::Batch::typeId(idx);
+                    const libsumo::TraCIColor c = libsumo::VehicleType::getColor(tid);
+                    tc = TypeColor{static_cast<std::uint8_t>(c.r),
+                                   static_cast<std::uint8_t>(c.g),
+                                   static_cast<std::uint8_t>(c.b),
+                                   static_cast<std::uint8_t>(c.a), true};
+                } catch (...) {
+                    tc.set = true;  // give up — keep the default yellow
+                }
+            }
+            return tc;
+        };
 
-        // Persons.
-        const auto pids = libsumo::Person::getIDList();
-        snap->person_ids.reserve(pids.size());
-        snap->person_x.reserve(pids.size());
-        snap->person_y.reserve(pids.size());
-        snap->person_rgba.reserve(pids.size() * 4);
-        for (const auto& id : pids) {
-            libsumo::TraCIPosition p;
-            try { p = libsumo::Person::getPosition(id); }
-            catch (...) { continue; }
-            libsumo::TraCIColor c(255, 200, 0, 255);
-            try {
-                const std::string t = libsumo::Person::getTypeID(id);
-                c = libsumo::VehicleType::getColor(t);
-            } catch (...) {}
-            snap->person_ids.push_back(id);
-            snap->person_x.push_back(static_cast<float>(p.x));
-            snap->person_y.push_back(static_cast<float>(p.y));
-            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.r));
-            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.g));
-            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.b));
-            snap->person_rgba.push_back(static_cast<std::uint8_t>(c.a));
+        // Helper: split a packed null-terminated id blob into a target vector.
+        auto splitIds = [](const std::string& blob, std::size_t count,
+                           std::vector<std::string>& out) {
+            out.clear();
+            out.reserve(count);
+            const char* p   = blob.data();
+            const char* end = p + blob.size();
+            for (std::size_t i = 0; i < count && p < end; ++i) {
+                const std::size_t len = std::strlen(p);
+                out.emplace_back(p, len);
+                p += len + 1;
+            }
+        };
+
+        // ---- vehicles -----------------------------------------------------
+        // Hand the f64 positions and f32 angles to the snapshot as raw bytes;
+        // VehicleLayer uploads them straight to a VBO (GL_DOUBLE stride 24
+        // for vec2 position; GL_FLOAT for angle, cos/sin computed in shader).
+        const std::uint32_t N = buf.veh_count;
+        const auto* tidxBuf = reinterpret_cast<const std::uint32_t*>(buf.veh_type_indices.data());
+        snap->veh_positions = buf.veh_positions;
+        snap->veh_angles    = buf.veh_angles;
+        snap->rgba.resize(N * 4);
+        for (std::uint32_t i = 0; i < N; ++i) {
+            const TypeColor& tc = colorForType(tidxBuf[i]);
+            snap->rgba[i * 4 + 0] = tc.r;
+            snap->rgba[i * 4 + 1] = tc.g;
+            snap->rgba[i * 4 + 2] = tc.b;
+            snap->rgba[i * 4 + 3] = tc.a;
         }
+        splitIds(buf.veh_ids, N, snap->ids);
 
-        // Traffic-light states.
-        const auto tlsIds = libsumo::TrafficLight::getIDList();
-        for (const auto& tid : tlsIds) {
-            try {
-                snap->tls_states.emplace(
-                    tid, libsumo::TrafficLight::getRedYellowGreenState(tid));
-            } catch (...) {}
+        // ---- agents (persons + containers; rendered the same way) ---------
+        const std::uint32_t M = buf.agent_count;
+        const auto* aTidxBuf = reinterpret_cast<const std::uint32_t*>(buf.agent_type_indices.data());
+        snap->agent_positions = buf.agent_positions;
+        snap->person_rgba.resize(M * 4);
+        for (std::uint32_t i = 0; i < M; ++i) {
+            const TypeColor& tc = colorForType(aTidxBuf[i]);
+            snap->person_rgba[i * 4 + 0] = tc.r;
+            snap->person_rgba[i * 4 + 1] = tc.g;
+            snap->person_rgba[i * 4 + 2] = tc.b;
+            snap->person_rgba[i * 4 + 3] = tc.a;
+        }
+        splitIds(buf.agent_ids, M, snap->person_ids);
+
+        // ---- TLS states ---------------------------------------------------
+        {
+            const char* idP   = buf.tls_ids.data();
+            const char* idEnd = idP + buf.tls_ids.size();
+            const char* stP   = buf.tls_states.data();
+            const char* stEnd = stP + buf.tls_states.size();
+            const std::uint32_t T = buf.tls_count;
+            for (std::uint32_t i = 0; i < T && idP < idEnd && stP < stEnd; ++i) {
+                const std::size_t lid = std::strlen(idP);
+                const std::size_t lst = std::strlen(stP);
+                snap->tls_states.emplace(std::string(idP, lid), std::string(stP, lst));
+                idP += lid + 1;
+                stP += lst + 1;
+            }
         }
 
         // Edge attribute coloring (per-lane). Skipped when mode==None to

@@ -162,9 +162,11 @@ void NetworkView::setSnapshot(SimSnapshotPtr snap) {
     if (!m_followId.isEmpty() && m_pendingSnap) {
         const std::string fid = m_followId.toStdString();
         bool found = false;
+        const auto* vpos = reinterpret_cast<const double*>(
+            m_pendingSnap->veh_positions.data());
         for (std::size_t i = 0; i < m_pendingSnap->vehicle_count(); ++i) {
             if (m_pendingSnap->ids[i] == fid) {
-                m_cam.setCenter(m_pendingSnap->x[i], m_pendingSnap->y[i]);
+                m_cam.setCenter(vpos[i * 3 + 0], vpos[i * 3 + 1]);
                 found = true;
                 break;
             }
@@ -329,11 +331,15 @@ void NetworkView::pickAt(double pxX, double pxY) {
 
     // 1) Vehicles (closest within ~vehicle radius or 8px).
     if (m_snap) {
+        const auto* vpos = reinterpret_cast<const double*>(
+            m_snap->veh_positions.data());
+        const auto* vang = reinterpret_cast<const float*>(
+            m_snap->veh_angles.data());
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < m_snap->vehicle_count(); ++i) {
-            const float dx = m_snap->x[i] - fx;
-            const float dy = m_snap->y[i] - fy;
+            const float dx = static_cast<float>(vpos[i * 3 + 0]) - fx;
+            const float dy = static_cast<float>(vpos[i * 3 + 1]) - fy;
             const float d2 = dx * dx + dy * dy;
             const float tol2 = std::max(pickR2, 4.0f);  // ~2m car radius
             if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
@@ -343,18 +349,20 @@ void NetworkView::pickAt(double pxX, double pxY) {
             best.id = QString::fromStdString(m_snap->ids[bestIdx]);
             best.title = QString("Vehicle  %1").arg(best.id);
             best.lines.push_back(QString("position  %1, %2 m")
-                .arg(m_snap->x[bestIdx], 0, 'f', 1)
-                .arg(m_snap->y[bestIdx], 0, 'f', 1));
-            const double ang = std::atan2(m_snap->sin_a[bestIdx],
-                                          m_snap->cos_a[bestIdx]) * 180.0 / M_PI;
-            best.lines.push_back(QString("heading   %1°").arg(ang, 0, 'f', 1));
+                .arg(vpos[bestIdx * 3 + 0], 0, 'f', 1)
+                .arg(vpos[bestIdx * 3 + 1], 0, 'f', 1));
+            // Stored angle is SUMO navi-degrees (CW from north).
+            best.lines.push_back(QString("heading   %1°")
+                .arg(vang[bestIdx], 0, 'f', 1));
         }
 
         if (best.kind == PickKind::None) {
+            const auto* ppos = reinterpret_cast<const double*>(
+                m_snap->agent_positions.data());
             bestD2 = std::numeric_limits<float>::infinity();
             for (std::size_t i = 0; i < m_snap->person_count(); ++i) {
-                const float dx = m_snap->person_x[i] - fx;
-                const float dy = m_snap->person_y[i] - fy;
+                const float dx = static_cast<float>(ppos[i * 3 + 0]) - fx;
+                const float dy = static_cast<float>(ppos[i * 3 + 1]) - fy;
                 const float d2 = dx * dx + dy * dy;
                 if (d2 < pickR2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
             }
@@ -363,8 +371,8 @@ void NetworkView::pickAt(double pxX, double pxY) {
                 best.title = QString("Person  %1").arg(
                     QString::fromStdString(m_snap->person_ids[bestIdx]));
                 best.lines.push_back(QString("position  %1, %2 m")
-                    .arg(m_snap->person_x[bestIdx], 0, 'f', 1)
-                    .arg(m_snap->person_y[bestIdx], 0, 'f', 1));
+                    .arg(ppos[bestIdx * 3 + 0], 0, 'f', 1)
+                    .arg(ppos[bestIdx * 3 + 1], 0, 'f', 1));
             }
         }
     }

@@ -13,7 +13,7 @@ constexpr std::array<float, 12> kQuad = {
 };
 
 constexpr const char* kVS = R"(#version 330 core
-layout(location=0) in vec2 a_local;
+layout(location=0) in vec2  a_local;
 layout(location=1) in vec2 a_pos;
 layout(location=2) in vec4 a_color;
 uniform mat4 u_proj;
@@ -56,7 +56,9 @@ void PersonLayer::initGL(QOpenGLFunctions_3_3_Core* gl) {
 
     m_posVbo.bind();
     m_gl->glEnableVertexAttribArray(1);
-    m_gl->glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+    // f64 stride 24 (x,y,z packed); driver narrows to float for `vec2`.
+    m_gl->glVertexAttribPointer(1, 2, GL_DOUBLE, GL_FALSE,
+                                3 * sizeof(double), nullptr);
     m_gl->glVertexAttribDivisor(1, 1);
 
     m_colVbo.bind();
@@ -73,13 +75,10 @@ void PersonLayer::setSnapshot(const SimSnapshotPtr& snap) {
         return;
     }
     const std::size_t n = snap->person_count();
-    std::vector<float> pos(n * 2);
-    for (std::size_t i = 0; i < n; ++i) {
-        pos[i * 2 + 0] = snap->person_x[i];
-        pos[i * 2 + 1] = snap->person_y[i];
-    }
+    // Upload the packed f64 positions directly (stride 24, vec2 read).
     m_posVbo.bind();
-    m_posVbo.allocate(pos.data(), static_cast<int>(pos.size() * sizeof(float)));
+    m_posVbo.allocate(snap->agent_positions.data(),
+                      static_cast<int>(snap->agent_positions.size()));
     m_colVbo.bind();
     m_colVbo.allocate(snap->person_rgba.data(),
                       static_cast<int>(snap->person_rgba.size()));

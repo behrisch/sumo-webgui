@@ -31,12 +31,7 @@ find_path(LIBSUMO_INCLUDE_DIR
 find_library(LIBSUMO_LIBRARY
     NAMES sumocpp libsumocpp
     PATHS
-        "${SUMO_HOME}/cmclaude/src/fmi/sumo-fmi2/binaries/linux64"
-        "${SUMO_HOME}/build/src/fmi/sumo-fmi2/binaries/linux64"
-        "${SUMO_HOME}/cmake-build/src/fmi/sumo-fmi2/binaries/linux64"
-        "${SUMO_HOME}/cmclaude/src/libsumo"
-        "${SUMO_HOME}/build/src/libsumo"
-        "${SUMO_HOME}/lib"
+        "${SUMO_HOME}/bin"
         /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib
     NO_DEFAULT_PATH
 )

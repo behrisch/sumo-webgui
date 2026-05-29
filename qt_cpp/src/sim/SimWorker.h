@@ -3,7 +3,9 @@
 #include <QObject>
 #include <QString>
 #include <QtGlobal>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "SimSnapshot.h"
 
@@ -40,6 +42,12 @@ private slots:
 private:
     void closeIfOpen() noexcept;
     SimSnapshotPtr buildSnapshot();
+
+    // RGBA color cache keyed by libsumo::Batch type-id index.  Filled lazily
+    // on first sighting of an index via a single VehicleType::getColor call.
+    // Resized to match Batch::typeCount() at the top of each buildSnapshot.
+    struct TypeColor { std::uint8_t r, g, b, a; bool set; };
+    std::vector<TypeColor> m_typeColors;
 
     QTimer* m_timer  = nullptr;
     int     m_delayMs = 0;       // 0 = step as fast as possible
