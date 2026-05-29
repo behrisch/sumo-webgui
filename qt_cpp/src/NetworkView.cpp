@@ -136,8 +136,11 @@ void NetworkView::paintGL() {
     if (m_poiLayer)       m_poiLayer      ->draw(proj.data());
     if (m_stoppingPlaceLayer) m_stoppingPlaceLayer->draw(proj.data());
     if (m_detectorLayer)  m_detectorLayer ->draw(proj.data());
-    if (m_stopLineLayer)  m_stopLineLayer ->draw(proj.data());
+    // Draw order: TLS colored bar sits ~1.2m upstream of the lane end and
+    // the white stop line sits AT the lane end, so they don't overlap.
+    // Draw TLS first then the stop line on top for safety.
     if (m_tlsLayer)       m_tlsLayer      ->draw(proj.data());
+    if (m_stopLineLayer)  m_stopLineLayer ->draw(proj.data());
     if (m_vehicleLayer)   m_vehicleLayer  ->draw(proj.data());
     if (m_personLayer)    m_personLayer   ->draw(proj.data());
 

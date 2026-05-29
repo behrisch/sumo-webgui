@@ -227,6 +227,15 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
                 }
                 ng->tls_x.push_back(x);
                 ng->tls_y.push_back(y);
+                if (le) {
+                    ng->tls_dx.push_back(le->dx);
+                    ng->tls_dy.push_back(le->dy);
+                    ng->tls_w.push_back(le->w);
+                } else {
+                    ng->tls_dx.push_back(1.0f);
+                    ng->tls_dy.push_back(0.0f);
+                    ng->tls_w.push_back(3.2f);  // sensible default lane width
+                }
                 ng->tls_ids.push_back(tid);
                 ng->tls_state_index.push_back(static_cast<std::uint32_t>(i));
 

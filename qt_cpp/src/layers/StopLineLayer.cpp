@@ -45,9 +45,10 @@ void StopLineLayer::rebuild() {
     m_vertexCount = 0;
     if (!m_ng) return;
 
-    // Each stop line: short rectangle 0.5m thick along lane direction,
-    // (lane_width) wide perpendicular. 6 vertices per quad (2 triangles).
-    constexpr float kThickness = 0.5f;
+    // Each stop line: ~0.7m thick along lane direction, full lane_width
+    // perpendicular.  Slightly thicker than the deck.gl frontend so it
+    // remains visible against the road base.  6 vertices per quad.
+    constexpr float kThickness = 0.7f;
     const std::size_t n = m_ng->stopline_count();
     std::vector<float> verts;
     verts.reserve(n * 12);
@@ -88,7 +89,7 @@ void StopLineLayer::draw(const float* proj) {
     if (!m_program || !m_gl || m_vertexCount == 0) return;
     m_gl->glUseProgram(m_program);
     m_gl->glUniformMatrix4fv(m_locProj, 1, GL_FALSE, proj);
-    m_gl->glUniform4f(m_locColor, 0.95f, 0.95f, 0.95f, 0.85f);
+    m_gl->glUniform4f(m_locColor, 1.0f, 1.0f, 1.0f, 1.0f);
     m_vao.bind();
     m_gl->glDrawArrays(GL_TRIANGLES, 0, m_vertexCount);
     m_vao.release();

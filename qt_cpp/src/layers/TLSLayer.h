@@ -31,9 +31,11 @@ private:
     GLint  m_locProj = -1;
 
     QOpenGLVertexArrayObject m_vao;
-    QOpenGLBuffer m_quadVbo {QOpenGLBuffer::VertexBuffer};
-    QOpenGLBuffer m_posVbo  {QOpenGLBuffer::VertexBuffer};
-    QOpenGLBuffer m_colVbo  {QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_quadVbo  {QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_posVbo   {QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_tanVbo   {QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_widthVbo {QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_colVbo   {QOpenGLBuffer::VertexBuffer};
 
     std::shared_ptr<NetworkGeometry> m_ng;
     SimSnapshotPtr                   m_snap;

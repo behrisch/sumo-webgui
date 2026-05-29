@@ -58,6 +58,9 @@ struct NetworkGeometry {
     // character offset into that TLS's state string for this link.
     std::vector<float>        tls_x;
     std::vector<float>        tls_y;
+    std::vector<float>        tls_dx;  // forward lane tangent (unit vector)
+    std::vector<float>        tls_dy;
+    std::vector<float>        tls_w;   // lane width at the TLS bar (m)
     std::vector<std::string>  tls_ids;
     std::vector<std::uint32_t> tls_state_index;
 
