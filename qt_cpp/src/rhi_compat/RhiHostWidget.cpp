@@ -1,4 +1,9 @@
 #include "rhi_compat/RhiHostWidget.h"
+
+#include <QtCore/qglobal.h>
+
+#if QT_VERSION < QT_VERSION_CHECK(6, 7, 0) || defined(RHI_COMPAT_FORCE_FALLBACK)
+
 #include "rhi_compat/rhi_compat.h"
 
 #include <QtCore/QEvent>
@@ -248,3 +253,5 @@ bool RhiHostWidget::event(QEvent* e) {
 }  // namespace rhi_compat
 
 #include "moc_RhiHostWidget.cpp"
+
+#endif  // Qt < 6.7 || forced fallback

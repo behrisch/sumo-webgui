@@ -13,8 +13,16 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets OpenGLWidgets ShaderTools)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets ShaderTools)
 find_package(Libsumo REQUIRED)
+
+# ---------------------------------------------------------------------------
+# Main viewer (RHI-based). All layers go through Qt RHI; the OpenGL-only
+# layers in src/layers/{Detector,EdgeColor,Network,PedArea,POI,Polygon,Rail,
+# StopLine,StoppingPlace,TLS,Vehicle,Person}Layer.cpp are no longer compiled
+# in. RhiHostWidget (Qt 6.4-6.6) or QRhiWidget (Qt 6.7+) hosts the GPU output;
+# NetworkOverlayWidget paints QPainter overlays on top.
+# ---------------------------------------------------------------------------
 
 add_executable(qt_cpp
     src/main.cpp
@@ -22,34 +30,27 @@ add_executable(qt_cpp
     src/MainWindow.h
     src/NetworkView.cpp
     src/NetworkView.h
+    src/NetworkOverlayWidget.cpp
+    src/NetworkOverlayWidget.h
     src/Camera.cpp
     src/Camera.h
-    src/gl/Shader.cpp
-    src/gl/Shader.h
-    src/layers/DetectorLayer.cpp
-    src/layers/DetectorLayer.h
-    src/layers/EdgeColorLayer.cpp
-    src/layers/EdgeColorLayer.h
-    src/layers/NetworkLayer.cpp
-    src/layers/NetworkLayer.h
-    src/layers/PedAreaLayer.cpp
-    src/layers/PedAreaLayer.h
-    src/layers/PersonLayer.cpp
-    src/layers/PersonLayer.h
-    src/layers/POILayer.cpp
-    src/layers/POILayer.h
-    src/layers/PolygonLayer.cpp
-    src/layers/PolygonLayer.h
-    src/layers/RailLayer.cpp
-    src/layers/RailLayer.h
-    src/layers/StopLineLayer.cpp
-    src/layers/StopLineLayer.h
-    src/layers/StoppingPlaceLayer.cpp
-    src/layers/StoppingPlaceLayer.h
-    src/layers/TLSLayer.cpp
-    src/layers/TLSLayer.h
-    src/layers/VehicleLayer.cpp
-    src/layers/VehicleLayer.h
+    src/rhi_compat/rhi_compat.h
+    src/rhi_compat/RhiWidgetBase.h
+    src/rhi_compat/RhiHostWidget.cpp
+    src/rhi_compat/RhiHostWidget.h
+    src/rhi_compat/RhiLayerCommon.h
+    src/rhi_compat/StaticTrisRhi.h
+    src/rhi_compat/TrisPasses.h
+    src/layers/LayerBuilders.cpp
+    src/layers/LayerBuilders.h
+    src/layers/POILayerRhi.cpp
+    src/layers/POILayerRhi.h
+    src/layers/TLSLayerRhi.cpp
+    src/layers/TLSLayerRhi.h
+    src/layers/VehicleLayerRhi.cpp
+    src/layers/VehicleLayerRhi.h
+    src/layers/PersonLayerRhi.cpp
+    src/layers/PersonLayerRhi.h
     src/sim/NetworkGeometry.cpp
     src/sim/NetworkGeometry.h
     src/sim/SimSnapshot.h
@@ -57,14 +58,30 @@ add_executable(qt_cpp
     src/sim/SimWorker.h
 )
 
+qt6_add_shaders(qt_cpp "qt_cpp_shaders"
+    PREFIX "/shaders"
+    BASE "src/shaders"
+    FILES
+        src/shaders/vehicle.vert
+        src/shaders/vehicle.frag
+        src/shaders/person.vert
+        src/shaders/person.frag
+        src/shaders/poi.vert
+        src/shaders/poi.frag
+        src/shaders/tls.vert
+        src/shaders/tls.frag
+        src/shaders/tris_color.vert
+        src/shaders/tris_color.frag
+)
+
 target_include_directories(qt_cpp PRIVATE src)
 target_link_libraries(qt_cpp PRIVATE
     Qt6::Widgets
-    Qt6::OpenGLWidgets
+    Qt6::WidgetsPrivate
+    Qt6::GuiPrivate
     Libsumo::Libsumo
 )
 
-# So the shipped libsumocpp.so is found at runtime without LD_LIBRARY_PATH.
 set_target_properties(qt_cpp PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE
     BUILD_WITH_INSTALL_RPATH TRUE
@@ -72,11 +89,9 @@ set_target_properties(qt_cpp PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# QRhi spike: standalone viewer that exercises the new VehicleLayerRhi class
-# on a QRhiWidget (Vulkan / Metal / D3D12 / OpenGL via Qt RHI). Lets us
-# validate the cross-API renderer in isolation while the OpenGL build above
-# stays the production path. See PLAN.md "Graphics API choice — Qt RHI
-# migration".
+# Spike viewer (kept for incremental RHI experiments). Same RhiHostWidget,
+# but only the vehicle layer wired up; lets us iterate on shaders without
+# pulling in the full network-view pipeline.
 # ---------------------------------------------------------------------------
 add_executable(qt_cpp_rhi_spike
     src/rhi_spike/main_rhi.cpp
@@ -88,8 +103,6 @@ add_executable(qt_cpp_rhi_spike
     src/rhi_compat/RhiHostWidget.h
     src/layers/VehicleLayerRhi.cpp
     src/layers/VehicleLayerRhi.h
-    src/layers/PersonLayerRhi.cpp
-    src/layers/PersonLayerRhi.h
     src/Camera.cpp
     src/Camera.h
     src/sim/NetworkGeometry.cpp

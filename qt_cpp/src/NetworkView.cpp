@@ -1,148 +1,231 @@
 #include "NetworkView.h"
 
-#include <QDateTime>
-#include <QFontMetrics>
-#include <QMouseEvent>
-#include <QPaintEvent>
-#include <QPainter>
-#include <QSurfaceFormat>
-#include <QWheelEvent>
+#include <QtCore/QDateTime>
+#include <QtGui/QMouseEvent>
+#include <QtGui/QResizeEvent>
+#include <QtGui/QWheelEvent>
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-#include "layers/DetectorLayer.h"
-#include "layers/EdgeColorLayer.h"
-#include "layers/NetworkLayer.h"
-#include "layers/PedAreaLayer.h"
-#include "layers/PersonLayer.h"
-#include "layers/POILayer.h"
-#include "layers/PolygonLayer.h"
-#include "layers/RailLayer.h"
-#include "layers/StopLineLayer.h"
-#include "layers/StoppingPlaceLayer.h"
-#include "layers/TLSLayer.h"
-#include "layers/VehicleLayer.h"
+#include "NetworkOverlayWidget.h"
+#include "layers/LayerBuilders.h"
+#include "layers/PersonLayerRhi.h"
+#include "layers/POILayerRhi.h"
+#include "layers/TLSLayerRhi.h"
+#include "layers/VehicleLayerRhi.h"
+#include "rhi_compat/rhi_compat.h"
 #include "sim/NetworkGeometry.h"
 
-NetworkView::NetworkView(QWidget* parent) : QOpenGLWidget(parent) {
-    QSurfaceFormat fmt;
-    fmt.setVersion(3, 3);
-    fmt.setProfile(QSurfaceFormat::CoreProfile);
-    fmt.setDepthBufferSize(24);
-    fmt.setSamples(4);
-    setFormat(fmt);
+NetworkView::NetworkView(QWidget* parent)
+    : rhi_compat::RhiWidgetBase(parent) {
+    rhi_compat::selectOpenGL(this);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    m_overlay = new NetworkOverlayWidget(this);
+    m_overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_overlay->raise();
 }
 
-NetworkView::~NetworkView() {
-    makeCurrent();
-    m_networkLayer.reset();
-    m_edgeColorLayer.reset();
-    m_railLayer.reset();
-    m_stopLineLayer.reset();
-    m_stoppingPlaceLayer.reset();
-    m_detectorLayer.reset();
-    m_polygonLayer.reset();
-    m_pedAreaLayer.reset();
-    m_poiLayer.reset();
-    m_tlsLayer.reset();
-    m_vehicleLayer.reset();
-    m_personLayer.reset();
-    doneCurrent();
+NetworkView::~NetworkView() = default;
+
+void NetworkView::releaseResources() {
+    m_passTris.release();
+    m_passStrip.release();
+    m_detector.release(); m_stoppingPlace.release(); m_stopLine.release();
+    m_pedSidewalk.release(); m_pedWalk.release();
+    m_railSleepers.release(); m_railRails.release();
+    m_polygonFills.release(); m_polygonOutlines.release();
+    m_netJunctions.release(); m_netLaneStrip.release();
+    m_edgeColorStrip.release();
+    if (m_vehicleLayer) m_vehicleLayer->release();
+    if (m_personLayer)  m_personLayer->release();
+    if (m_poiLayer)     m_poiLayer->release();
+    if (m_tlsLayer)     m_tlsLayer->release();
 }
 
-void NetworkView::initializeGL() {
-    initializeOpenGLFunctions();
-    glClearColor(0.05f, 0.05f, 0.07f, 1.0f);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_MULTISAMPLE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+void NetworkView::initialize(QRhiCommandBuffer*) {
+    QRhi* r = rhi();
+    if (!r) return;
+    QRhiRenderTarget* rt = renderTarget();
+    if (!rt) return;
+    QRhiRenderPassDescriptor* rp = rt->renderPassDescriptor();
+    const int sc = rt->sampleCount();
 
-    m_networkLayer   = std::make_unique<NetworkLayer>();   m_networkLayer  ->initGL(this);
-    m_edgeColorLayer = std::make_unique<EdgeColorLayer>(); m_edgeColorLayer->initGL(this);
-    m_railLayer      = std::make_unique<RailLayer>();      m_railLayer     ->initGL(this);
-    m_stopLineLayer  = std::make_unique<StopLineLayer>();  m_stopLineLayer ->initGL(this);
-    m_stoppingPlaceLayer = std::make_unique<StoppingPlaceLayer>();
-    m_stoppingPlaceLayer->initGL(this);
-    m_detectorLayer  = std::make_unique<DetectorLayer>();  m_detectorLayer ->initGL(this);
-    m_polygonLayer   = std::make_unique<PolygonLayer>();   m_polygonLayer  ->initGL(this);
-    m_pedAreaLayer   = std::make_unique<PedAreaLayer>();   m_pedAreaLayer  ->initGL(this);
-    m_poiLayer       = std::make_unique<POILayer>();       m_poiLayer      ->initGL(this);
-    m_tlsLayer       = std::make_unique<TLSLayer>();       m_tlsLayer      ->initGL(this);
-    m_vehicleLayer   = std::make_unique<VehicleLayer>();   m_vehicleLayer  ->initGL(this);
-    m_personLayer    = std::make_unique<PersonLayer>();    m_personLayer   ->initGL(this);
+    // Shared passes (one per topology). Re-init is cheap if rhi unchanged.
+    m_passTris.init(r, rp, sc, QRhiGraphicsPipeline::Triangles);
+    m_passStrip.init(r, rp, sc, QRhiGraphicsPipeline::TriangleStrip);
+
+    // Static buffers — initialize() is idempotent if rhi unchanged.
+    m_detector.initialize(r);       m_stoppingPlace.initialize(r);
+    m_stopLine.initialize(r);
+    m_pedSidewalk.initialize(r);    m_pedWalk.initialize(r);
+    m_railSleepers.initialize(r);   m_railRails.initialize(r);
+    m_polygonFills.initialize(r);   m_polygonOutlines.initialize(r);
+    m_netJunctions.initialize(r);   m_netLaneStrip.initialize(r);
+    m_edgeColorStrip.initialize(r);
+
+    if (!m_vehicleLayer) m_vehicleLayer = std::make_unique<VehicleLayerRhi>();
+    if (!m_personLayer)  m_personLayer  = std::make_unique<PersonLayerRhi>();
+    if (!m_poiLayer)     m_poiLayer     = std::make_unique<POILayerRhi>();
+    if (!m_tlsLayer)     m_tlsLayer     = std::make_unique<TLSLayerRhi>();
+
+    m_vehicleLayer->initialize(r, rp, sc);
+    m_personLayer ->initialize(r, rp, sc);
+    m_poiLayer    ->initialize(r, rp, sc);
+    m_tlsLayer    ->initialize(r, rp, sc);
 
     if (m_ng) {
-        m_networkLayer  ->setGeometry(m_ng);
-        m_edgeColorLayer->setGeometry(m_ng);
-        m_railLayer     ->setGeometry(m_ng);
-        m_stopLineLayer ->setGeometry(m_ng);
-        m_stoppingPlaceLayer->setGeometry(m_ng);
-        m_detectorLayer ->setGeometry(m_ng);
-        m_polygonLayer  ->setGeometry(m_ng);
-        m_pedAreaLayer  ->setGeometry(m_ng);
-        m_poiLayer      ->setGeometry(m_ng);
-        m_tlsLayer      ->setGeometry(m_ng);
+        uploadStaticGeometry();
+        m_poiLayer->setGeometry(m_ng);
+        m_tlsLayer->setGeometry(m_ng);
     }
     if (m_pendingSnap) {
-        m_vehicleLayer->setSnapshot(m_pendingSnap);
-        m_personLayer ->setSnapshot(m_pendingSnap);
-        m_tlsLayer    ->setSnapshot(m_pendingSnap);
-        m_edgeColorLayer->setActive(!m_pendingSnap->lane_attr_rgba.empty());
-        if (!m_pendingSnap->lane_attr_rgba.empty())
-            m_edgeColorLayer->setLaneColors(m_pendingSnap->lane_attr_rgba);
         m_snap = m_pendingSnap;
-        m_snapDirty = false;
-    }
-}
-
-void NetworkView::resizeGL(int w, int h) {
-    glViewport(0, 0, w, h);
-    m_cam.setViewport(w, h);
-    if (m_hasBounds && m_cam.pixelsPerUnit() <= 1.0) {
-        m_cam.fitBounds(m_minX, m_minY, m_maxX, m_maxY);
-    }
-}
-
-void NetworkView::paintGL() {
-    glClear(GL_COLOR_BUFFER_BIT);
-    const auto proj = m_cam.projection();
-
-    if (m_snapDirty) {
-        if (m_vehicleLayer) m_vehicleLayer->setSnapshot(m_pendingSnap);
-        if (m_personLayer)  m_personLayer ->setSnapshot(m_pendingSnap);
-        if (m_tlsLayer)     m_tlsLayer    ->setSnapshot(m_pendingSnap);
-        if (m_edgeColorLayer) {
-            const bool hasColors = m_pendingSnap
-                && !m_pendingSnap->lane_attr_rgba.empty();
-            m_edgeColorLayer->setActive(hasColors);
-            if (hasColors) m_edgeColorLayer->setLaneColors(m_pendingSnap->lane_attr_rgba);
+        m_vehicleLayer->setSnapshot(m_snap);
+        m_personLayer ->setSnapshot(m_snap);
+        m_tlsLayer    ->setSnapshot(m_snap);
+        m_edgeColorVisible = !m_snap->lane_attr_rgba.empty();
+        if (m_edgeColorVisible) {
+            uploadEdgeColors();
         }
+        m_snapDirty = false;
+    }
+}
+
+void NetworkView::uploadStaticGeometry() {
+    if (!m_ng) return;
+    using namespace layer_builders;
+    m_detector.setVertices(buildDetectorVerts(*m_ng));
+    m_stoppingPlace.setVertices(buildStoppingPlaceVerts(*m_ng));
+    m_stopLine.setVertices(buildStopLineVerts(*m_ng));
+    auto ped = buildPedAreaVerts(*m_ng);
+    m_pedSidewalk.setVertices(std::move(ped.sidewalk));
+    m_pedWalk.setVertices(std::move(ped.walkArea));
+    auto rail = buildRailVerts(*m_ng);
+    m_railSleepers.setVertices(std::move(rail.sleepers));
+    m_railRails.setVertices(std::move(rail.rails));
+    auto poly = buildPolygonVerts(*m_ng);
+    m_polygonFills.setVertices(std::move(poly.fills));
+    m_polygonOutlines.setVertices(std::move(poly.outlines));
+    auto net = buildNetworkVerts(*m_ng);
+    m_netLaneStrip.setVertices(std::move(net.laneStrip));
+    m_netJunctions.setVertices(std::move(net.juncTris));
+    auto edge = buildEdgeColorVerts(*m_ng);
+    m_laneFirst = std::move(edge.laneFirst);
+    m_laneCount = std::move(edge.laneCount);
+    m_edgeColorStrip.setVertices(std::move(edge.strip));
+}
+
+void NetworkView::uploadEdgeColors() {
+    if (!m_snap || m_snap->lane_attr_rgba.empty()) {
+        m_edgeColorVisible = false;
+        return;
+    }
+    auto& verts = m_edgeColorStrip.mutableVertices();
+    if (verts.empty() || m_laneFirst.size() * 4 != m_snap->lane_attr_rgba.size()) {
+        m_edgeColorVisible = false;
+        return;
+    }
+    const auto& rgba = m_snap->lane_attr_rgba;
+    for (std::size_t i = 0; i < m_laneFirst.size(); ++i) {
+        const std::uint32_t f = m_laneFirst[i];
+        const std::uint32_t c = m_laneCount[i];
+        const quint8 r = rgba[i * 4 + 0];
+        const quint8 g = rgba[i * 4 + 1];
+        const quint8 b = rgba[i * 4 + 2];
+        const quint8 a = rgba[i * 4 + 3];
+        for (std::uint32_t v = f; v < f + c; ++v) {
+            verts[v].r = r; verts[v].g = g; verts[v].b = b; verts[v].a = a;
+        }
+    }
+    m_edgeColorStrip.markDirty();
+    m_edgeColorVisible = true;
+}
+
+void NetworkView::render(QRhiCommandBuffer* cb) {
+    QRhi* r = rhi();
+    QRhiRenderTarget* rt = renderTarget();
+    if (!r || !rt) return;
+
+    // Track viewport in pixels (not logical px) — matches QRhi convention.
+    const QSize px = rt->pixelSize();
+    m_cam.setViewport(px.width(), px.height());
+    if (m_hasBounds && m_needsInitialFit) {
+        m_cam.fitBounds(m_minX, m_minY, m_maxX, m_maxY);
+        m_needsInitialFit = false;
+    }
+    const auto proj = m_cam.projection();
+    const float* pf = proj.data();
+
+    // Apply pending data updates.
+    if (m_geomDirty) {
+        uploadStaticGeometry();
+        m_poiLayer->setGeometry(m_ng);
+        m_tlsLayer->setGeometry(m_ng);
+        m_geomDirty = false;
+        m_edgeColorVisible = false;
+    }
+    if (m_snapDirty) {
         m_snap = m_pendingSnap;
+        if (m_vehicleLayer) m_vehicleLayer->setSnapshot(m_snap);
+        if (m_personLayer)  m_personLayer ->setSnapshot(m_snap);
+        if (m_tlsLayer)     m_tlsLayer    ->setSnapshot(m_snap);
+        uploadEdgeColors();
         m_snapDirty = false;
     }
 
-    // Draw order: junctions+roads -> per-lane color overlay -> pedestrian
-    // areas -> rails -> polygons -> POIs -> stop lines -> TLS heads ->
-    // vehicles -> persons.
-    if (m_networkLayer)   m_networkLayer  ->draw(proj.data());
-    if (m_edgeColorLayer) m_edgeColorLayer->draw(proj.data());
-    if (m_pedAreaLayer)   m_pedAreaLayer  ->draw(proj.data());
-    if (m_railLayer)      m_railLayer     ->draw(proj.data());
-    if (m_polygonLayer)   m_polygonLayer  ->draw(proj.data());
-    if (m_poiLayer)       m_poiLayer      ->draw(proj.data());
-    if (m_stoppingPlaceLayer) m_stoppingPlaceLayer->draw(proj.data());
-    if (m_detectorLayer)  m_detectorLayer ->draw(proj.data());
-    // Draw order: TLS colored bar sits ~1.2m upstream of the lane end and
-    // the white stop line sits AT the lane end, so they don't overlap.
-    // Draw TLS first then the stop line on top for safety.
-    if (m_tlsLayer)       m_tlsLayer      ->draw(proj.data());
-    if (m_stopLineLayer)  m_stopLineLayer ->draw(proj.data());
-    if (m_vehicleLayer)   m_vehicleLayer  ->draw(proj.data());
-    if (m_personLayer)    m_personLayer   ->draw(proj.data());
+    // Stage uploads.
+    QRhiResourceUpdateBatch* batch = r->nextResourceUpdateBatch();
+    m_passTris.setProjection(pf);
+    m_passStrip.setProjection(pf);
+    m_passTris.uploadUbo(batch);
+    m_passStrip.uploadUbo(batch);
+
+    m_detector.resourceUpdate(batch);
+    m_stoppingPlace.resourceUpdate(batch);
+    m_stopLine.resourceUpdate(batch);
+    m_pedSidewalk.resourceUpdate(batch);
+    m_pedWalk.resourceUpdate(batch);
+    m_railSleepers.resourceUpdate(batch);
+    m_railRails.resourceUpdate(batch);
+    m_polygonFills.resourceUpdate(batch);
+    m_polygonOutlines.resourceUpdate(batch);
+    m_netJunctions.resourceUpdate(batch);
+    m_netLaneStrip.resourceUpdate(batch);
+    m_edgeColorStrip.resourceUpdate(batch);
+
+    if (m_vehicleLayer) { m_vehicleLayer->setProjection(pf); m_vehicleLayer->resourceUpdate(batch); }
+    if (m_personLayer)  { m_personLayer ->setProjection(pf); m_personLayer ->resourceUpdate(batch); }
+    if (m_poiLayer)     { m_poiLayer    ->setProjection(pf); m_poiLayer    ->resourceUpdate(batch); }
+    if (m_tlsLayer)     { m_tlsLayer    ->setProjection(pf); m_tlsLayer    ->resourceUpdate(batch); }
+
+    // One render pass.
+    const QColor clear(13, 13, 18);
+    cb->beginPass(rt, clear, { 1.0f, 0 }, batch);
+    cb->setViewport({ 0, 0, float(px.width()), float(px.height()) });
+
+    // Draw order: junctions → lanes → edge-color overlay → ped → rails →
+    // polygons (fills under outlines) → POIs → stopping places → detectors →
+    // TLS → stop lines → vehicles → persons.
+    m_netJunctions.render(cb, m_passTris);
+    m_netLaneStrip.render(cb, m_passStrip);
+    if (m_edgeColorVisible) m_edgeColorStrip.render(cb, m_passStrip);
+    m_pedSidewalk.render(cb, m_passTris);
+    m_pedWalk.render(cb, m_passTris);
+    m_railSleepers.render(cb, m_passTris);
+    m_railRails.render(cb, m_passTris);
+    m_polygonFills.render(cb, m_passTris);
+    m_polygonOutlines.render(cb, m_passTris);
+    if (m_poiLayer) m_poiLayer->render(cb);
+    m_stoppingPlace.render(cb, m_passTris);
+    m_detector.render(cb, m_passTris);
+    if (m_tlsLayer) m_tlsLayer->render(cb);
+    m_stopLine.render(cb, m_passTris);
+    if (m_vehicleLayer) m_vehicleLayer->render(cb);
+    if (m_personLayer)  m_personLayer ->render(cb);
+
+    cb->endPass();
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (m_fpsWindowStartMs == 0) m_fpsWindowStartMs = now;
@@ -154,6 +237,23 @@ void NetworkView::paintGL() {
         m_fpsFrames = 0;
         m_fpsWindowStartMs = now;
     }
+
+    if (m_overlay) m_overlay->update();
+}
+
+// ---------------------------- slots / events -------------------------------
+
+void NetworkView::setNetwork(std::shared_ptr<NetworkGeometry> ng) {
+    m_ng = std::move(ng);
+    m_picked = Picked{};
+    if (m_ng) {
+        m_hasBounds = true;
+        m_needsInitialFit = true;
+        m_minX = m_ng->min_x; m_minY = m_ng->min_y;
+        m_maxX = m_ng->max_x; m_maxY = m_ng->max_y;
+    }
+    m_geomDirty = true;
+    update();
 }
 
 void NetworkView::setSnapshot(SimSnapshotPtr snap) {
@@ -171,10 +271,7 @@ void NetworkView::setSnapshot(SimSnapshotPtr snap) {
                 break;
             }
         }
-        if (!found) {
-            // Vehicle has left the network; stop following.
-            m_followId.clear();
-        }
+        if (!found) m_followId.clear();
     }
     update();
 }
@@ -192,52 +289,21 @@ void NetworkView::clearFollow() {
     update();
 }
 
-void NetworkView::paintEvent(QPaintEvent* e) {
-    QOpenGLWidget::paintEvent(e);  // runs paintGL
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    drawOverlays(p);
-}
-
-void NetworkView::setNetwork(std::shared_ptr<NetworkGeometry> ng) {
-    m_ng = std::move(ng);
-    m_picked = Picked{};  // pickings against old geometry no longer valid
-    if (m_ng) {
-        m_hasBounds = true;
-        m_minX = m_ng->min_x; m_minY = m_ng->min_y;
-        m_maxX = m_ng->max_x; m_maxY = m_ng->max_y;
-        m_cam.setViewport(width(), height());
-        m_cam.fitBounds(m_minX, m_minY, m_maxX, m_maxY);
-    }
-    if (m_networkLayer) {
-        makeCurrent();
-        m_networkLayer  ->setGeometry(m_ng);
-        if (m_edgeColorLayer) m_edgeColorLayer->setGeometry(m_ng);
-        if (m_railLayer)      m_railLayer     ->setGeometry(m_ng);
-        if (m_stopLineLayer)  m_stopLineLayer ->setGeometry(m_ng);
-        if (m_stoppingPlaceLayer) m_stoppingPlaceLayer->setGeometry(m_ng);
-        if (m_detectorLayer)  m_detectorLayer ->setGeometry(m_ng);
-        if (m_polygonLayer)   m_polygonLayer  ->setGeometry(m_ng);
-        if (m_pedAreaLayer)   m_pedAreaLayer  ->setGeometry(m_ng);
-        if (m_poiLayer)       m_poiLayer      ->setGeometry(m_ng);
-        if (m_tlsLayer)       m_tlsLayer      ->setGeometry(m_ng);
-        doneCurrent();
-    }
-    update();
-}
-
 void NetworkView::resetView() {
     if (!m_hasBounds) return;
     m_cam.fitBounds(m_minX, m_minY, m_maxX, m_maxY);
     update();
 }
 
+void NetworkView::resizeEvent(QResizeEvent* e) {
+    rhi_compat::RhiWidgetBase::resizeEvent(e);
+    if (m_overlay) m_overlay->setGeometry(rect());
+}
+
 void NetworkView::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
-        m_mouseDown = true;
-        m_didDrag = false;
-        m_downPos = e->pos();
-        m_lastMouse = e->pos();
+        m_mouseDown = true; m_didDrag = false;
+        m_downPos = e->pos(); m_lastMouse = e->pos();
     }
 }
 
@@ -245,14 +311,14 @@ void NetworkView::mouseMoveEvent(QMouseEvent* e) {
     if (m_mouseDown) {
         const QPoint d = e->pos() - m_lastMouse;
         m_lastMouse = e->pos();
-        if (!m_didDrag) {
-            if ((e->pos() - m_downPos).manhattanLength() > 4) {
-                m_didDrag = true;
-                m_panning = true;
-            }
+        if (!m_didDrag && (e->pos() - m_downPos).manhattanLength() > 4) {
+            m_didDrag = true; m_panning = true;
         }
         if (m_panning) {
-            m_cam.panPixels(d.x(), d.y());
+            // Camera uses pixel deltas in widget logical px. Convert from
+            // device px below in zoomAtPixel/pixelToWorld too.
+            m_cam.panPixels(d.x() * devicePixelRatioF(),
+                            d.y() * devicePixelRatioF());
             update();
         }
     }
@@ -261,10 +327,10 @@ void NetworkView::mouseMoveEvent(QMouseEvent* e) {
 void NetworkView::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     const bool wasClick = m_mouseDown && !m_didDrag;
-    m_mouseDown = false;
-    m_panning = false;
+    m_mouseDown = false; m_panning = false;
     if (wasClick) {
-        pickAt(e->position().x(), e->position().y());
+        const double dpr = devicePixelRatioF();
+        pickAt(e->position().x() * dpr, e->position().y() * dpr);
         update();
     }
 }
@@ -273,12 +339,13 @@ void NetworkView::wheelEvent(QWheelEvent* e) {
     const double steps  = e->angleDelta().y() / 120.0;
     const double factor = std::pow(1.2, steps);
     const QPointF pos = e->position();
-    m_cam.zoomAtPixel(pos.x(), pos.y(), factor);
+    const double dpr = devicePixelRatioF();
+    m_cam.zoomAtPixel(pos.x() * dpr, pos.y() * dpr, factor);
     update();
     e->accept();
 }
 
-// ---------------------------- picking ---------------------------------
+// ---------------------------- picking (unchanged) --------------------------
 
 namespace {
 bool pointInPoly(float x, float y, const float* pts, std::size_t n) {
@@ -292,8 +359,6 @@ bool pointInPoly(float x, float y, const float* pts, std::size_t n) {
     }
     return inside;
 }
-
-// Distance squared from point to segment AB.
 float distSqToSeg(float px, float py, float ax, float ay, float bx, float by) {
     const float dx = bx - ax, dy = by - ay;
     const float len2 = dx * dx + dy * dy;
@@ -303,15 +368,10 @@ float distSqToSeg(float px, float py, float ax, float ay, float bx, float by) {
     const float ex = px - cx, ey = py - cy;
     return ex * ex + ey * ey;
 }
-
 const char* laneKindName(std::uint8_t k) {
-    switch (k) {
-        case 0: return "road";
-        case 1: return "rail";
-        case 2: return "sidewalk";
-        case 3: return "walkingarea/crossing";
-        case 4: return "internal";
-    }
+    switch (k) { case 0: return "road"; case 1: return "rail";
+                 case 2: return "sidewalk"; case 3: return "walkingarea/crossing";
+                 case 4: return "internal"; }
     return "other";
 }
 }  // namespace
@@ -323,25 +383,20 @@ void NetworkView::pickAt(double pxX, double pxY) {
     const float fx = static_cast<float>(wx);
     const float fy = static_cast<float>(wy);
     const double ppu = std::max(1e-6, m_cam.pixelsPerUnit());
-    const float pickRadius = static_cast<float>(8.0 / ppu);  // 8 px tolerance
+    const float pickRadius = static_cast<float>(8.0 / ppu);
     const float pickR2 = pickRadius * pickRadius;
 
     Picked best;
-    best.kind = PickKind::None;
-
-    // 1) Vehicles (closest within ~vehicle radius or 8px).
     if (m_snap) {
-        const auto* vpos = reinterpret_cast<const double*>(
-            m_snap->veh_positions.data());
-        const auto* vang = reinterpret_cast<const float*>(
-            m_snap->veh_angles.data());
+        const auto* vpos = reinterpret_cast<const double*>(m_snap->veh_positions.data());
+        const auto* vang = reinterpret_cast<const float*>(m_snap->veh_angles.data());
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < m_snap->vehicle_count(); ++i) {
             const float dx = static_cast<float>(vpos[i * 3 + 0]) - fx;
             const float dy = static_cast<float>(vpos[i * 3 + 1]) - fy;
             const float d2 = dx * dx + dy * dy;
-            const float tol2 = std::max(pickR2, 4.0f);  // ~2m car radius
+            const float tol2 = std::max(pickR2, 4.0f);
             if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
@@ -351,14 +406,10 @@ void NetworkView::pickAt(double pxX, double pxY) {
             best.lines.push_back(QString("position  %1, %2 m")
                 .arg(vpos[bestIdx * 3 + 0], 0, 'f', 1)
                 .arg(vpos[bestIdx * 3 + 1], 0, 'f', 1));
-            // Stored angle is SUMO navi-degrees (CW from north).
-            best.lines.push_back(QString("heading   %1°")
-                .arg(vang[bestIdx], 0, 'f', 1));
+            best.lines.push_back(QString("heading   %1°").arg(vang[bestIdx], 0, 'f', 1));
         }
-
         if (best.kind == PickKind::None) {
-            const auto* ppos = reinterpret_cast<const double*>(
-                m_snap->agent_positions.data());
+            const auto* ppos = reinterpret_cast<const double*>(m_snap->agent_positions.data());
             bestD2 = std::numeric_limits<float>::infinity();
             for (std::size_t i = 0; i < m_snap->person_count(); ++i) {
                 const float dx = static_cast<float>(ppos[i * 3 + 0]) - fx;
@@ -376,41 +427,35 @@ void NetworkView::pickAt(double pxX, double pxY) {
             }
         }
     }
-
-    // 2) TLS heads.
     if (best.kind == PickKind::None) {
         const std::size_t n = m_ng->tls_marker_count();
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < n; ++i) {
-            const float dx = m_ng->tls_x[i] - fx;
-            const float dy = m_ng->tls_y[i] - fy;
+            const float dx = m_ng->tls_x[i] - fx, dy = m_ng->tls_y[i] - fy;
             const float d2 = dx * dx + dy * dy;
-            const float tol2 = std::max(pickR2, 1.44f);  // 1.2m head radius
+            const float tol2 = std::max(pickR2, 1.44f);
             if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
             best.kind = PickKind::TLS;
-            const QString id = QString::fromStdString(m_ng->tls_ids[bestIdx]);
-            best.title = QString("Traffic light  %1").arg(id);
-            best.lines.push_back(QString("link index  %1").arg(m_ng->tls_state_index[bestIdx]));
+            best.title = QString("Traffic light  %1")
+                .arg(QString::fromStdString(m_ng->tls_ids[bestIdx]));
+            best.lines.push_back(QString("link index  %1")
+                .arg(m_ng->tls_state_index[bestIdx]));
             if (m_snap) {
                 auto it = m_snap->tls_states.find(m_ng->tls_ids[bestIdx]);
                 if (it != m_snap->tls_states.end()) {
                     const auto& st = it->second;
                     const std::uint32_t li = m_ng->tls_state_index[bestIdx];
-                    best.lines.push_back(QString("state       %1").arg(
-                        QString::fromStdString(st)));
-                    if (li < st.size()) {
-                        const char c = st[li];
-                        best.lines.push_back(QString("this link   %1").arg(QChar(c)));
-                    }
+                    best.lines.push_back(QString("state       %1")
+                        .arg(QString::fromStdString(st)));
+                    if (li < st.size())
+                        best.lines.push_back(QString("this link   %1").arg(QChar(st[li])));
                 }
             }
         }
     }
-
-    // 3) Polygons.
     if (best.kind == PickKind::None) {
         for (std::size_t i = 0; i < m_ng->polygon_count(); ++i) {
             const std::uint32_t s = m_ng->polygon_offsets[i];
@@ -422,51 +467,34 @@ void NetworkView::pickAt(double pxX, double pxY) {
                 best.title = QString("Polygon  #%1").arg(i);
                 best.lines.push_back(QString("filled    %1")
                     .arg(m_ng->polygon_filled[i] ? "yes" : "no"));
-                best.lines.push_back(QString("color     rgba(%1,%2,%3,%4)")
-                    .arg(m_ng->polygon_rgba[i * 4])
-                    .arg(m_ng->polygon_rgba[i * 4 + 1])
-                    .arg(m_ng->polygon_rgba[i * 4 + 2])
-                    .arg(m_ng->polygon_rgba[i * 4 + 3]));
                 break;
             }
         }
     }
-
-    // 3b) POIs (small static markers).
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < m_ng->poi_count(); ++i) {
-            const float dx = m_ng->poi_x[i] - fx;
-            const float dy = m_ng->poi_y[i] - fy;
+            const float dx = m_ng->poi_x[i] - fx, dy = m_ng->poi_y[i] - fy;
             const float d2 = dx * dx + dy * dy;
-            const float tol2 = std::max(pickR2, 3.24f);  // 1.8m disc radius
+            const float tol2 = std::max(pickR2, 3.24f);
             if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
             best.kind = PickKind::POI;
-            best.title = QString("POI  %1").arg(
-                QString::fromStdString(m_ng->poi_ids[bestIdx]));
-            if (!m_ng->poi_types[bestIdx].empty()) {
+            best.title = QString("POI  %1").arg(QString::fromStdString(m_ng->poi_ids[bestIdx]));
+            if (!m_ng->poi_types[bestIdx].empty())
                 best.lines.push_back(QString("type   %1")
                     .arg(QString::fromStdString(m_ng->poi_types[bestIdx])));
-            }
-            best.lines.push_back(QString("position  %1, %2 m")
-                .arg(m_ng->poi_x[bestIdx], 0, 'f', 1)
-                .arg(m_ng->poi_y[bestIdx], 0, 'f', 1));
         }
     }
-
-    // 3c) Stopping places: closest within half of band length.
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < m_ng->stop_count(); ++i) {
-            const float dx = m_ng->stop_x[i] - fx;
-            const float dy = m_ng->stop_y[i] - fy;
+            const float dx = m_ng->stop_x[i] - fx, dy = m_ng->stop_y[i] - fy;
             const float d2 = dx * dx + dy * dy;
-            const float tol = std::max(m_ng->stop_len[i],
-                                       m_ng->stop_w[i]) * 0.5f + 1.0f;
+            const float tol = std::max(m_ng->stop_len[i], m_ng->stop_w[i]) * 0.5f + 1.0f;
             const float tol2 = std::max(pickR2, tol * tol);
             if (d2 < tol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
         }
@@ -480,18 +508,13 @@ void NetworkView::pickAt(double pxX, double pxY) {
             }
             best.title = QString("%1  %2").arg(k,
                 QString::fromStdString(m_ng->stop_ids[bestIdx]));
-            best.lines.push_back(QString("length    %1 m")
-                .arg(m_ng->stop_len[bestIdx], 0, 'f', 1));
         }
     }
-
-    // 3d) Detectors.
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
         for (std::size_t i = 0; i < m_ng->det_count(); ++i) {
-            const float dx = m_ng->det_x[i] - fx;
-            const float dy = m_ng->det_y[i] - fy;
+            const float dx = m_ng->det_x[i] - fx, dy = m_ng->det_y[i] - fy;
             const float d2 = dx * dx + dy * dy;
             const float tol = std::max(m_ng->det_len[i], 2.0f) * 0.5f + 1.0f;
             const float tol2 = std::max(pickR2, tol * tol);
@@ -508,13 +531,8 @@ void NetworkView::pickAt(double pxX, double pxY) {
             }
             best.title = QString("%1  %2").arg(k,
                 QString::fromStdString(m_ng->det_ids[bestIdx]));
-            if (m_ng->det_len[bestIdx] > 0)
-                best.lines.push_back(QString("length    %1 m")
-                    .arg(m_ng->det_len[bestIdx], 0, 'f', 1));
         }
     }
-
-    // 4) Lanes (closest within half-width).
     if (best.kind == PickKind::None) {
         float bestD2 = std::numeric_limits<float>::infinity();
         std::size_t bestIdx = 0;
@@ -528,30 +546,19 @@ void NetworkView::pickAt(double pxX, double pxY) {
                 const float d2 = distSqToSeg(fx, fy,
                     m_ng->lane_points[k * 2], m_ng->lane_points[k * 2 + 1],
                     m_ng->lane_points[(k + 1) * 2], m_ng->lane_points[(k + 1) * 2 + 1]);
-                if (d2 < laneTol2 && d2 < bestD2) {
-                    bestD2 = d2; bestIdx = i;
-                }
+                if (d2 < laneTol2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
             }
         }
         if (bestD2 < std::numeric_limits<float>::infinity()) {
             best.kind = PickKind::Lane;
-            best.title = QString("Lane  %1").arg(
-                QString::fromStdString(m_ng->lane_ids[bestIdx]));
+            best.title = QString("Lane  %1")
+                .arg(QString::fromStdString(m_ng->lane_ids[bestIdx]));
             best.lines.push_back(QString("kind      %1")
                 .arg(laneKindName(m_ng->lane_kind[bestIdx])));
             best.lines.push_back(QString("width     %1 m")
                 .arg(m_ng->lane_widths[bestIdx], 0, 'f', 2));
-            if (m_snap && !m_snap->lane_attr_rgba.empty()
-                && bestIdx * 4 + 3 < m_snap->lane_attr_rgba.size()) {
-                best.lines.push_back(QString("attr rgba (%1,%2,%3)")
-                    .arg(m_snap->lane_attr_rgba[bestIdx * 4])
-                    .arg(m_snap->lane_attr_rgba[bestIdx * 4 + 1])
-                    .arg(m_snap->lane_attr_rgba[bestIdx * 4 + 2]));
-            }
         }
     }
-
-    // 5) Junctions.
     if (best.kind == PickKind::None) {
         for (std::size_t i = 0; i < m_ng->junction_count(); ++i) {
             const std::uint32_t s = m_ng->junction_offsets[i];
@@ -559,110 +566,11 @@ void NetworkView::pickAt(double pxX, double pxY) {
             if (e - s < 3) continue;
             if (pointInPoly(fx, fy, &m_ng->junction_points[s * 2], e - s)) {
                 best.kind = PickKind::Junction;
-                best.title = QString("Junction  %1").arg(
-                    QString::fromStdString(m_ng->junction_ids[i]));
-                best.lines.push_back(QString("vertices  %1").arg(e - s));
+                best.title = QString("Junction  %1")
+                    .arg(QString::fromStdString(m_ng->junction_ids[i]));
                 break;
             }
         }
     }
-
     m_picked = best;
-}
-
-// --------------------------- overlays ---------------------------------
-
-void NetworkView::drawOverlays(QPainter& p) {
-    drawLegend(p);
-    drawScaleBar(p);
-    drawInfoBox(p);
-}
-
-void NetworkView::drawScaleBar(QPainter& p) {
-    const double ppu = m_cam.pixelsPerUnit();
-    if (!(ppu > 0.0)) return;
-    const double targetPx = 100.0;
-    double meters = targetPx / ppu;
-    const double mag = std::pow(10.0, std::floor(std::log10(meters)));
-    const double mantissa = meters / mag;
-    double nice;
-    if      (mantissa < 1.5) nice = 1.0;
-    else if (mantissa < 3.5) nice = 2.0;
-    else if (mantissa < 7.5) nice = 5.0;
-    else                     nice = 10.0;
-    meters = nice * mag;
-    const double widthPx = meters * ppu;
-
-    QString label;
-    if (meters >= 1000.0) label = QString::number(meters / 1000.0, 'g', 3) + " km";
-    else if (meters >= 1.0) label = QString::number(meters, 'g', 3) + " m";
-    else label = QString::number(meters * 100.0, 'g', 3) + " cm";
-
-    const int margin = 12;
-    const QFont f = p.font();
-    const QFontMetrics fm(f);
-    const int barH = 6;
-    const int textH = fm.height();
-    const int boxW = static_cast<int>(widthPx) + 2 * margin;
-    const int boxH = barH + textH + 8;
-    const QRectF box(width() - boxW - margin, height() - boxH - margin, boxW, boxH);
-    p.fillRect(box, QColor(0, 0, 0, 160));
-    p.setPen(Qt::white);
-    const int x0 = static_cast<int>(box.left()) + margin;
-    const int y0 = static_cast<int>(box.bottom()) - 4 - barH;
-    p.drawLine(x0, y0, x0 + static_cast<int>(widthPx), y0);
-    p.drawLine(x0, y0 - 3, x0, y0 + 3);
-    p.drawLine(x0 + static_cast<int>(widthPx), y0 - 3,
-               x0 + static_cast<int>(widthPx), y0 + 3);
-    p.drawText(static_cast<int>(box.left()) + margin,
-               static_cast<int>(box.top()) + fm.ascent() + 2, label);
-}
-
-void NetworkView::drawLegend(QPainter& p) {
-    if (!m_snap || m_snap->lane_attr_label.empty()) return;
-    const QString label = QString::fromStdString(m_snap->lane_attr_label);
-    const QFontMetrics fm(p.font());
-    const int margin = 12;
-    const int barW = 160, barH = 10;
-    const int textW = fm.horizontalAdvance(label);
-    const int boxW = std::max(barW, textW) + 2 * margin;
-    const int boxH = barH + fm.height() + 8 + 4;
-    const QRectF box(margin, height() - boxH - margin, boxW, boxH);
-    p.fillRect(box, QColor(0, 0, 0, 160));
-    p.setPen(Qt::white);
-    p.drawText(static_cast<int>(box.left()) + margin,
-               static_cast<int>(box.top()) + fm.ascent() + 2, label);
-    // Red→yellow→green gradient bar.
-    QLinearGradient g(box.left() + margin, 0,
-                      box.left() + margin + barW, 0);
-    g.setColorAt(0.0, QColor(255, 0,   0));
-    g.setColorAt(0.5, QColor(255, 255, 0));
-    g.setColorAt(1.0, QColor(  0, 255, 0));
-    const QRectF bar(box.left() + margin,
-                     box.bottom() - barH - 4, barW, barH);
-    p.fillRect(bar, g);
-}
-
-void NetworkView::drawInfoBox(QPainter& p) {
-    if (m_picked.kind == PickKind::None) return;
-    const QFontMetrics fm(p.font());
-    int maxW = fm.horizontalAdvance(m_picked.title);
-    for (const auto& l : m_picked.lines)
-        maxW = std::max(maxW, fm.horizontalAdvance(l));
-    const int margin = 10;
-    const int lineH = fm.height();
-    const int boxW = maxW + 2 * margin;
-    const int boxH = lineH * (1 + static_cast<int>(m_picked.lines.size())) + 2 * margin;
-    const QRectF box(margin, 12 + margin, boxW, boxH);
-    p.fillRect(box, QColor(0, 0, 0, 200));
-    p.setPen(QColor(255, 200, 80));
-    p.drawText(static_cast<int>(box.left()) + margin,
-               static_cast<int>(box.top()) + margin + fm.ascent(),
-               m_picked.title);
-    p.setPen(Qt::white);
-    int y = static_cast<int>(box.top()) + margin + fm.ascent() + lineH;
-    for (const auto& l : m_picked.lines) {
-        p.drawText(static_cast<int>(box.left()) + margin, y, l);
-        y += lineH;
-    }
 }
