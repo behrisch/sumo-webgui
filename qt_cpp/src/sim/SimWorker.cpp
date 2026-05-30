@@ -1,8 +1,10 @@
 #include "SimWorker.h"
 
 #include <QTimer>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -60,6 +62,8 @@ void SimWorker::loadScenario(const QString& sumocfgPath) {
         m_stepCount = 0;
         m_skippedSnapshots.store(0, std::memory_order_release);
         m_renderPending->store(0, std::memory_order_release);
+        m_bmWindowStartNs = m_bmWindowSteps = m_bmWindowSnapshots = 0;
+        m_bmWindowSkipped = m_bmWindowStepNs = m_bmWindowBuildNs = 0;
         m_typeColors.clear();  // fresh per-scenario type registry
         emit scenarioLoaded(sumocfgPath);
         m_ng = buildNetworkGeometry();
@@ -308,8 +312,11 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
 void SimWorker::stepOnce() {
     if (!m_open) return;
     try {
+        const auto t0 = std::chrono::steady_clock::now();
         libsumo::Simulation::step();
+        const auto t1 = std::chrono::steady_clock::now();
         ++m_stepCount;
+
         // Skip extraction if either (a) the GUI hasn't consumed the previous
         // snapshot yet, or (b) nothing visual is currently active — same idea
         // as sumo-gui only asking libsumo for what it draws.  The simulation
@@ -320,14 +327,56 @@ void SimWorker::stepOnce() {
         const bool needData = m_windowVisible && anyLayer;
         const bool pending  = m_backpressure
             && m_renderPending->load(std::memory_order_acquire) != 0;
+        qint64 buildNs = 0;
+        bool   built   = false;
         if (!needData || pending) {
             ++m_skippedSnapshots;
         } else {
+            const auto b0 = std::chrono::steady_clock::now();
             auto snap = buildSnapshot();
+            const auto b1 = std::chrono::steady_clock::now();
+            buildNs = std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count();
+            built = true;
             m_renderPending->store(1, std::memory_order_release);
             emit snapshotReady(std::move(snap));
         }
         emit stepReady(m_stepCount, libsumo::Simulation::getTime());
+
+        // ---- rolling benchmark accumulation / report ----
+        const qint64 nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (m_bmWindowStartNs == 0) m_bmWindowStartNs = nowNs;
+        ++m_bmWindowSteps;
+        if (built) ++m_bmWindowSnapshots; else ++m_bmWindowSkipped;
+        m_bmWindowStepNs  += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        m_bmWindowBuildNs += buildNs;
+        constexpr qint64 kReportNs = 2'000'000'000;  // 2 s
+        const qint64 dtNs = nowNs - m_bmWindowStartNs;
+        if (dtNs >= kReportNs) {
+            const double secs = dtNs / 1e9;
+            const double stepsPerSec = m_bmWindowSteps / secs;
+            const double snapsPerSec = m_bmWindowSnapshots / secs;
+            const double skipRate = m_bmWindowSteps > 0
+                ? double(m_bmWindowSkipped) / double(m_bmWindowSteps) : 0.0;
+            const double avgStepMs = m_bmWindowSteps > 0
+                ? (m_bmWindowStepNs / 1e6) / double(m_bmWindowSteps) : 0.0;
+            const double avgBuildMs = m_bmWindowSnapshots > 0
+                ? (m_bmWindowBuildNs / 1e6) / double(m_bmWindowSnapshots) : 0.0;
+            std::fprintf(stderr,
+                "[bench] steps/s=%.1f snapshots/s=%.1f skip=%.1f%% "
+                "avg_step=%.2fms avg_build=%.2fms\n",
+                stepsPerSec, snapsPerSec, skipRate * 100.0,
+                avgStepMs, avgBuildMs);
+            std::fflush(stderr);
+            emit benchmarkReport(stepsPerSec, snapsPerSec, skipRate,
+                                 avgStepMs, avgBuildMs);
+            m_bmWindowStartNs   = nowNs;
+            m_bmWindowSteps     = 0;
+            m_bmWindowSnapshots = 0;
+            m_bmWindowSkipped   = 0;
+            m_bmWindowStepNs    = 0;
+            m_bmWindowBuildNs   = 0;
+        }
     } catch (const std::exception& e) {
         emit errorOccurred(QString::fromUtf8(e.what()));
         pause();

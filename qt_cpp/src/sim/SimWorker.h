@@ -60,6 +60,12 @@ signals:
     void scenarioClosed();
     void networkReady(std::shared_ptr<NetworkGeometry> ng);
     void snapshotReady(SimSnapshotPtr snap);
+    // Periodic benchmark report (~ every 2 s wall time). Numbers are over
+    // the last reporting window: steps/s, snapshots/s, skip rate, average
+    // wall-time per sim step (ms) and per snapshot build (ms).
+    void benchmarkReport(double stepsPerSec, double snapshotsPerSec,
+                         double skipRate, double avgStepMs,
+                         double avgBuildMs);
 
 private slots:
     void onTimerTick();
@@ -88,6 +94,15 @@ private:
     bool    m_tlsVisible      = true;
     bool    m_edgeDataVisible = true;
     std::atomic<qint64> m_skippedSnapshots{0};
+
+    // Rolling benchmark window (wall-time bucketed every ~2 s).
+    qint64 m_bmWindowStartNs    = 0;
+    qint64 m_bmWindowSteps      = 0;
+    qint64 m_bmWindowSnapshots  = 0;
+    qint64 m_bmWindowSkipped    = 0;
+    qint64 m_bmWindowStepNs     = 0;  // sum of Simulation::step() wall-time
+    qint64 m_bmWindowBuildNs    = 0;  // sum of buildSnapshot() wall-time
+
     std::shared_ptr<std::atomic<int>> m_renderPending = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<NetworkGeometry> m_ng;
 };

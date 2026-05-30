@@ -308,13 +308,39 @@ Picking / info:
 UI controls (already in toolbar: play/pause/step/delay/edge color mode):
 - [x] Vehicle shape combo.
 - [x] Vehicle color mode combo.
-- [ ] Layer visibility checkboxes (edges, junctions, TLS, vehicles,
-      persons, polygons, POIs, detectors, stops, edge data) — matches
-      `VisibilityPanel` in the frontend.
+- [x] Layer visibility checkboxes — Vehicles / Persons / TLS / EdgeData live
+      in the toolbar. Each toggle drives both `NetworkView::set*Visible`
+      (gates the GPU draw) and `SimWorker::set*Visible` (gates the
+      corresponding `Batch::fill*` so hidden layers cost zero on extraction
+      too). Remaining toggles (junctions, polygons, POIs, detectors, stops)
+      are static/decoration layers; add when needed.
 - [ ] Reset view button (binding exists, surface in toolbar).
 - [ ] Status bar: cursor world coords (XY and lon/lat in geo mode).
 - [ ] Color scale legend overlay for edge-data coloring (the overlay
       widget already exists; legend painter is a TODO there).
+
+Performance / fair-comparison plumbing (mirrors what the eCAL publisher
+does on the Python side):
+- [x] Render-driven back-pressure: shared `std::atomic<int>` between
+      `SimWorker` and `NetworkView`. The worker sets it to 1 after
+      `emit snapshotReady`; the view clears it in `render()` right after
+      consuming the snapshot. While set, `stepOnce()` still advances
+      `Simulation::step()` but skips `buildSnapshot()` so we don't pay the
+      `Batch::fill*` + viridis + memcpy cost for frames the GUI would drop.
+      Toggle via `SimWorker::setBackpressure(bool)`.
+- [x] "Ask only for what we render" gating: per-section flags
+      (`setWindowVisible / setVehiclesVisible / setAgentsVisible /
+      setTLSVisible / setEdgeDataVisible`) on `SimWorker`. Each gates its
+      `Batch::fill*` (or the edge-color loop). Window visibility is hooked
+      to `MainWindow::show/hide/changeEvent` so minimizing the window
+      stops extraction immediately. Per-attribute (waiting/CO2/fuel)
+      requesting is already conditional on the vehicle color mode.
+- [x] Rolling benchmark report (~ every 2 s wall time). `SimWorker` emits
+      `benchmarkReport(stepsPerSec, snapshotsPerSec, skipRate, avgStepMs,
+      avgBuildMs)` and also writes the same line to stderr in the format
+      `[bench] steps/s=… snapshots/s=… skip=…% avg_step=…ms avg_build=…ms`.
+      `MainWindow` shows the current window in a permanent status-bar
+      label. Counters reset on scenario load.
 
 Diagnostics:
 - [ ] Log panel for libsumo warnings + GUI events (subscribe to the
@@ -323,7 +349,8 @@ Diagnostics:
 
 Benchmark / QA:
 - [ ] Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.
-- [ ] Sibling `qt_cpp/BENCHMARKING.md` with FPS / CPU / RSS numbers.
+- [ ] Sibling `qt_cpp/BENCHMARKING.md` with FPS / CPU / RSS numbers,
+      using the new `[bench]` log line as the primary data source.
 
 ### Phase 6 — Optional extras
 - MSAA toggle.

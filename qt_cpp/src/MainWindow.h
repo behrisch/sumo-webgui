@@ -25,6 +25,8 @@ private slots:
     void onSimReady(qint64 stepCount, double simTime);
     void onSimError(const QString& message);
     void onFps(double fps);
+    void onBenchmark(double stepsPerSec, double snapshotsPerSec,
+                     double skipRate, double avgStepMs, double avgBuildMs);
     void onPlay();
     void onPause();
     void onStep();
@@ -52,4 +54,5 @@ private:
 
     QLabel* m_status  = nullptr;
     QLabel* m_fpsLbl  = nullptr;
+    QLabel* m_benchLbl = nullptr;
 };

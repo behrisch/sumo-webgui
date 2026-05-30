@@ -215,7 +215,7 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
     // TLS → stop lines → vehicles → persons.
     m_netJunctions.render(cb, m_passTris);
     m_netLaneStrip.render(cb, m_passStrip);
-    if (m_edgeColorVisible) m_edgeColorStrip.render(cb, m_passStrip);
+    if (m_edgeColorVisible && m_layerEdgeDataVisible) m_edgeColorStrip.render(cb, m_passStrip);
     m_pedSidewalk.render(cb, m_passTris);
     m_pedWalk.render(cb, m_passTris);
     m_railSleepers.render(cb, m_passTris);
@@ -225,10 +225,10 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
     if (m_poiLayer) m_poiLayer->render(cb);
     m_stoppingPlace.render(cb, m_passTris);
     m_detector.render(cb, m_passTris);
-    if (m_tlsLayer) m_tlsLayer->render(cb);
+    if (m_tlsLayer && m_layerTLSVisible) m_tlsLayer->render(cb);
     m_stopLine.render(cb, m_passTris);
-    if (m_vehicleLayer) m_vehicleLayer->render(cb);
-    if (m_personLayer)  m_personLayer ->render(cb);
+    if (m_vehicleLayer && m_layerVehiclesVisible) m_vehicleLayer->render(cb);
+    if (m_personLayer && m_layerAgentsVisible)    m_personLayer ->render(cb);
 
     cb->endPass();
 
@@ -299,6 +299,11 @@ void NetworkView::resetView() {
     m_cam.fitBounds(m_minX, m_minY, m_maxX, m_maxY);
     update();
 }
+
+void NetworkView::setVehiclesVisible(bool on)  { m_layerVehiclesVisible = on; update(); }
+void NetworkView::setAgentsVisible  (bool on)  { m_layerAgentsVisible   = on; update(); }
+void NetworkView::setTLSVisible     (bool on)  { m_layerTLSVisible      = on; update(); }
+void NetworkView::setEdgeDataVisible(bool on)  { m_layerEdgeDataVisible = on; update(); }
 
 void NetworkView::setVehicleShape(int shape) {
     using S = VehicleLayerRhi::Shape;

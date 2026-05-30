@@ -37,6 +37,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_sim, &SimWorker::networkReady, m_view, &NetworkView::setNetwork);
     connect(m_sim, &SimWorker::snapshotReady, m_view, &NetworkView::setSnapshot);
     connect(m_view, &NetworkView::fpsUpdated, this, &MainWindow::onFps);
+    connect(m_sim, &SimWorker::benchmarkReport, this, &MainWindow::onBenchmark);
     m_view->setRenderPendingFlag(m_sim->renderPendingFlag());
     m_simThread->start();
 }
@@ -169,6 +170,27 @@ void MainWindow::buildMenusAndToolbar() {
     toolbar->addSeparator();
     toolbar->addAction(resetAct);
 
+    // Per-layer visibility toggles. Each checkable QAction drives both the
+    // GPU draw (NetworkView) and the per-layer Batch::fill* gate in the
+    // worker, so hiding a layer also stops paying its extraction cost.
+    auto addLayerToggle = [&](const QString& label,
+                              const char* viewSlot, const char* simSlot) {
+        auto* act = toolbar->addAction(label);
+        act->setCheckable(true);
+        act->setChecked(true);
+        connect(act, &QAction::toggled, this, [this, viewSlot, simSlot](bool on) {
+            QMetaObject::invokeMethod(m_view, viewSlot, Qt::DirectConnection, Q_ARG(bool, on));
+            QMetaObject::invokeMethod(m_sim,  simSlot,  Qt::QueuedConnection, Q_ARG(bool, on));
+        });
+    };
+    toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr("  Show: "), this));
+    addLayerToggle(tr("Vehicles"), "setVehiclesVisible", "setVehiclesVisible");
+    addLayerToggle(tr("Persons"),  "setAgentsVisible",   "setAgentsVisible");
+    addLayerToggle(tr("TLS"),      "setTLSVisible",      "setTLSVisible");
+    addLayerToggle(tr("EdgeData"), "setEdgeDataVisible", "setEdgeDataVisible");
+
+    toolbar->addSeparator();
     auto* followAct = toolbar->addAction(tr("Follow selected"));
     followAct->setShortcut(QKeySequence(tr("Ctrl+F")));
     followAct->setToolTip(tr("Lock the camera onto the currently picked vehicle (Ctrl+F)"));
@@ -181,6 +203,10 @@ void MainWindow::buildMenusAndToolbar() {
 void MainWindow::buildStatusBar() {
     m_status = new QLabel(tr("Ready."), this);
     statusBar()->addWidget(m_status, 1);
+    m_benchLbl = new QLabel(tr("—"), this);
+    m_benchLbl->setToolTip(tr("Rolling steps/s, snapshots/s, skip rate, avg "
+                              "wall-time per sim step and per snapshot build"));
+    statusBar()->addPermanentWidget(m_benchLbl);
     m_fpsLbl = new QLabel(tr("— fps"), this);
     statusBar()->addPermanentWidget(m_fpsLbl);
 }
@@ -227,6 +253,17 @@ void MainWindow::onSimError(const QString& message) {
 
 void MainWindow::onFps(double fps) {
     m_fpsLbl->setText(tr("%1 fps").arg(fps, 0, 'f', 1));
+}
+
+void MainWindow::onBenchmark(double stepsPerSec, double snapshotsPerSec,
+                             double skipRate, double avgStepMs,
+                             double avgBuildMs) {
+    m_benchLbl->setText(tr("%1 step/s  %2 snap/s  skip %3%  step %4ms  build %5ms")
+                            .arg(stepsPerSec,    0, 'f', 1)
+                            .arg(snapshotsPerSec, 0, 'f', 1)
+                            .arg(skipRate * 100, 0, 'f', 1)
+                            .arg(avgStepMs,      0, 'f', 2)
+                            .arg(avgBuildMs,     0, 'f', 2));
 }
 
 // ---- window visibility -> worker extraction gating ------------------------

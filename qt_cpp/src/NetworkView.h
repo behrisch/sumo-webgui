@@ -36,6 +36,14 @@ public slots:
     void clearFollow();
     void setVehicleShape(int shape);  // 0=Rect, 1=Triangle, 2=Car, 3=Circle
 
+    // Per-layer visibility. Gates the GPU draw call here in the view; the
+    // matching slot on SimWorker also skips the Batch::fill* extraction so
+    // hiding a layer costs zero on both ends.
+    void setVehiclesVisible(bool on);
+    void setAgentsVisible (bool on);
+    void setTLSVisible    (bool on);
+    void setEdgeDataVisible(bool on);
+
     // Hand the view the worker's render-pending flag. The view stores 0 here
     // each time it consumes a snapshot in render(), so the worker can detect
     // back-pressure and skip extraction for steps the GUI would otherwise
@@ -103,6 +111,10 @@ private:
     std::vector<std::uint32_t> m_laneFirst;
     std::vector<std::uint32_t> m_laneCount;
     bool m_edgeColorVisible = false;
+    bool m_layerVehiclesVisible = true;
+    bool m_layerAgentsVisible   = true;
+    bool m_layerTLSVisible      = true;
+    bool m_layerEdgeDataVisible = true;
 
     // Full-class dynamic layers.
     std::unique_ptr<VehicleLayerRhi> m_vehicleLayer;
