@@ -3,10 +3,11 @@
 // QRhi vertex shader for VehicleLayerRhi. Compiled via qsb to SPIR-V then
 // cross-translated to MSL / HLSL / GLSL at build time.
 
-layout(location = 0) in vec2  a_local;       // quad vertex in vehicle frame
+layout(location = 0) in vec2  a_local;       // unit quad: x in [-1,0], y in [-1,+1]
 layout(location = 1) in vec2  a_pos;         // per-instance world XY (float32)
 layout(location = 2) in float a_angle_navi;  // per-instance navi-degrees (CW from north)
 layout(location = 3) in vec4  a_color;       // per-instance rgba (normalised)
+layout(location = 4) in float a_length;      // per-instance body length (meters)
 
 layout(std140, binding = 0) uniform Ubuf {
     mat4 proj;
@@ -21,8 +22,12 @@ void main() {
     float rad = radians(90.0 - a_angle_navi);
     float c = cos(rad);
     float s = sin(rad);
-    vec2 rotated = vec2(c * a_local.x - s * a_local.y,
-                        s * a_local.x + c * a_local.y);
+    // Scale unit local quad: x along heading by per-instance length, y by
+    // a fixed half-width of 1 m. a_pos is the center of the FRONT bumper, so
+    // x runs from -length (rear) to 0 (front).
+    vec2 scaled = vec2(a_local.x * a_length, a_local.y);
+    vec2 rotated = vec2(c * scaled.x - s * scaled.y,
+                        s * scaled.x + c * scaled.y);
     vec2 world = a_pos + rotated;
     gl_Position = u.proj * vec4(world, 0.0, 1.0);
     v_color = a_color;

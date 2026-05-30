@@ -5,9 +5,13 @@
 #include <QFileDialog>
 #include <QLabel>
 #include <QMenuBar>
+#include <QPainter>
+#include <QPixmap>
+#include <QPolygonF>
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
+#include <QIcon>
 #include <QThread>
 #include <QToolBar>
 
@@ -61,17 +65,42 @@ void MainWindow::buildMenusAndToolbar() {
     toolbar->addAction(openAct);
     toolbar->addSeparator();
 
-    m_playAct = toolbar->addAction(
-        style()->standardIcon(QStyle::SP_MediaPlay), tr("&Play"));
+    // Hand-draw bright media-control icons so they look identical regardless
+    // of Qt version, style or whether an icon theme is installed. QStyle's
+    // SP_Media* on Qt 6.4/Fusion renders flat grey glyphs that disappear into
+    // the toolbar background; QIcon::fromTheme returns null in environments
+    // without an XDG icon theme. A 32x32 explicit pixmap dodges both issues.
+    auto makeMediaIcon = [](const QString& kind) {
+        QPixmap pm(32, 32);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        if (kind == "play") {
+            p.setBrush(QColor(80, 200, 100));
+            QPolygonF tri({QPointF(8, 6), QPointF(8, 26), QPointF(26, 16)});
+            p.drawPolygon(tri);
+        } else if (kind == "pause") {
+            p.setBrush(QColor(230, 180, 60));
+            p.drawRoundedRect(QRectF( 8, 6,  6, 20), 1.5, 1.5);
+            p.drawRoundedRect(QRectF(18, 6,  6, 20), 1.5, 1.5);
+        } else /* step */ {
+            p.setBrush(QColor(80, 160, 220));
+            QPolygonF tri({QPointF(6, 6), QPointF(6, 26), QPointF(20, 16)});
+            p.drawPolygon(tri);
+            p.drawRoundedRect(QRectF(22, 6, 4, 20), 1.0, 1.0);
+        }
+        return QIcon(pm);
+    };
+
+    m_playAct = toolbar->addAction(makeMediaIcon("play"), tr("&Play"));
     m_playAct->setShortcut(QKeySequence(tr("Space")));
     connect(m_playAct, &QAction::triggered, this, &MainWindow::onPlay);
 
-    m_pauseAct = toolbar->addAction(
-        style()->standardIcon(QStyle::SP_MediaPause), tr("Pa&use"));
+    m_pauseAct = toolbar->addAction(makeMediaIcon("pause"), tr("Pa&use"));
     connect(m_pauseAct, &QAction::triggered, this, &MainWindow::onPause);
 
-    m_stepAct = toolbar->addAction(
-        style()->standardIcon(QStyle::SP_MediaSkipForward), tr("&Step"));
+    m_stepAct = toolbar->addAction(makeMediaIcon("step"), tr("&Step"));
     m_stepAct->setShortcut(QKeySequence(tr("S")));
     connect(m_stepAct, &QAction::triggered, this, &MainWindow::onStep);
 

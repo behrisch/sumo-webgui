@@ -46,7 +46,7 @@ private:
     // RGBA color cache keyed by libsumo::Batch type-id index.  Filled lazily
     // on first sighting of an index via a single VehicleType::getColor call.
     // Resized to match Batch::typeCount() at the top of each buildSnapshot.
-    struct TypeColor { std::uint8_t r, g, b, a; bool set; };
+    struct TypeColor { std::uint8_t r, g, b, a; bool set; float length; };
     std::vector<TypeColor> m_typeColors;
 
     QTimer* m_timer  = nullptr;

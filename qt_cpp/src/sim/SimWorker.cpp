@@ -93,7 +93,7 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         // types that aren't currently visible.
         const std::uint32_t nTypes = libsumo::Batch::typeCount();
         if (m_typeColors.size() < nTypes) {
-            m_typeColors.resize(nTypes, TypeColor{255, 255, 0, 255, false});
+            m_typeColors.resize(nTypes, TypeColor{255, 255, 0, 255, false, 5.0f});
         }
         auto colorForType = [&](std::uint32_t idx) -> TypeColor& {
             TypeColor& tc = m_typeColors[idx];
@@ -101,12 +101,14 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
                 try {
                     const std::string tid = libsumo::Batch::typeId(idx);
                     const libsumo::TraCIColor c = libsumo::VehicleType::getColor(tid);
+                    const double len = libsumo::VehicleType::getLength(tid);
                     tc = TypeColor{static_cast<std::uint8_t>(c.r),
                                    static_cast<std::uint8_t>(c.g),
                                    static_cast<std::uint8_t>(c.b),
-                                   static_cast<std::uint8_t>(c.a), true};
+                                   static_cast<std::uint8_t>(c.a), true,
+                                   static_cast<float>(len)};
                 } catch (...) {
-                    tc.set = true;  // give up — keep the default yellow
+                    tc.set = true;  // give up — keep the default yellow / 5 m
                 }
             }
             return tc;
@@ -135,12 +137,14 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         snap->veh_positions = buf.veh_positions;
         snap->veh_angles    = buf.veh_angles;
         snap->rgba.resize(N * 4);
+        snap->veh_lengths.resize(N);
         for (std::uint32_t i = 0; i < N; ++i) {
             const TypeColor& tc = colorForType(tidxBuf[i]);
             snap->rgba[i * 4 + 0] = tc.r;
             snap->rgba[i * 4 + 1] = tc.g;
             snap->rgba[i * 4 + 2] = tc.b;
             snap->rgba[i * 4 + 3] = tc.a;
+            snap->veh_lengths[i]  = tc.length;
         }
         splitIds(buf.veh_ids, N, snap->ids);
 

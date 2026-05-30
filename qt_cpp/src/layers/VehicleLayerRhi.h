@@ -69,6 +69,7 @@ private:
     std::unique_ptr<QRhiBuffer>                 m_posVbo;
     std::unique_ptr<QRhiBuffer>                 m_angVbo;
     std::unique_ptr<QRhiBuffer>                 m_colVbo;
+    std::unique_ptr<QRhiBuffer>                 m_lenVbo;
     std::unique_ptr<QRhiBuffer>                 m_ubuf;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline>       m_pipeline;
@@ -78,12 +79,14 @@ private:
     std::vector<float>     m_posStaging;  // (x,y) per vehicle, narrowed from f64
     std::vector<float>     m_angStaging;  // copy of navi-degrees
     std::vector<uint8_t>   m_colStaging;  // copy of rgba8
+    std::vector<float>     m_lenStaging;  // copy of per-vehicle length (m)
     float                  m_projStaging[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 
     std::size_t m_instanceCount    = 0;
     std::size_t m_posCapacityBytes = 0;  // current size of m_posVbo in bytes
     std::size_t m_angCapacityBytes = 0;
     std::size_t m_colCapacityBytes = 0;
+    std::size_t m_lenCapacityBytes = 0;
 
     bool m_uploadQuad   = true;  // one-time static upload
     bool m_uploadDirty  = false; // new snapshot waiting

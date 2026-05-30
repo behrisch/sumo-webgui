@@ -8,19 +8,17 @@
 
 namespace {
 
-// Quad in local vehicle frame: length along +x, width along +y. SUMO's
-// Vehicle::getPosition reports the center of the FRONT bumper, so the local
-// quad spans x in [-kLen, 0] (rear at -length, front edge at the anchor) and
-// y in [-kHalfWid, +kHalfWid].
-constexpr float kLen     = 5.0f;
-constexpr float kHalfWid = 1.0f;
+// Unit quad in local vehicle frame: x in [-1, 0] (rear at -1, front at 0),
+// y in [-1, +1] (half-width). The shader scales x by the per-instance length
+// (so the front edge sits exactly on the SUMO-reported front-bumper position)
+// and leaves y at a fixed half-width of 1 m.
 constexpr std::array<float, 12> kQuad = {
-    -kLen, -kHalfWid,
-      0.f, -kHalfWid,
-      0.f,  kHalfWid,
-    -kLen, -kHalfWid,
-      0.f,  kHalfWid,
-    -kLen,  kHalfWid,
+    -1.f, -1.f,
+     0.f, -1.f,
+     0.f,  1.f,
+    -1.f, -1.f,
+     0.f,  1.f,
+    -1.f,  1.f,
 };
 
 QShader loadShader(const QString& path) {
@@ -42,10 +40,11 @@ void VehicleLayerRhi::release() {
     m_srb.reset();
     m_ubuf.reset();
     m_colVbo.reset();
+    m_lenVbo.reset();
     m_angVbo.reset();
     m_posVbo.reset();
     m_quadVbo.reset();
-    m_posCapacityBytes = m_angCapacityBytes = m_colCapacityBytes = 0;
+    m_posCapacityBytes = m_angCapacityBytes = m_colCapacityBytes = m_lenCapacityBytes = 0;
     m_uploadQuad   = true;
     m_initialized  = false;
     m_rhi = nullptr;
@@ -76,9 +75,11 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
     m_posVbo.reset(makeDyn(8 * sizeof(float)));
     m_angVbo.reset(makeDyn(sizeof(float)));
     m_colVbo.reset(makeDyn(4));
+    m_lenVbo.reset(makeDyn(sizeof(float)));
     m_posCapacityBytes = 8 * sizeof(float);
     m_angCapacityBytes = sizeof(float);
     m_colCapacityBytes = 4;
+    m_lenCapacityBytes = sizeof(float);
 
     // Uniform buffer: mat4 proj. std140 = 64 bytes.
     m_ubuf.reset(rhi->newBuffer(QRhiBuffer::Dynamic,
@@ -112,12 +113,14 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
         { 2 * sizeof(float),   QRhiVertexInputBinding::PerInstance },  // 1: pos
         { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 2: angle
         { 4 * sizeof(quint8),  QRhiVertexInputBinding::PerInstance },  // 3: rgba
+        { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 4: length
     });
     layout.setAttributes({
         { 0, 0, QRhiVertexInputAttribute::Float2,    0 },
         { 1, 1, QRhiVertexInputAttribute::Float2,    0 },
         { 2, 2, QRhiVertexInputAttribute::Float,     0 },
         { 3, 3, QRhiVertexInputAttribute::UNormByte4, 0 },
+        { 4, 4, QRhiVertexInputAttribute::Float,     0 },
     });
 
     m_pipeline->setVertexInputLayout(layout);
@@ -139,6 +142,7 @@ void VehicleLayerRhi::setSnapshot(const SimSnapshotPtr& snap) {
         m_posStaging.clear();
         m_angStaging.clear();
         m_colStaging.clear();
+        m_lenStaging.clear();
         m_uploadDirty = true;
         return;
     }
@@ -160,6 +164,8 @@ void VehicleLayerRhi::setSnapshot(const SimSnapshotPtr& snap) {
                 std::min(snap->veh_angles.size(), n * sizeof(float)));
 
     m_colStaging.assign(snap->rgba.begin(), snap->rgba.end());
+    m_lenStaging.assign(snap->veh_lengths.begin(), snap->veh_lengths.end());
+    if (m_lenStaging.size() < n) m_lenStaging.resize(n, 5.0f);
 
     m_instanceCount = n;
     m_uploadDirty   = true;
@@ -201,12 +207,15 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     const std::size_t posBytes = m_posStaging.size() * sizeof(float);
     const std::size_t angBytes = m_angStaging.size() * sizeof(float);
     const std::size_t colBytes = m_colStaging.size();
+    const std::size_t lenBytes = m_lenStaging.size() * sizeof(float);
 
     ensureCapacity(m_rhi, m_posVbo, m_posCapacityBytes, posBytes,
                    QRhiBuffer::VertexBuffer);
     ensureCapacity(m_rhi, m_angVbo, m_angCapacityBytes, angBytes,
                    QRhiBuffer::VertexBuffer);
     ensureCapacity(m_rhi, m_colVbo, m_colCapacityBytes, colBytes,
+                   QRhiBuffer::VertexBuffer);
+    ensureCapacity(m_rhi, m_lenVbo, m_lenCapacityBytes, lenBytes,
                    QRhiBuffer::VertexBuffer);
 
     batch->updateDynamicBuffer(m_posVbo.get(), 0,
@@ -218,6 +227,9 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     batch->updateDynamicBuffer(m_colVbo.get(), 0,
                                static_cast<quint32>(colBytes),
                                m_colStaging.data());
+    batch->updateDynamicBuffer(m_lenVbo.get(), 0,
+                               static_cast<quint32>(lenBytes),
+                               m_lenStaging.data());
 
     m_uploadDirty = false;
 }
@@ -237,7 +249,8 @@ void VehicleLayerRhi::render(QRhiCommandBuffer* cb) {
         { m_posVbo.get(),  0 },
         { m_angVbo.get(),  0 },
         { m_colVbo.get(),  0 },
+        { m_lenVbo.get(),  0 },
     };
-    cb->setVertexInput(0, 4, bindings);
+    cb->setVertexInput(0, 5, bindings);
     cb->draw(6, static_cast<quint32>(m_instanceCount));
 }
