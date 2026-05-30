@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "SimSnapshot.h"
+#include "LogCapture.h"
 
 struct NetworkGeometry;
 class QTimer;
@@ -33,6 +34,11 @@ public:
     qint64 skippedSnapshots() const {
         return m_skippedSnapshots.load(std::memory_order_relaxed);
     }
+
+    // Router that re-emits libsumo MsgHandler messages as a Qt signal so
+    // MainWindow can show them in a dockable log panel.  Owned by this
+    // SimWorker; signal lives on the sim thread and is auto-queued to GUI.
+    LogRouter* logRouter() const { return m_logRouter; }
 
 public slots:
     void loadScenario(const QString& sumocfgPath);
@@ -77,7 +83,7 @@ private:
     // RGBA color cache keyed by libsumo::Batch type-id index.  Filled lazily
     // on first sighting of an index via a single VehicleType::getColor call.
     // Resized to match Batch::typeCount() at the top of each buildSnapshot.
-    struct TypeColor { std::uint8_t r, g, b, a; bool set; float length; };
+    struct TypeColor { std::uint8_t r, g, b, a; bool set; float length; float width; };
     std::vector<TypeColor> m_typeColors;
 
     QTimer* m_timer  = nullptr;
@@ -105,4 +111,7 @@ private:
 
     std::shared_ptr<std::atomic<int>> m_renderPending = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<NetworkGeometry> m_ng;
+
+    LogRouter* m_logRouter = nullptr;
+    LogCaptureSet m_logCaptures;
 };

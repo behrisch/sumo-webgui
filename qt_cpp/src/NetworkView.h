@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 
+class QTimer;
+
 #include "Camera.h"
 #include "layers/VehicleLayerRhi.h"
 #include "rhi_compat/RhiWidgetBase.h"
@@ -44,6 +46,12 @@ public slots:
     void setTLSVisible    (bool on);
     void setEdgeDataVisible(bool on);
 
+    // Cap on render refresh rate from incoming snapshots; 0 = uncapped.
+    // Mirrors ecal_deck's MAX_PUBLISH_FPS so the perf comparison can pin
+    // both stacks to the same frame budget.  Only throttles snapshot-driven
+    // updates; user interaction (pan/zoom) is never deferred.
+    void setMaxFps(int fps);
+
     // Hand the view the worker's render-pending flag. The view stores 0 here
     // each time it consumes a snapshot in render(), so the worker can detect
     // back-pressure and skip extraction for steps the GUI would otherwise
@@ -54,6 +62,7 @@ public slots:
 
 signals:
     void fpsUpdated(double fps);
+    void cursorWorldPos(double x, double y);
 
 protected:
     // RhiWidgetBase / QRhiWidget interface.
@@ -146,4 +155,9 @@ private:
 
     qint64 m_fpsWindowStartMs = 0;
     int    m_fpsFrames        = 0;
+
+    // Frame-rate cap for snapshot-driven updates.  0 = uncapped.
+    int    m_maxFps        = 0;
+    qint64 m_lastUpdateMs  = 0;
+    QTimer* m_fpsCapTimer  = nullptr;  // single-shot, fires the deferred update
 };

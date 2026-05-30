@@ -10,6 +10,8 @@ class QLabel;
 class QAction;
 class QSlider;
 class QComboBox;
+class QPlainTextEdit;
+class QDockWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -27,6 +29,8 @@ private slots:
     void onFps(double fps);
     void onBenchmark(double stepsPerSec, double snapshotsPerSec,
                      double skipRate, double avgStepMs, double avgBuildMs);
+    void onCursor(double x, double y);
+    void onLog(int level, const QString& text);
     void onPlay();
     void onPause();
     void onStep();
@@ -52,7 +56,10 @@ private:
     QSlider* m_delay    = nullptr;
     QComboBox* m_colorMode = nullptr;
 
-    QLabel* m_status  = nullptr;
-    QLabel* m_fpsLbl  = nullptr;
+    QLabel* m_status   = nullptr;
+    QLabel* m_fpsLbl   = nullptr;
     QLabel* m_benchLbl = nullptr;
+    QLabel* m_cursorLbl = nullptr;
+    QDockWidget*    m_logDock  = nullptr;
+    QPlainTextEdit* m_logPanel = nullptr;
 };

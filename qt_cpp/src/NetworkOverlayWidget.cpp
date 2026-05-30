@@ -63,10 +63,13 @@ void NetworkOverlayWidget::drawLegend(QPainter& p) {
     const QString label = QString::fromStdString(v->m_snap->lane_attr_label);
     const QFontMetrics fm(p.font());
     const int margin = 12;
-    const int barW = 160, barH = 10;
+    const int barW = 200, barH = 10;
     const int textW = fm.horizontalAdvance(label);
     const int boxW = std::max(barW, textW) + 2 * margin;
-    const int boxH = barH + fm.height() + 8 + 4;
+    // Title + gradient + tick labels under the bar.
+    const QString lo = QStringLiteral("low");
+    const QString hi = QStringLiteral("high");
+    const int boxH = fm.height() + 4 + barH + 2 + fm.height() + 8;
     const QRectF box(margin, v->height() - boxH - margin, boxW, boxH);
     p.fillRect(box, QColor(0, 0, 0, 160));
     p.setPen(Qt::white);
@@ -76,8 +79,15 @@ void NetworkOverlayWidget::drawLegend(QPainter& p) {
     g.setColorAt(0.0, QColor(255, 0,   0));
     g.setColorAt(0.5, QColor(255, 255, 0));
     g.setColorAt(1.0, QColor(  0, 255, 0));
-    const QRectF bar(box.left() + margin, box.bottom() - barH - 4, barW, barH);
+    const QRectF bar(box.left() + margin,
+                     box.top() + fm.height() + 4, barW, barH);
     p.fillRect(bar, g);
+    p.setPen(QColor(220, 220, 220));
+    // Tick labels under the gradient ends.
+    const int tickY = static_cast<int>(bar.bottom()) + fm.ascent() + 2;
+    p.drawText(static_cast<int>(bar.left()), tickY, lo);
+    p.drawText(static_cast<int>(bar.right()) - fm.horizontalAdvance(hi),
+               tickY, hi);
 }
 
 void NetworkOverlayWidget::drawInfoBox(QPainter& p) {

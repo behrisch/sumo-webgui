@@ -51,6 +51,8 @@ add_executable(qt_cpp
     src/layers/VehicleLayerRhi.h
     src/layers/PersonLayerRhi.cpp
     src/layers/PersonLayerRhi.h
+    src/sim/LogCapture.cpp
+    src/sim/LogCapture.h
     src/sim/NetworkGeometry.cpp
     src/sim/NetworkGeometry.h
     src/sim/SimSnapshot.h
@@ -75,6 +77,16 @@ qt6_add_shaders(qt_cpp "qt_cpp_shaders"
 )
 
 target_include_directories(qt_cpp PRIVATE src)
+# SUMO's <utils/iodevices/OutputDevice.h> #includes <config.h> from the SUMO
+# build tree.  Pull that directory in so LogCapture.cpp can subclass
+# OutputDevice without needing a dummy config.h.
+if(EXISTS "${SUMO_HOME}/cmclaude/src/config.h")
+    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/cmclaude/src")
+elseif(EXISTS "${SUMO_HOME}/build/src/config.h")
+    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/build/src")
+elseif(EXISTS "${SUMO_HOME}/cmake-build-release/src/config.h")
+    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/cmake-build-release/src")
+endif()
 target_link_libraries(qt_cpp PRIVATE
     Qt6::Widgets
     Qt6::WidgetsPrivate
@@ -105,6 +117,8 @@ add_executable(qt_cpp_rhi_spike
     src/layers/VehicleLayerRhi.h
     src/Camera.cpp
     src/Camera.h
+    src/sim/LogCapture.cpp
+    src/sim/LogCapture.h
     src/sim/NetworkGeometry.cpp
     src/sim/NetworkGeometry.h
     src/sim/SimSnapshot.h
@@ -123,6 +137,13 @@ qt6_add_shaders(qt_cpp_rhi_spike "spike_shaders"
 )
 
 target_include_directories(qt_cpp_rhi_spike PRIVATE src)
+if(EXISTS "${SUMO_HOME}/cmclaude/src/config.h")
+    target_include_directories(qt_cpp_rhi_spike PRIVATE "${SUMO_HOME}/cmclaude/src")
+elseif(EXISTS "${SUMO_HOME}/build/src/config.h")
+    target_include_directories(qt_cpp_rhi_spike PRIVATE "${SUMO_HOME}/build/src")
+elseif(EXISTS "${SUMO_HOME}/cmake-build-release/src/config.h")
+    target_include_directories(qt_cpp_rhi_spike PRIVATE "${SUMO_HOME}/cmake-build-release/src")
+endif()
 target_link_libraries(qt_cpp_rhi_spike PRIVATE
     Qt6::Widgets
     Qt6::WidgetsPrivate

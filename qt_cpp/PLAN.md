@@ -287,11 +287,15 @@ Vehicle rendering:
       and applies it inside `initialize()` so a UI selection made before
       the first paint (when `m_vehicleLayer` doesn't exist yet) still
       takes effect on the first frame.
-- [ ] Per-type vehicle width (parallel to the already-implemented per-type
-      length): extend `TypeColor`, add a 6th per-instance attribute, drop
-      the hard-coded 1 m half-width in `vehicle.vert`.
-- [ ] Min-pixel sizing so vehicles stay visible when zoomed out (mirrors
-      ecal's `vehicleMinPixels`).
+- [x] Per-type vehicle width (parallel to per-type length): extended
+      `TypeColor` with `width`, added a 6th per-instance attribute (binding
+      5 / location 6 `a_width`); the hard-coded 1 m half-width is gone from
+      `vehicle.vert` — it now uses `max(a_width, u.min_size.y) * 0.5`.
+- [x] Min-pixel sizing so vehicles stay visible when zoomed out (mirrors
+      ecal's `vehicleMinPixels`). Implemented via an 80 B UBO that carries
+      a `vec4 min_size` alongside the projection; `NetworkView` computes
+      `min = 6 px / pixelsPerUnit` each frame and pushes it to the layer.
+      Shader clamps via `max(a_length, u.min_size.x)`.
 - [x] Dynamic per-vehicle coloring: `by type | speed | waiting_time |
       co2_emission | fuel_consumption`. Implemented in `SimWorker`:
       requests the extra attribute column via `Batch::fillVehicles({...})`
@@ -314,13 +318,32 @@ UI controls (already in toolbar: play/pause/step/delay/edge color mode):
       corresponding `Batch::fill*` so hidden layers cost zero on extraction
       too). Remaining toggles (junctions, polygons, POIs, detectors, stops)
       are static/decoration layers; add when needed.
-- [ ] Reset view button (binding exists, surface in toolbar).
-- [ ] Status bar: cursor world coords (XY and lon/lat in geo mode).
-- [ ] Color scale legend overlay for edge-data coloring (the overlay
-      widget already exists; legend painter is a TODO there).
+- [x] Reset view button — toolbar action + `Ctrl+0` shortcut, calls
+      `NetworkView::resetView()`.
+- [x] Status bar: cursor world coords (XY in meters). `NetworkView` emits
+      `cursorWorldPos(x, y)` from `mouseMoveEvent`; MainWindow shows it in
+      a permanent status-bar label. Lon/lat for geo-referenced nets is
+      still TODO.
+- [x] Color scale legend overlay for edge-data coloring. Implemented in
+      `NetworkOverlayWidget::drawLegend` (title, viridis gradient bar,
+      "low"/"high" tick labels). Numeric min/max ranges per mode are still
+      TODO and would need them threaded through `SimSnapshot`.
 
 Performance / fair-comparison plumbing (mirrors what the eCAL publisher
 does on the Python side):
+- [x] Max-fps cap for snapshot-driven renders, parallels ecal_deck's
+      `MAX_PUBLISH_FPS`.  Toolbar combo ("Max fps: uncapped/10/20/30/60/120")
+      drives `NetworkView::setMaxFps(int)`.  When a snapshot arrives sooner
+      than `1000 / maxFps` ms after the last paint, the view skips the
+      immediate `update()` and instead arms a single-shot timer for the
+      remaining gap; `m_pendingSnap` already holds the freshest data, so
+      deferred frames coalesce naturally and the back-pressure flag
+      continues to suppress data extraction for the skipped frames.  User
+      pan/zoom is never throttled.
+- [x] End-of-simulation handling: `SimWorker::stepOnce()` checks
+      `Simulation::getMinExpectedNumber() <= 0` after each step and pauses
+      the play loop so we don't keep advancing past the configured end
+      time (or after all vehicles have left).
 - [x] Render-driven back-pressure: shared `std::atomic<int>` between
       `SimWorker` and `NetworkView`. The worker sets it to 1 after
       `emit snapshotReady`; the view clears it in `render()` right after
@@ -343,9 +366,20 @@ does on the Python side):
       label. Counters reset on scenario load.
 
 Diagnostics:
-- [ ] Log panel for libsumo warnings + GUI events (subscribe to the
-      `LogMessage` flow once equivalent is exposed via libsumo; for now
-      capture `MsgHandler` callbacks).
+- [x] Log panel for libsumo warnings + errors + info messages. Implemented
+      as a dockable `QPlainTextEdit` in `MainWindow` (toggle via View
+      menu). `SimWorker` owns a `LogRouter` (QObject) plus three
+      `OutputDevice` subclasses (`LogCapture`) registered with libsumo's
+      static `MsgHandler::getMessage/Warning/ErrorInstance()`. Each
+      capture forwards its formatted message through `LogRouter::logged`
+      (auto-queued across the sim → GUI thread boundary) to a slot that
+      appends an HTML-formatted line (`hh:mm:ss.zzz LEVEL message`) with
+      a colour-coded level tag. `--no-warnings` is no longer passed to
+      libsumo so warnings actually show up. `LogCapture` is implemented
+      privately in `sim/LogCapture.cpp` (the OutputDevice subclass needs
+      SUMO's `<config.h>`, which qt_cpp pulls in via an opt-in include
+      path that probes a couple of common SUMO build-dir names —
+      `cmclaude/src`, `build/src`, `cmake-build-release/src`).
 
 Benchmark / QA:
 - [ ] Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.

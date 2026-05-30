@@ -1,6 +1,7 @@
 #include "NetworkView.h"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QTimer>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QResizeEvent>
 #include <QtGui/QWheelEvent>
@@ -25,6 +26,13 @@ NetworkView::NetworkView(QWidget* parent)
     m_overlay = new NetworkOverlayWidget(this);
     m_overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_overlay->raise();
+
+    // Single-shot timer used by the max-fps cap to defer snapshot-driven
+    // updates that would arrive sooner than 1000 / m_maxFps ms apart.
+    m_fpsCapTimer = new QTimer(this);
+    m_fpsCapTimer->setSingleShot(true);
+    connect(m_fpsCapTimer, &QTimer::timeout, this,
+            [this]() { update(); });
 }
 
 NetworkView::~NetworkView() = default;
@@ -200,7 +208,17 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
     m_netLaneStrip.resourceUpdate(batch);
     m_edgeColorStrip.resourceUpdate(batch);
 
-    if (m_vehicleLayer) { m_vehicleLayer->setProjection(pf); m_vehicleLayer->resourceUpdate(batch); }
+    if (m_vehicleLayer) {
+        m_vehicleLayer->setProjection(pf);
+        // Mirror ecal `vehicleMinPixels` ≈ 6 px. Convert px → world meters
+        // via the camera's current pixels-per-meter. Width clamp is half as
+        // big as length so motorbikes/bikes don't get fattened too much.
+        const double ppu = m_cam.pixelsPerUnit();
+        const float minLen = ppu > 1e-6 ? float(6.0 / ppu) : 0.f;
+        const float minWid = minLen * 0.5f;
+        m_vehicleLayer->setMinSize(minLen, minWid);
+        m_vehicleLayer->resourceUpdate(batch);
+    }
     if (m_personLayer)  { m_personLayer ->setProjection(pf); m_personLayer ->resourceUpdate(batch); }
     if (m_poiLayer)     { m_poiLayer    ->setProjection(pf); m_poiLayer    ->resourceUpdate(batch); }
     if (m_tlsLayer)     { m_tlsLayer    ->setProjection(pf); m_tlsLayer    ->resourceUpdate(batch); }
@@ -233,6 +251,7 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
     cb->endPass();
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    m_lastUpdateMs = now;
     if (m_fpsWindowStartMs == 0) m_fpsWindowStartMs = now;
     ++m_fpsFrames;
     const qint64 dt = now - m_fpsWindowStartMs;
@@ -278,7 +297,27 @@ void NetworkView::setSnapshot(SimSnapshotPtr snap) {
         }
         if (!found) m_followId.clear();
     }
-    update();
+    // Cap-throttled update: if we just painted less than (1000/maxFps) ms
+    // ago, defer the repaint via the one-shot timer.  The freshest snapshot
+    // is held in m_pendingSnap, so a late firing render() still grabs the
+    // latest data — older deferred frames coalesce naturally.
+    if (m_maxFps <= 0) {
+        update();
+    } else {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 minIntervalMs = 1000 / m_maxFps;
+        const qint64 since = now - m_lastUpdateMs;
+        if (since >= minIntervalMs) {
+            update();
+        } else if (!m_fpsCapTimer->isActive()) {
+            m_fpsCapTimer->start(static_cast<int>(minIntervalMs - since));
+        }
+    }
+}
+
+void NetworkView::setMaxFps(int fps) {
+    m_maxFps = fps > 0 ? fps : 0;
+    if (m_maxFps == 0 && m_fpsCapTimer) m_fpsCapTimer->stop();
 }
 
 void NetworkView::setFollowSelected() {
@@ -332,6 +371,15 @@ void NetworkView::mousePressEvent(QMouseEvent* e) {
 }
 
 void NetworkView::mouseMoveEvent(QMouseEvent* e) {
+    // Emit world-space coords for the status bar. Done on every move (not
+    // just while panning) so the user always sees the cursor location.
+    {
+        const double dpr = devicePixelRatioF();
+        double wx = 0, wy = 0;
+        m_cam.pixelToWorld(e->position().x() * dpr,
+                           e->position().y() * dpr, wx, wy);
+        emit cursorWorldPos(wx, wy);
+    }
     if (m_mouseDown) {
         const QPoint d = e->pos() - m_lastMouse;
         m_lastMouse = e->pos();

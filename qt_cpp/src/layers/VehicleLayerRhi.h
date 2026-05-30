@@ -72,6 +72,12 @@ public:
     // the next resourceUpdate). Default is Rectangle.
     void setShape(Shape s);
 
+    // Min visible size for the body mesh, in world meters. The shader uses
+    // max(length, minLength) and max(width, minWidth) so the vehicle stays
+    // legible when zoomed out (mirrors ecal's `vehicleMinPixels`). Caller
+    // converts pixels → meters using the camera's pixels-per-meter.
+    void setMinSize(float minLengthMeters, float minWidthMeters);
+
     // Record the draw into `cb`. Caller has already started a render pass.
     void render(QRhiCommandBuffer* cb);
 
@@ -85,6 +91,7 @@ private:
     std::unique_ptr<QRhiBuffer>                 m_angVbo;
     std::unique_ptr<QRhiBuffer>                 m_colVbo;
     std::unique_ptr<QRhiBuffer>                 m_lenVbo;
+    std::unique_ptr<QRhiBuffer>                 m_wdtVbo;
     std::unique_ptr<QRhiBuffer>                 m_ubuf;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline>       m_pipeline;
@@ -95,13 +102,18 @@ private:
     std::vector<float>     m_angStaging;  // copy of navi-degrees
     std::vector<uint8_t>   m_colStaging;  // copy of rgba8
     std::vector<float>     m_lenStaging;  // copy of per-vehicle length (m)
+    std::vector<float>     m_wdtStaging;  // copy of per-vehicle width  (m)
     float                  m_projStaging[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    // (minLengthMeters, minWidthMeters, padX, padY) stored as vec4 in the UBO
+    // for std140 alignment behind the mat4 proj.
+    float                  m_minSize[4] = {0.f, 0.f, 0.f, 0.f};
 
     std::size_t m_instanceCount    = 0;
     std::size_t m_posCapacityBytes = 0;  // current size of m_posVbo in bytes
     std::size_t m_angCapacityBytes = 0;
     std::size_t m_colCapacityBytes = 0;
     std::size_t m_lenCapacityBytes = 0;
+    std::size_t m_wdtCapacityBytes = 0;
 
     bool m_uploadQuad   = true;  // one-time / on shape change static upload
     bool m_uploadDirty  = false; // new snapshot waiting

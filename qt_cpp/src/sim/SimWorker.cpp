@@ -21,6 +21,7 @@
 #pragma pop_macro("signals")
 
 #include "NetworkGeometry.h"
+#include "LogCapture.h"
 
 SimWorker::SimWorker(QObject* parent) : QObject(parent) {
     qRegisterMetaType<std::shared_ptr<NetworkGeometry>>("std::shared_ptr<NetworkGeometry>");
@@ -29,10 +30,20 @@ SimWorker::SimWorker(QObject* parent) : QObject(parent) {
     m_timer = new QTimer(this);
     m_timer->setTimerType(Qt::PreciseTimer);
     connect(m_timer, &QTimer::timeout, this, &SimWorker::onTimerTick);
+
+    // Wire libsumo's static MsgHandler streams into a per-worker router so
+    // the GUI can subscribe to log messages.  Doing this in the constructor
+    // (still on the main thread, before moveToThread) is fine: the retriever
+    // list isn't read concurrently until Simulation::start() runs on the
+    // sim thread.
+    m_logRouter = new LogRouter(this);
+    m_logCaptures = installLogCaptures(m_logRouter);
 }
 
 SimWorker::~SimWorker() {
     closeIfOpen();
+    // LogCaptureSet's dtor removes the retrievers from MsgHandler before
+    // their underlying OutputDevice subclasses die.
 }
 
 void SimWorker::closeIfOpen() noexcept {
@@ -51,11 +62,14 @@ void SimWorker::closeIfOpen() noexcept {
 void SimWorker::loadScenario(const QString& sumocfgPath) {
     closeIfOpen();
     try {
+        // --no-warnings is intentionally NOT set: warnings + errors are now
+        // surfaced in the dockable "Log" panel (see MainWindow + LogCapture).
+        // --no-step-log stays on to avoid flooding the panel with per-step
+        // "Loaded vehicles: N" spam.
         const std::vector<std::string> cmd = {
             "sumo",
             "-c", sumocfgPath.toStdString(),
             "--no-step-log", "true",
-            "--no-warnings", "true",
         };
         libsumo::Simulation::start(cmd);
         m_open = true;
@@ -110,7 +124,7 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         // types that aren't currently visible.
         const std::uint32_t nTypes = libsumo::Batch::typeCount();
         if (m_typeColors.size() < nTypes) {
-            m_typeColors.resize(nTypes, TypeColor{255, 255, 0, 255, false, 5.0f});
+            m_typeColors.resize(nTypes, TypeColor{255, 255, 0, 255, false, 5.0f, 1.8f});
         }
         auto colorForType = [&](std::uint32_t idx) -> TypeColor& {
             TypeColor& tc = m_typeColors[idx];
@@ -119,13 +133,15 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
                     const std::string tid = libsumo::Batch::typeId(idx);
                     const libsumo::TraCIColor c = libsumo::VehicleType::getColor(tid);
                     const double len = libsumo::VehicleType::getLength(tid);
+                    const double wid = libsumo::VehicleType::getWidth(tid);
                     tc = TypeColor{static_cast<std::uint8_t>(c.r),
                                    static_cast<std::uint8_t>(c.g),
                                    static_cast<std::uint8_t>(c.b),
                                    static_cast<std::uint8_t>(c.a), true,
-                                   static_cast<float>(len)};
+                                   static_cast<float>(len),
+                                   static_cast<float>(wid)};
                 } catch (...) {
-                    tc.set = true;  // give up — keep the default yellow / 5 m
+                    tc.set = true;  // give up — keep the default yellow / 5 m / 1.8 m
                 }
             }
             return tc;
@@ -159,6 +175,7 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         snap->veh_speeds    = buf.veh_speeds;
         snap->rgba.resize(N * 4);
         snap->veh_lengths.resize(N);
+        snap->veh_widths.resize(N);
         snap->veh_type_indices.assign(tidxBuf, tidxBuf + N);
 
         // Pick the dynamic-coloring source: speed (m/s), waiting_time (s),
@@ -197,6 +214,7 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         for (std::uint32_t i = 0; i < N; ++i) {
             const TypeColor& tc = colorForType(tidxBuf[i]);
             snap->veh_lengths[i] = tc.length;
+            snap->veh_widths[i]  = tc.width;
             std::uint8_t r = tc.r, g = tc.g, b = tc.b;
             if (m_vehicleColorMode != 0) {
                 float v = 0.0f;
@@ -316,7 +334,6 @@ void SimWorker::stepOnce() {
         libsumo::Simulation::step();
         const auto t1 = std::chrono::steady_clock::now();
         ++m_stepCount;
-
         // Skip extraction if either (a) the GUI hasn't consumed the previous
         // snapshot yet, or (b) nothing visual is currently active — same idea
         // as sumo-gui only asking libsumo for what it draws.  The simulation
@@ -376,6 +393,21 @@ void SimWorker::stepOnce() {
             m_bmWindowSkipped   = 0;
             m_bmWindowStepNs    = 0;
             m_bmWindowBuildNs   = 0;
+        }
+
+        // Respect the scenario's end condition: when the configured end
+        // time is reached (or all vehicles have left and none are due to
+        // depart), libsumo reports zero expected vehicles.  Stop the play
+        // loop so we don't keep spinning Simulation::step() past the end.
+        if (libsumo::Simulation::getMinExpectedNumber() <= 0) {
+            if (m_playing) {
+                pause();
+                std::fprintf(stderr,
+                    "[sim] end of simulation reached at t=%.2f s (step %lld)\n",
+                    libsumo::Simulation::getTime(),
+                    static_cast<long long>(m_stepCount));
+                std::fflush(stderr);
+            }
         }
     } catch (const std::exception& e) {
         emit errorOccurred(QString::fromUtf8(e.what()));

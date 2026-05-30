@@ -38,6 +38,7 @@ struct SimSnapshot {
     std::vector<std::string>  type_ids;           // vType id per registry index
     std::vector<std::uint8_t> rgba;          // r,g,b,a per vehicle (built from type-color cache)
     std::vector<float>        veh_lengths;   // f32[N] body length in meters (per-type)
+    std::vector<float>        veh_widths;    // f32[N] body width  in meters (per-type)
 
     // ---- agents (persons + containers) -----------------------------------
     std::vector<std::string> person_ids;

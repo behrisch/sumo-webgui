@@ -190,14 +190,16 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
     m_angVbo.reset(makeDyn(sizeof(float)));
     m_colVbo.reset(makeDyn(4));
     m_lenVbo.reset(makeDyn(sizeof(float)));
+    m_wdtVbo.reset(makeDyn(sizeof(float)));
     m_posCapacityBytes = 8 * sizeof(float);
     m_angCapacityBytes = sizeof(float);
     m_colCapacityBytes = 4;
     m_lenCapacityBytes = sizeof(float);
+    m_wdtCapacityBytes = sizeof(float);
 
-    // Uniform buffer: mat4 proj. std140 = 64 bytes.
+    // Uniform buffer: mat4 proj (64) + vec4 minSize (16). std140 = 80 bytes.
     m_ubuf.reset(rhi->newBuffer(QRhiBuffer::Dynamic,
-                                QRhiBuffer::UniformBuffer, 64));
+                                QRhiBuffer::UniformBuffer, 80));
     m_ubuf->create();
 
     m_srb.reset(rhi->newShaderResourceBindings());
@@ -228,6 +230,7 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
         { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 2: angle
         { 4 * sizeof(quint8),  QRhiVertexInputBinding::PerInstance },  // 3: rgba
         { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 4: length
+        { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 5: width
     });
     layout.setAttributes({
         { 0, 0, QRhiVertexInputAttribute::Float2,    0 },
@@ -236,6 +239,7 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
         { 2, 2, QRhiVertexInputAttribute::Float,     0 },
         { 3, 3, QRhiVertexInputAttribute::UNormByte4, 0 },
         { 4, 4, QRhiVertexInputAttribute::Float,     0 },
+        { 5, 6, QRhiVertexInputAttribute::Float,     0 },  // per-instance width
     });
 
     m_pipeline->setVertexInputLayout(layout);
@@ -258,6 +262,7 @@ void VehicleLayerRhi::setSnapshot(const SimSnapshotPtr& snap) {
         m_angStaging.clear();
         m_colStaging.clear();
         m_lenStaging.clear();
+        m_wdtStaging.clear();
         m_uploadDirty = true;
         return;
     }
@@ -281,6 +286,8 @@ void VehicleLayerRhi::setSnapshot(const SimSnapshotPtr& snap) {
     m_colStaging.assign(snap->rgba.begin(), snap->rgba.end());
     m_lenStaging.assign(snap->veh_lengths.begin(), snap->veh_lengths.end());
     if (m_lenStaging.size() < n) m_lenStaging.resize(n, 5.0f);
+    m_wdtStaging.assign(snap->veh_widths.begin(), snap->veh_widths.end());
+    if (m_wdtStaging.size() < n) m_wdtStaging.resize(n, 1.8f);
 
     m_instanceCount = n;
     m_uploadDirty   = true;
@@ -325,8 +332,14 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
         m_uploadQuad = false;
     }
 
-    // Upload projection matrix every frame; cheap (64 B).
-    batch->updateDynamicBuffer(m_ubuf.get(), 0, 64, m_projStaging);
+    // Upload projection + min-size every frame; cheap (80 B std140 block).
+    // Layout: float[16] proj, float[4] minSize.
+    {
+        float ubo[20];
+        std::memcpy(ubo, m_projStaging, 16 * sizeof(float));
+        std::memcpy(ubo + 16, m_minSize, 4 * sizeof(float));
+        batch->updateDynamicBuffer(m_ubuf.get(), 0, sizeof(ubo), ubo);
+    }
 
     if (!m_uploadDirty || m_instanceCount == 0) return;
 
@@ -334,6 +347,7 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     const std::size_t angBytes = m_angStaging.size() * sizeof(float);
     const std::size_t colBytes = m_colStaging.size();
     const std::size_t lenBytes = m_lenStaging.size() * sizeof(float);
+    const std::size_t wdtBytes = m_wdtStaging.size() * sizeof(float);
 
     ensureCapacity(m_rhi, m_posVbo, m_posCapacityBytes, posBytes,
                    QRhiBuffer::VertexBuffer);
@@ -342,6 +356,8 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     ensureCapacity(m_rhi, m_colVbo, m_colCapacityBytes, colBytes,
                    QRhiBuffer::VertexBuffer);
     ensureCapacity(m_rhi, m_lenVbo, m_lenCapacityBytes, lenBytes,
+                   QRhiBuffer::VertexBuffer);
+    ensureCapacity(m_rhi, m_wdtVbo, m_wdtCapacityBytes, wdtBytes,
                    QRhiBuffer::VertexBuffer);
 
     batch->updateDynamicBuffer(m_posVbo.get(), 0,
@@ -356,12 +372,20 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     batch->updateDynamicBuffer(m_lenVbo.get(), 0,
                                static_cast<quint32>(lenBytes),
                                m_lenStaging.data());
+    batch->updateDynamicBuffer(m_wdtVbo.get(), 0,
+                               static_cast<quint32>(wdtBytes),
+                               m_wdtStaging.data());
 
     m_uploadDirty = false;
 }
 
 void VehicleLayerRhi::setProjection(const float* projectionMatColMajor) {
     std::memcpy(m_projStaging, projectionMatColMajor, 16 * sizeof(float));
+}
+
+void VehicleLayerRhi::setMinSize(float minLengthMeters, float minWidthMeters) {
+    m_minSize[0] = minLengthMeters;
+    m_minSize[1] = minWidthMeters;
 }
 
 void VehicleLayerRhi::render(QRhiCommandBuffer* cb) {
@@ -376,8 +400,9 @@ void VehicleLayerRhi::render(QRhiCommandBuffer* cb) {
         { m_angVbo.get(),  0 },
         { m_colVbo.get(),  0 },
         { m_lenVbo.get(),  0 },
+        { m_wdtVbo.get(),  0 },
     };
-    cb->setVertexInput(0, 5, bindings);
+    cb->setVertexInput(0, 6, bindings);
     cb->draw(static_cast<quint32>(m_shapeVertCount),
              static_cast<quint32>(m_instanceCount));
 }

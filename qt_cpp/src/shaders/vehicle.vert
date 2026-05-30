@@ -9,9 +9,11 @@ layout(location = 2) in float a_angle_navi;  // per-instance navi-degrees (CW fr
 layout(location = 3) in vec4  a_color;       // per-instance rgba (normalised)
 layout(location = 4) in float a_length;      // per-instance body length (meters)
 layout(location = 5) in vec4  a_tint;        // per-vertex tint multiplier (UNorm)
+layout(location = 6) in float a_width;       // per-instance body width (meters)
 
 layout(std140, binding = 0) uniform Ubuf {
     mat4 proj;
+    vec4 min_size;  // x = min length (m), y = min width (m), z/w = pad
 } u;
 
 layout(location = 0) out vec4 v_color;
@@ -23,10 +25,14 @@ void main() {
     float rad = radians(90.0 - a_angle_navi);
     float c = cos(rad);
     float s = sin(rad);
-    // Scale the unit local mesh: x along heading by per-instance length, y
-    // by a fixed half-width of 1 m. a_pos is the center of the FRONT bumper,
+    // Scale the unit local mesh: x along heading by per-instance length, y by
+    // per-instance half-width. Clamped to u.min_size so vehicles stay legible
+    // at low zoom (mirrors ecal `vehicleMinPixels`; caller computes meters
+    // per N pixels from the camera). a_pos is the centre of the FRONT bumper
     // so x runs from -length (rear) to 0 (front).
-    vec2 scaled = vec2(a_local.x * a_length, a_local.y);
+    float L = max(a_length, u.min_size.x);
+    float W = max(a_width,  u.min_size.y);
+    vec2 scaled = vec2(a_local.x * L, a_local.y * W * 0.5);
     vec2 rotated = vec2(c * scaled.x - s * scaled.y,
                         s * scaled.x + c * scaled.y);
     vec2 world = a_pos + rotated;

@@ -2,6 +2,8 @@
 
 #include <QAction>
 #include <QComboBox>
+#include <QDateTime>
+#include <QDockWidget>
 #include <QEvent>
 #include <QFileDialog>
 #include <QHideEvent>
@@ -9,6 +11,7 @@
 #include <QMenuBar>
 #include <QPainter>
 #include <QPixmap>
+#include <QPlainTextEdit>
 #include <QPolygonF>
 #include <QShowEvent>
 #include <QSlider>
@@ -19,6 +22,7 @@
 #include <QToolBar>
 
 #include "NetworkView.h"
+#include "sim/LogCapture.h"
 #include "sim/SimWorker.h"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -37,7 +41,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_sim, &SimWorker::networkReady, m_view, &NetworkView::setNetwork);
     connect(m_sim, &SimWorker::snapshotReady, m_view, &NetworkView::setSnapshot);
     connect(m_view, &NetworkView::fpsUpdated, this, &MainWindow::onFps);
+    connect(m_view, &NetworkView::cursorWorldPos, this, &MainWindow::onCursor);
     connect(m_sim, &SimWorker::benchmarkReport, this, &MainWindow::onBenchmark);
+    connect(m_sim->logRouter(), &LogRouter::logged, this, &MainWindow::onLog);
     m_view->setRenderPendingFlag(m_sim->renderPendingFlag());
     m_simThread->start();
 }
@@ -64,6 +70,25 @@ void MainWindow::buildMenusAndToolbar() {
     auto* resetAct = viewMenu->addAction(tr("&Reset view"));
     resetAct->setShortcut(QKeySequence(tr("Ctrl+0")));
     connect(resetAct, &QAction::triggered, m_view, &NetworkView::resetView);
+
+    // Dockable log panel for libsumo MsgHandler output (info/warn/error).
+    // Built here so the toggle action can live in the View menu next to
+    // Reset View.
+    m_logDock = new QDockWidget(tr("Log"), this);
+    m_logDock->setObjectName(QStringLiteral("logDock"));
+    m_logDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    m_logPanel = new QPlainTextEdit(m_logDock);
+    m_logPanel->setReadOnly(true);
+    m_logPanel->setMaximumBlockCount(2000);  // cap memory; oldest lines drop
+    {
+        QFont f = m_logPanel->font();
+        f.setFamily(QStringLiteral("monospace"));
+        f.setStyleHint(QFont::Monospace);
+        m_logPanel->setFont(f);
+    }
+    m_logDock->setWidget(m_logPanel);
+    addDockWidget(Qt::BottomDockWidgetArea, m_logDock);
+    viewMenu->addAction(m_logDock->toggleViewAction());
 
     auto* toolbar = addToolBar(tr("Main"));
     toolbar->setMovable(false);
@@ -168,6 +193,28 @@ void MainWindow::buildMenusAndToolbar() {
     });
 
     toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr("  Max fps: "), this));
+    auto* fpsCombo = new QComboBox(this);
+    fpsCombo->addItem(tr("uncapped"), 0);
+    fpsCombo->addItem(tr("10"),  10);
+    fpsCombo->addItem(tr("20"),  20);
+    fpsCombo->addItem(tr("30"),  30);
+    fpsCombo->addItem(tr("60"),  60);
+    fpsCombo->addItem(tr("120"), 120);
+    fpsCombo->setToolTip(tr(
+        "Cap the snapshot-driven render refresh rate. Mirrors ecal_deck's "
+        "MAX_PUBLISH_FPS so the qt_cpp vs ecal_deck perf comparison can be "
+        "pinned to the same frame budget. User pan/zoom is never throttled."));
+    toolbar->addWidget(fpsCombo);
+    connect(fpsCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this, fpsCombo](int idx) {
+        const int fps = fpsCombo->itemData(idx).toInt();
+        m_view->setMaxFps(fps);
+    });
+
+    toolbar->addSeparator();
     toolbar->addAction(resetAct);
 
     // Per-layer visibility toggles. Each checkable QAction drives both the
@@ -203,6 +250,9 @@ void MainWindow::buildMenusAndToolbar() {
 void MainWindow::buildStatusBar() {
     m_status = new QLabel(tr("Ready."), this);
     statusBar()->addWidget(m_status, 1);
+    m_cursorLbl = new QLabel(tr("—"), this);
+    m_cursorLbl->setToolTip(tr("Cursor world coordinates (SUMO XY in meters)"));
+    statusBar()->addPermanentWidget(m_cursorLbl);
     m_benchLbl = new QLabel(tr("—"), this);
     m_benchLbl->setToolTip(tr("Rolling steps/s, snapshots/s, skip rate, avg "
                               "wall-time per sim step and per snapshot build"));
@@ -264,6 +314,25 @@ void MainWindow::onBenchmark(double stepsPerSec, double snapshotsPerSec,
                             .arg(skipRate * 100, 0, 'f', 1)
                             .arg(avgStepMs,      0, 'f', 2)
                             .arg(avgBuildMs,     0, 'f', 2));
+}
+
+void MainWindow::onCursor(double x, double y) {
+    m_cursorLbl->setText(tr("xy: %1, %2 m").arg(x, 0, 'f', 1).arg(y, 0, 'f', 1));
+}
+
+void MainWindow::onLog(int level, const QString& text) {
+    static const char* const kLabel[3] = {"INFO", "WARN", "ERR "};
+    static const char* const kColor[3] = {"#cccccc", "#e0b040", "#e05050"};
+    const int lvl = (level < 0 || level > 2) ? 0 : level;
+    const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("hh:mm:ss.zzz"));
+    // HTML so we can colour the level tag without staining the message.
+    const QString html = QStringLiteral(
+        "<span style=\"color:#888\">%1</span> "
+        "<span style=\"color:%2;font-weight:bold\">%3</span> "
+        "<span style=\"color:%4\">%5</span>")
+            .arg(ts, kColor[lvl], QString::fromUtf8(kLabel[lvl]),
+                 kColor[lvl], text.toHtmlEscaped());
+    m_logPanel->appendHtml(html);
 }
 
 // ---- window visibility -> worker extraction gating ------------------------
