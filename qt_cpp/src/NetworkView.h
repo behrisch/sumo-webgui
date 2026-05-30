@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Camera.h"
+#include "layers/VehicleLayerRhi.h"
 #include "rhi_compat/RhiWidgetBase.h"
 #include "rhi_compat/StaticTrisRhi.h"
 #include "rhi_compat/TrisPasses.h"
@@ -14,7 +15,6 @@
 struct NetworkGeometry;
 
 class NetworkOverlayWidget;
-class VehicleLayerRhi;
 class PersonLayerRhi;
 class POILayerRhi;
 class TLSLayerRhi;
@@ -33,6 +33,7 @@ public slots:
     void resetView();
     void setFollowSelected();
     void clearFollow();
+    void setVehicleShape(int shape);  // 0=Rect, 1=Triangle, 2=Car, 3=Circle
 
 signals:
     void fpsUpdated(double fps);
@@ -99,6 +100,12 @@ private:
     std::unique_ptr<PersonLayerRhi>  m_personLayer;
     std::unique_ptr<POILayerRhi>     m_poiLayer;
     std::unique_ptr<TLSLayerRhi>     m_tlsLayer;
+
+    // Shape requested via setVehicleShape before m_vehicleLayer exists.
+    // Applied at the top of initialize() so a UI selection made during
+    // MainWindow construction (i.e. before the first render pass) actually
+    // takes effect.
+    VehicleLayerRhi::Shape m_pendingVehicleShape = VehicleLayerRhi::Shape::Rectangle;
 
     NetworkOverlayWidget* m_overlay = nullptr;
 

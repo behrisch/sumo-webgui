@@ -130,6 +130,39 @@ void MainWindow::buildMenusAndToolbar() {
     });
 
     toolbar->addSeparator();
+    toolbar->addWidget(new QLabel(tr("  Vehicles: "), this));
+    auto* shapeCombo = new QComboBox(this);
+    shapeCombo->addItem(tr("Rectangle"));
+    shapeCombo->addItem(tr("Triangle"));
+    shapeCombo->addItem(tr("Car"));
+    shapeCombo->addItem(tr("Circle"));
+    shapeCombo->setCurrentIndex(2);  // Car looks best by default
+    toolbar->addWidget(shapeCombo);
+    connect(shapeCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            m_view,
+            &NetworkView::setVehicleShape);
+    // Set the initial shape so the layer doesn't have to fall back to its
+    // own default before the user touches the combo.
+    QMetaObject::invokeMethod(m_view, "setVehicleShape", Qt::QueuedConnection,
+                              Q_ARG(int, shapeCombo->currentIndex()));
+
+    auto* vehColor = new QComboBox(this);
+    vehColor->addItem(tr("by type"));
+    vehColor->addItem(tr("by speed"));
+    vehColor->addItem(tr("by waiting time"));
+    vehColor->addItem(tr("by CO2"));
+    vehColor->addItem(tr("by fuel"));
+    toolbar->addWidget(vehColor);
+    connect(vehColor,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+        QMetaObject::invokeMethod(
+            m_sim, "setVehicleColorMode", Qt::QueuedConnection, Q_ARG(int, idx));
+    });
+
+    toolbar->addSeparator();
     toolbar->addAction(resetAct);
 
     auto* followAct = toolbar->addAction(tr("Follow selected"));

@@ -33,6 +33,9 @@ struct SimSnapshot {
     std::vector<std::string> ids;        // human-readable ids (parsed once)
     std::string              veh_positions;  // packed f64[3*N] (x,y,z)
     std::string              veh_angles;     // packed f32[N]   (navi-degrees)
+    std::string              veh_speeds;     // packed f32[N]   (m/s, from Batch)
+    std::vector<std::uint32_t> veh_type_indices;  // u32[N] index into type_ids
+    std::vector<std::string>  type_ids;           // vType id per registry index
     std::vector<std::uint8_t> rgba;          // r,g,b,a per vehicle (built from type-color cache)
     std::vector<float>        veh_lengths;   // f32[N] body length in meters (per-type)
 

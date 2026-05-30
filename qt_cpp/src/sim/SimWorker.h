@@ -26,6 +26,7 @@ public slots:
     void pause();
     void setDelayMs(int ms);
     void setColorMode(int mode);  // 0=None, 1=Speed, 2=Occupancy, 3=Halting
+    void setVehicleColorMode(int mode);  // 0=Type, 1=Speed, 2=Waiting, 3=CO2, 4=Fuel
     void shutdown();
 
 signals:
@@ -55,5 +56,6 @@ private:
     bool    m_playing    = false;
     qint64  m_stepCount  = 0;
     int     m_colorMode  = 0;
+    int     m_vehicleColorMode = 0;
     std::shared_ptr<NetworkGeometry> m_ng;
 };

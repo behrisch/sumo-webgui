@@ -273,16 +273,63 @@ Rendering:
 - See "Graphics API choice — Qt RHI migration" section for details.
 
 ### Phase 5 — Polish & parity QA
-- Picking / vehicle tooltip.
-- Log panel.
-- Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.
-- Benchmark: extend `ecal_deck/BENCHMARKING.md` (or add a sibling
-  `qt_cpp/BENCHMARKING.md`) with FPS / CPU / RSS numbers for the same scenario,
-  same step delay, same window size.
+
+Open items needed to reach visual + functional parity with `ecal_deck`:
+
+Vehicle rendering:
+- [x] Vehicle shape selector: `rectangle | triangle | car | circle` (matches
+      `ecal_deck/frontend/src/layers/vehicleShapes.ts`). Mesh swap happens
+      in `VehicleLayerRhi::setShape()`; toolbar combo in `MainWindow`.
+      The `car` shape uses the realistic 3-layer geometry (body polygon +
+      darker front-bumper overlay + black windshield strip) with a
+      per-vertex tint multiplier (UNormByte4 at attribute location 5).
+      `NetworkView` caches the requested shape in `m_pendingVehicleShape`
+      and applies it inside `initialize()` so a UI selection made before
+      the first paint (when `m_vehicleLayer` doesn't exist yet) still
+      takes effect on the first frame.
+- [ ] Per-type vehicle width (parallel to the already-implemented per-type
+      length): extend `TypeColor`, add a 6th per-instance attribute, drop
+      the hard-coded 1 m half-width in `vehicle.vert`.
+- [ ] Min-pixel sizing so vehicles stay visible when zoomed out (mirrors
+      ecal's `vehicleMinPixels`).
+- [x] Dynamic per-vehicle coloring: `by type | speed | waiting_time |
+      co2_emission | fuel_consumption`. Implemented in `SimWorker`:
+      requests the extra attribute column via `Batch::fillVehicles({...})`
+      and remaps to a viridis-style ramp. Toolbar combo in `MainWindow`.
+
+Picking / info:
+- [x] Vehicle / person / TLS / polygon / POI / lane / junction picking
+      (already implemented in `NetworkView::pickAt`).
+- [x] Enrich the picked-vehicle info box with type id and speed
+      (`SimSnapshot` now carries `veh_speeds`, `veh_type_indices`,
+      `type_ids`). Route + vClass + waiting time still TODO (would need
+      extra Batch attrs or a per-pick `Vehicle::getRoute()` call).
+
+UI controls (already in toolbar: play/pause/step/delay/edge color mode):
+- [x] Vehicle shape combo.
+- [x] Vehicle color mode combo.
+- [ ] Layer visibility checkboxes (edges, junctions, TLS, vehicles,
+      persons, polygons, POIs, detectors, stops, edge data) — matches
+      `VisibilityPanel` in the frontend.
+- [ ] Reset view button (binding exists, surface in toolbar).
+- [ ] Status bar: cursor world coords (XY and lon/lat in geo mode).
+- [ ] Color scale legend overlay for edge-data coloring (the overlay
+      widget already exists; legend painter is a TODO there).
+
+Diagnostics:
+- [ ] Log panel for libsumo warnings + GUI events (subscribe to the
+      `LogMessage` flow once equivalent is exposed via libsumo; for now
+      capture `MsgHandler` callbacks).
+
+Benchmark / QA:
+- [ ] Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.
+- [ ] Sibling `qt_cpp/BENCHMARKING.md` with FPS / CPU / RSS numbers.
 
 ### Phase 6 — Optional extras
 - MSAA toggle.
-- Basemap tiles in geo mode.
+- Basemap tiles in geo mode (deferred — would need a Qt-side XYZ tile
+  fetcher + texture cache; no easy off-the-shelf path on Qt 6.4. Re-evaluate
+  on Qt 6.8+ where `QQuickWidget` + a QML MapView could be embedded.)
 - Tauri-equivalent packaging (AppImage / .deb).
 - Windows + macOS builds if trivial.
 

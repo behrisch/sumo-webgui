@@ -30,6 +30,17 @@ QT_END_NAMESPACE
 // upstream (TODO once the migration touches geo-referenced rendering).
 class VehicleLayerRhi {
 public:
+    // Mesh selector for the instanced body geometry. Mirrors the
+    // `VehicleShape` registry in ecal_deck/frontend/src/layers/vehicleShapes.ts.
+    //   Rectangle: simple axis-aligned body (legacy default).
+    //   Triangle:  isoceles, point forward (anchor at the tip).
+    //   Car:       realistic car silhouette: body polygon + darker front
+    //              bumper overlay + black windshield strip, blended via a
+    //              per-vertex tint multiplier (255=body color, 128=darker,
+    //              0=black). Matches the deck.gl SimpleMeshLayer geometry.
+    //   Circle:    radial fan, useful for low-zoom dots / non-car classes.
+    enum class Shape { Rectangle, Triangle, Car, Circle };
+
     VehicleLayerRhi();
     ~VehicleLayerRhi();
 
@@ -56,6 +67,10 @@ public:
     // Stash the projection. Uploaded to the uniform buffer in the next
     // resourceUpdate() call. Call this before resourceUpdate().
     void setProjection(const float* projectionMatColMajor);
+
+    // Swap the per-vehicle body mesh. Cheap (rebuilds a small static VBO on
+    // the next resourceUpdate). Default is Rectangle.
+    void setShape(Shape s);
 
     // Record the draw into `cb`. Caller has already started a render pass.
     void render(QRhiCommandBuffer* cb);
@@ -88,7 +103,16 @@ private:
     std::size_t m_colCapacityBytes = 0;
     std::size_t m_lenCapacityBytes = 0;
 
-    bool m_uploadQuad   = true;  // one-time static upload
+    bool m_uploadQuad   = true;  // one-time / on shape change static upload
     bool m_uploadDirty  = false; // new snapshot waiting
     bool m_initialized  = false;
+
+    // Active shape + the CPU mesh data (regenerated on setShape).
+    Shape                m_shape = Shape::Rectangle;
+    // Interleaved (pos.xy, tint, 3 pad) — 12 B per vertex. Defined in the
+    // .cpp; we use std::vector<std::byte> here to keep the header free of
+    // the private V struct.
+    std::vector<std::byte> m_shapeVerts;
+    std::size_t          m_shapeVertCount = 0;
+    std::size_t          m_shapeCapacityBytes = 0;
 };

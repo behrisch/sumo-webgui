@@ -1,6 +1,7 @@
 #include "VehicleLayerRhi.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 
 #include <QtCore/QFile>
@@ -8,18 +9,114 @@
 
 namespace {
 
-// Unit quad in local vehicle frame: x in [-1, 0] (rear at -1, front at 0),
-// y in [-1, +1] (half-width). The shader scales x by the per-instance length
-// (so the front edge sits exactly on the SUMO-reported front-bumper position)
-// and leaves y at a fixed half-width of 1 m.
-constexpr std::array<float, 12> kQuad = {
-    -1.f, -1.f,
-     0.f, -1.f,
-     0.f,  1.f,
-    -1.f, -1.f,
-     0.f,  1.f,
-    -1.f,  1.f,
-};
+// Build a triangle list for the requested body shape in the unit local frame:
+//   x ∈ [-1, 0] (rear at -1, front at 0; SUMO anchor = front-bumper centre)
+//   y ∈ [-1, +1] (half-width 1 m; shader scales x by per-instance length)
+//
+// Each vertex is interleaved as { float x, float y, uint8 tint, _, _, _ } —
+// 12 bytes / vertex. The 3 padding bytes round the stride to a multiple of
+// 4 which keeps every backend happy (Vulkan/Metal/D3D12). The shader reads
+// the tint as a UNormByte4 vec4 and multiplies the per-instance color by
+// tint.r so 255 = body color, 128 = half, 0 = black (windshield).
+//
+// All shapes are emitted CCW so a future depth/winding state would treat
+// them uniformly; QRhi cull mode is None so winding is currently irrelevant.
+struct V { float x, y; std::uint8_t t, _a, _b, _c; };
+static_assert(sizeof(V) == 12, "VehicleLayerRhi vertex must be 12 bytes");
+
+void buildShapeMesh(VehicleLayerRhi::Shape s, std::vector<std::byte>& out) {
+    std::vector<V> verts;
+    auto push = [&](float x, float y, std::uint8_t t) {
+        verts.push_back(V{x, y, t, 0, 0, 0});
+    };
+    auto tri = [&](float ax, float ay, float bx, float by, float cx, float cy,
+                   std::uint8_t t) {
+        push(ax, ay, t); push(bx, by, t); push(cx, cy, t);
+    };
+    auto fan = [&](const float (*pts)[2], int n, std::uint8_t t) {
+        for (int i = 1; i < n - 1; ++i) {
+            tri(pts[0][0], pts[0][1],
+                pts[i][0], pts[i][1],
+                pts[i + 1][0], pts[i + 1][1], t);
+        }
+    };
+
+    switch (s) {
+    case VehicleLayerRhi::Shape::Rectangle: {
+        tri(-1.f, -1.f,  0.f, -1.f,  0.f,  1.f, 255);
+        tri(-1.f, -1.f,  0.f,  1.f, -1.f,  1.f, 255);
+        break;
+    }
+    case VehicleLayerRhi::Shape::Triangle: {
+        tri(-1.f, -1.f,  0.f,  0.f, -1.f,  1.f, 255);
+        break;
+    }
+    case VehicleLayerRhi::Shape::Car: {
+        // ---- 1. Body polygon (per-instance color, tint=255) --------------
+        // ecal _CAR_BODY transposed to our axes:
+        //   ecal (px, py) -> our (-px, +py).
+        // Centroid first (anchor for the fan), then the outline CCW.
+        static const float body[][2] = {
+            { -0.50f,  0.00f},  // centroid (mid-body)
+            {  0.00f,  0.00f},  // front bumper centre
+            {  0.00f,  0.30f},
+            { -0.08f,  0.44f},
+            { -0.25f,  0.50f},
+            { -0.95f,  0.50f},
+            { -1.00f,  0.40f},
+            { -1.00f, -0.40f},
+            { -0.95f, -0.50f},
+            { -0.25f, -0.50f},
+            { -0.08f, -0.44f},
+            {  0.00f, -0.30f},
+            {  0.00f,  0.00f},  // close
+        };
+        fan(body, int(sizeof(body) / sizeof(body[0])), 255);
+
+        // ---- 2. Darker front-bumper overlay (tint=128) ------------------
+        // ecal _CAR_BODY_FRONT, same transposition.
+        static const float front[][2] = {
+            { -0.10f,  0.00f},   // centroid
+            { -0.025f, 0.00f},
+            { -0.025f, 0.25f},
+            { -0.27f,  0.40f},
+            { -0.27f, -0.40f},
+            { -0.025f,-0.25f},
+            { -0.025f, 0.00f},   // close
+        };
+        fan(front, int(sizeof(front) / sizeof(front[0])), 128);
+
+        // ---- 3. Windshield strip (tint=0 -> black) ----------------------
+        // ecal _CAR_WINDSHIELD.
+        static const float windshield[][2] = {
+            { -0.35f,  0.00f},   // centroid
+            { -0.30f,  0.00f},
+            { -0.30f,  0.40f},
+            { -0.43f,  0.30f},
+            { -0.43f, -0.30f},
+            { -0.30f, -0.40f},
+            { -0.30f,  0.00f},   // close
+        };
+        fan(windshield, int(sizeof(windshield) / sizeof(windshield[0])), 0);
+        break;
+    }
+    case VehicleLayerRhi::Shape::Circle: {
+        const int kSeg = 24;
+        const float cx = -0.5f, cy = 0.0f, r = 0.5f;
+        for (int i = 0; i < kSeg; ++i) {
+            const float a0 = (2.f * float(M_PI) * i) / kSeg;
+            const float a1 = (2.f * float(M_PI) * (i + 1)) / kSeg;
+            tri(cx, cy,
+                cx + r * std::cos(a0), cy + r * std::sin(a0),
+                cx + r * std::cos(a1), cy + r * std::sin(a1), 255);
+        }
+        break;
+    }
+    }
+
+    out.resize(verts.size() * sizeof(V));
+    if (!verts.empty()) std::memcpy(out.data(), verts.data(), out.size());
+}
 
 QShader loadShader(const QString& path) {
     QFile f(path);
@@ -45,9 +142,18 @@ void VehicleLayerRhi::release() {
     m_posVbo.reset();
     m_quadVbo.reset();
     m_posCapacityBytes = m_angCapacityBytes = m_colCapacityBytes = m_lenCapacityBytes = 0;
+    m_shapeCapacityBytes = 0;
     m_uploadQuad   = true;
     m_initialized  = false;
     m_rhi = nullptr;
+}
+
+void VehicleLayerRhi::setShape(Shape s) {
+    if (m_shape == s && !m_shapeVerts.empty()) return;
+    m_shape = s;
+    buildShapeMesh(m_shape, m_shapeVerts);
+    m_shapeVertCount = m_shapeVerts.size() / sizeof(V);
+    m_uploadQuad = true;
 }
 
 void VehicleLayerRhi::initialize(QRhi* rhi,
@@ -57,11 +163,19 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
     release();
     m_rhi = rhi;
 
-    // Static quad buffer (immutable).
-    m_quadVbo.reset(rhi->newBuffer(QRhiBuffer::Immutable,
-                                   QRhiBuffer::VertexBuffer,
-                                   static_cast<quint32>(kQuad.size() * sizeof(float))));
+    // Ensure we have a body mesh to upload (default shape if setShape was
+    // not called yet).
+    if (m_shapeVerts.empty()) {
+        buildShapeMesh(m_shape, m_shapeVerts);
+        m_shapeVertCount = m_shapeVerts.size() / sizeof(V);
+    }
+
+    // Shape buffer is Dynamic so setShape can rebuild on the fly.
+    const quint32 shapeBytes = static_cast<quint32>(m_shapeVerts.size());
+    m_quadVbo.reset(rhi->newBuffer(QRhiBuffer::Dynamic,
+                                   QRhiBuffer::VertexBuffer, shapeBytes));
     m_quadVbo->create();
+    m_shapeCapacityBytes = shapeBytes;
 
     // Per-instance buffers (Dynamic so we can resize/upload every frame).
     // Start with a small placeholder size; grow on demand.
@@ -109,7 +223,7 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
 
     QRhiVertexInputLayout layout;
     layout.setBindings({
-        { 2 * sizeof(float),   QRhiVertexInputBinding::PerVertex },    // 0: quad
+        { sizeof(V),           QRhiVertexInputBinding::PerVertex },     // 0: pos + tint
         { 2 * sizeof(float),   QRhiVertexInputBinding::PerInstance },  // 1: pos
         { sizeof(float),       QRhiVertexInputBinding::PerInstance },  // 2: angle
         { 4 * sizeof(quint8),  QRhiVertexInputBinding::PerInstance },  // 3: rgba
@@ -117,6 +231,7 @@ void VehicleLayerRhi::initialize(QRhi* rhi,
     });
     layout.setAttributes({
         { 0, 0, QRhiVertexInputAttribute::Float2,    0 },
+        { 0, 5, QRhiVertexInputAttribute::UNormByte4, 2 * sizeof(float) },  // per-vertex tint
         { 1, 1, QRhiVertexInputAttribute::Float2,    0 },
         { 2, 2, QRhiVertexInputAttribute::Float,     0 },
         { 3, 3, QRhiVertexInputAttribute::UNormByte4, 0 },
@@ -195,7 +310,18 @@ void VehicleLayerRhi::resourceUpdate(QRhiResourceUpdateBatch* batch) {
     if (!m_initialized) return;
 
     if (m_uploadQuad) {
-        batch->uploadStaticBuffer(m_quadVbo.get(), kQuad.data());
+        const std::size_t needed = m_shapeVerts.size();
+        if (needed > m_shapeCapacityBytes) {
+            const std::size_t newCap = std::max(needed, m_shapeCapacityBytes * 2);
+            m_quadVbo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic,
+                                             QRhiBuffer::VertexBuffer,
+                                             static_cast<quint32>(newCap)));
+            m_quadVbo->create();
+            m_shapeCapacityBytes = newCap;
+        }
+        batch->updateDynamicBuffer(m_quadVbo.get(), 0,
+                                   static_cast<quint32>(needed),
+                                   m_shapeVerts.data());
         m_uploadQuad = false;
     }
 
@@ -252,5 +378,6 @@ void VehicleLayerRhi::render(QRhiCommandBuffer* cb) {
         { m_lenVbo.get(),  0 },
     };
     cb->setVertexInput(0, 5, bindings);
-    cb->draw(6, static_cast<quint32>(m_instanceCount));
+    cb->draw(static_cast<quint32>(m_shapeVertCount),
+             static_cast<quint32>(m_instanceCount));
 }

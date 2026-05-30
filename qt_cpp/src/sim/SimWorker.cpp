@@ -78,12 +78,17 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
 
     try {
         // ---- in-engine batched extraction (single C++ loop per section) ----
-        // Vehicle/agent attribute lists are empty: the Qt GUI doesn't paint
-        // by per-vehicle attributes, only by per-lane edge data (handled
-        // separately below via Lane::getLastStepMeanSpeed etc).  Passing
-        // empty vectors here skips the attribute columns entirely.
+        // For vehicle attribute coloring (waiting time / CO2 / fuel) we ask
+        // Batch to fill the corresponding column; speed is always populated.
+        std::vector<std::string> vehAttrs;
+        switch (m_vehicleColorMode) {
+            case 2: vehAttrs = {"waiting_time"};     break;
+            case 3: vehAttrs = {"co2_emission"};     break;
+            case 4: vehAttrs = {"fuel_consumption"}; break;
+            default: break;
+        }
         libsumo::Batch::beginStep();
-        libsumo::Batch::fillVehicles({}, /*geoReferenced=*/false);
+        libsumo::Batch::fillVehicles(vehAttrs, /*geoReferenced=*/false);
         libsumo::Batch::fillAgents(/*geoReferenced=*/false);
         libsumo::Batch::fillTLS();
         const libsumo::BatchBuffers& buf = libsumo::Batch::buffers();
@@ -134,19 +139,73 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
         // for vec2 position; GL_FLOAT for angle, cos/sin computed in shader).
         const std::uint32_t N = buf.veh_count;
         const auto* tidxBuf = reinterpret_cast<const std::uint32_t*>(buf.veh_type_indices.data());
+        const auto* speedBuf = reinterpret_cast<const float*>(buf.veh_speeds.data());
+        const auto* attrBuf = buf.veh_attr_count > 0
+            ? reinterpret_cast<const float*>(buf.veh_attr_vals.data()) : nullptr;
         snap->veh_positions = buf.veh_positions;
         snap->veh_angles    = buf.veh_angles;
+        snap->veh_speeds    = buf.veh_speeds;
         snap->rgba.resize(N * 4);
         snap->veh_lengths.resize(N);
+        snap->veh_type_indices.assign(tidxBuf, tidxBuf + N);
+
+        // Pick the dynamic-coloring source: speed (m/s), waiting_time (s),
+        // co2 (mg/s), or fuel (ml/s).  For "Type" mode we keep the static
+        // per-type color.  Values are normalized to [0,1] against a sensible
+        // upper bound and mapped through a viridis-ish ramp.
+        auto viridis = [](float t, std::uint8_t& r, std::uint8_t& g, std::uint8_t& b) {
+            if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+            // 4-stop ramp: dark blue -> teal -> green -> yellow.
+            static const float stops[5][3] = {
+                {68/255.f, 1/255.f, 84/255.f},
+                {59/255.f, 82/255.f, 139/255.f},
+                {33/255.f, 145/255.f, 140/255.f},
+                {94/255.f, 201/255.f, 98/255.f},
+                {253/255.f, 231/255.f, 37/255.f},
+            };
+            const float s = t * 4.0f;
+            const int i = std::min(3, static_cast<int>(s));
+            const float u = s - i;
+            const float R = stops[i][0] * (1 - u) + stops[i + 1][0] * u;
+            const float G = stops[i][1] * (1 - u) + stops[i + 1][1] * u;
+            const float B = stops[i][2] * (1 - u) + stops[i + 1][2] * u;
+            r = static_cast<std::uint8_t>(R * 255);
+            g = static_cast<std::uint8_t>(G * 255);
+            b = static_cast<std::uint8_t>(B * 255);
+        };
+        // Per-mode normalization caps. Speed: 50 m/s (~180 km/h). Waiting:
+        // 60 s. CO2: 5000 mg/s. Fuel: 5 ml/s.
+        float cap = 1.0f;
+        switch (m_vehicleColorMode) {
+            case 1: cap = 50.0f;   break;
+            case 2: cap = 60.0f;   break;
+            case 3: cap = 5000.0f; break;
+            case 4: cap = 5.0f;    break;
+        }
         for (std::uint32_t i = 0; i < N; ++i) {
             const TypeColor& tc = colorForType(tidxBuf[i]);
-            snap->rgba[i * 4 + 0] = tc.r;
-            snap->rgba[i * 4 + 1] = tc.g;
-            snap->rgba[i * 4 + 2] = tc.b;
+            snap->veh_lengths[i] = tc.length;
+            std::uint8_t r = tc.r, g = tc.g, b = tc.b;
+            if (m_vehicleColorMode != 0) {
+                float v = 0.0f;
+                if (m_vehicleColorMode == 1 && speedBuf) v = speedBuf[i];
+                else if (attrBuf) v = attrBuf[i];
+                viridis(v / cap, r, g, b);
+            }
+            snap->rgba[i * 4 + 0] = r;
+            snap->rgba[i * 4 + 1] = g;
+            snap->rgba[i * 4 + 2] = b;
             snap->rgba[i * 4 + 3] = tc.a;
-            snap->veh_lengths[i]  = tc.length;
         }
         splitIds(buf.veh_ids, N, snap->ids);
+
+        // Type-id table for picking / display (one entry per registered type).
+        const std::uint32_t nTypesNow = libsumo::Batch::typeCount();
+        snap->type_ids.resize(nTypesNow);
+        for (std::uint32_t i = 0; i < nTypesNow; ++i) {
+            try { snap->type_ids[i] = libsumo::Batch::typeId(i); }
+            catch (...) { snap->type_ids[i].clear(); }
+        }
 
         // ---- agents (persons + containers; rendered the same way) ---------
         const std::uint32_t M = buf.agent_count;
@@ -273,6 +332,10 @@ void SimWorker::onTimerTick() {
 
 void SimWorker::setColorMode(int mode) {
     m_colorMode = mode;
+}
+
+void SimWorker::setVehicleColorMode(int mode) {
+    m_vehicleColorMode = mode;
 }
 
 void SimWorker::shutdown() {

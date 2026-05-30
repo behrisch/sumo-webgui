@@ -70,6 +70,8 @@ void NetworkView::initialize(QRhiCommandBuffer*) {
     if (!m_poiLayer)     m_poiLayer     = std::make_unique<POILayerRhi>();
     if (!m_tlsLayer)     m_tlsLayer     = std::make_unique<TLSLayerRhi>();
 
+    // Apply any shape selection made by the UI before the layer existed.
+    m_vehicleLayer->setShape(m_pendingVehicleShape);
     m_vehicleLayer->initialize(r, rp, sc);
     m_personLayer ->initialize(r, rp, sc);
     m_poiLayer    ->initialize(r, rp, sc);
@@ -295,6 +297,20 @@ void NetworkView::resetView() {
     update();
 }
 
+void NetworkView::setVehicleShape(int shape) {
+    using S = VehicleLayerRhi::Shape;
+    S s = S::Rectangle;
+    switch (shape) {
+        case 1: s = S::Triangle; break;
+        case 2: s = S::Car;      break;
+        case 3: s = S::Circle;   break;
+        default: s = S::Rectangle;
+    }
+    m_pendingVehicleShape = s;
+    if (m_vehicleLayer) m_vehicleLayer->setShape(s);
+    update();
+}
+
 void NetworkView::resizeEvent(QResizeEvent* e) {
     rhi_compat::RhiWidgetBase::resizeEvent(e);
     if (m_overlay) m_overlay->setGeometry(rect());
@@ -403,6 +419,22 @@ void NetworkView::pickAt(double pxX, double pxY) {
             best.kind = PickKind::Vehicle;
             best.id = QString::fromStdString(m_snap->ids[bestIdx]);
             best.title = QString("Vehicle  %1").arg(best.id);
+            // Type id (looked up via the registry index that came with the
+            // snapshot).
+            if (bestIdx < m_snap->veh_type_indices.size()) {
+                const std::uint32_t ti = m_snap->veh_type_indices[bestIdx];
+                if (ti < m_snap->type_ids.size() && !m_snap->type_ids[ti].empty()) {
+                    best.lines.push_back(QString("type      %1")
+                        .arg(QString::fromStdString(m_snap->type_ids[ti])));
+                }
+            }
+            // Speed (always populated by libsumo::Batch).
+            if (bestIdx * sizeof(float) + sizeof(float) <= m_snap->veh_speeds.size()) {
+                const auto* sp = reinterpret_cast<const float*>(m_snap->veh_speeds.data());
+                best.lines.push_back(QString("speed     %1 m/s  (%2 km/h)")
+                    .arg(sp[bestIdx], 0, 'f', 2)
+                    .arg(sp[bestIdx] * 3.6f, 0, 'f', 1));
+            }
             best.lines.push_back(QString("position  %1, %2 m")
                 .arg(vpos[bestIdx * 3 + 0], 0, 'f', 1)
                 .arg(vpos[bestIdx * 3 + 1], 0, 'f', 1));
