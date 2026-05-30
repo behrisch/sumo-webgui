@@ -18,21 +18,31 @@ int main(int argc, char** argv) {
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
-        "Native Qt6 + OpenGL viewer for SUMO simulations (libsumo-coupled).");
+        "Native Qt6 + RHI viewer for SUMO simulations (libsumo-coupled).");
     parser.addHelpOption();
     QCommandLineOption sumocfgOpt(
         QStringList{"s", "sumocfg"},
         "Path to a .sumocfg file to open on startup.",
         "path");
     parser.addOption(sumocfgOpt);
+    parser.addPositionalArgument("sumocfg",
+        "Path to a .sumocfg file to open on startup (positional alias for -s).",
+        "[sumocfg]");
     parser.process(app);
 
     MainWindow win;
     win.resize(1280, 800);
     win.show();
 
+    QString cfg;
     if (parser.isSet(sumocfgOpt)) {
-        win.loadSumocfg(parser.value(sumocfgOpt));
+        cfg = parser.value(sumocfgOpt);
+    } else {
+        const QStringList pos = parser.positionalArguments();
+        if (!pos.isEmpty()) cfg = pos.first();
+    }
+    if (!cfg.isEmpty()) {
+        win.loadSumocfg(cfg);
     }
 
     return app.exec();

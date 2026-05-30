@@ -148,16 +148,22 @@ the same backend the Python `libsumo` module wraps. This bypasses the TraCI
 socket and avoids the protobuf serialization that dominated the eCAL path's
 publisher CPU.
 
-Per-step data needed by the GUI (mirroring `_build_and_publish_simstep`):
+Per-step data needed by the GUI (mirroring `_build_and_publish_simstep`) is
+extracted in **one batched call per step** via `libsumo::Batch` (see
+`/home/ubuntu/sumo/src/libsumo/Batch.{h,cpp}`, exposed as `traci.batch` in
+SWIG). The Batch module fills typed C++ vectors in-engine in a single sweep,
+avoiding the per-object SWIG marshalling overhead of
+`getAllSubscriptionResults`. It populates:
 
-- `Simulation::getTime()`
-- `Vehicle::getAllSubscriptionResults()` (after subscribing once to position,
-  angle, speed, type, vClass, color, signals, waiting time, lane, etc.)
-- `Person::getAllSubscriptionResults()` (position, angle, type, vClass)
-- `TrafficLight::getAllSubscriptionResults()` (state string)
-- `Edge::getLastStepVehicleNumber` / `getLastStepMeanSpeed` /
-  `getTraveltime` / `getCO2Emission` / etc. for the currently-selected edge
-  attribute (only fetched when an attribute is active, like the publisher does).
+- Vehicles: id, position (xy), angle, speed, type, vClass, color, signals,
+  waiting time, lane.
+- Persons: id, position, angle, type, vClass.
+- Traffic lights: id, current state string.
+- Edge attribute column (only fetched when an attribute is active, like the
+  publisher does) — speed / occupancy / CO2 / etc.
+
+Plus `Simulation::getTime()` for the timestamp. The resulting vectors are
+swapped into the front `SimSnapshot` for the GUI thread to read.
 
 Network geometry (built once per scenario load):
 

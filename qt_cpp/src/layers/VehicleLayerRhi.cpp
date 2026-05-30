@@ -8,17 +8,19 @@
 
 namespace {
 
-// Quad in local vehicle frame: length along +x, width along +y. Same geometry
-// as the OpenGL VehicleLayer.
-constexpr float kHalfLen = 2.5f;
+// Quad in local vehicle frame: length along +x, width along +y. SUMO's
+// Vehicle::getPosition reports the center of the FRONT bumper, so the local
+// quad spans x in [-kLen, 0] (rear at -length, front edge at the anchor) and
+// y in [-kHalfWid, +kHalfWid].
+constexpr float kLen     = 5.0f;
 constexpr float kHalfWid = 1.0f;
 constexpr std::array<float, 12> kQuad = {
-    -kHalfLen, -kHalfWid,
-     kHalfLen, -kHalfWid,
-     kHalfLen,  kHalfWid,
-    -kHalfLen, -kHalfWid,
-     kHalfLen,  kHalfWid,
-    -kHalfLen,  kHalfWid,
+    -kLen, -kHalfWid,
+      0.f, -kHalfWid,
+      0.f,  kHalfWid,
+    -kLen, -kHalfWid,
+      0.f,  kHalfWid,
+    -kLen,  kHalfWid,
 };
 
 QShader loadShader(const QString& path) {
