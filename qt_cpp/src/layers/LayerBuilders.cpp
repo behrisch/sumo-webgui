@@ -157,7 +157,10 @@ std::vector<TrisColorVertex> buildStoppingPlaceVerts(const NetworkGeometry& ng) 
 
 // ---------------------------------------------------------------------------
 std::vector<TrisColorVertex> buildStopLineVerts(const NetworkGeometry& ng) {
-    constexpr float kThickness = 0.7f;
+    // Matches kBarLen in TLSLayerRhi.cpp — both kinds of "lane-end bar"
+    // (uncontrolled stop lines and TLS signals) share the same along-lane
+    // thickness so they read as one visual primitive.
+    constexpr float kThickness = 0.9f;
     const std::size_t n = ng.stopline_count();
     std::vector<TrisColorVertex> verts;
     verts.reserve(n * 6);

@@ -9,7 +9,9 @@
 namespace {
 
 constexpr float kBarLen  = 0.9f;
-constexpr float kBarBack = 1.2f;
+// Place the TLS bar exactly at the lane end (i.e. at the stop line), so
+// signals and uncontrolled stop bars share the same on-screen position.
+constexpr float kBarBack = 0.0f;
 
 constexpr std::array<float, 12> kQuadBase = {
     -0.5f, -0.5f,  0.5f, -0.5f,  0.5f,  0.5f,

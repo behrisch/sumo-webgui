@@ -238,14 +238,13 @@ std::shared_ptr<NetworkGeometry> buildNetworkGeometry() {
                 }
                 ng->tls_ids.push_back(tid);
                 ng->tls_state_index.push_back(static_cast<std::uint32_t>(i));
-
-                if (le) {
-                    ng->stopline_x.push_back(le->x);
-                    ng->stopline_y.push_back(le->y);
-                    ng->stopline_dx.push_back(le->dx);
-                    ng->stopline_dy.push_back(le->dy);
-                    ng->stopline_w.push_back(le->w);
-                }
+                // NOTE: we used to push a stopline bar here as well — same
+                // position, same width — which made every TLS signal render
+                // as two overlapping bars (a coloured TLS bar on top of a
+                // white stop-line bar).  The TLS bar already serves that
+                // purpose; real stop-lines for *uncontrolled* minor
+                // approaches are not yet emitted by this builder (parity
+                // gap vs ecal_deck's `lane_has_stopline`).
             }
         }
     } catch (...) {

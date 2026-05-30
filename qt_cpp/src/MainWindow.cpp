@@ -234,7 +234,7 @@ void MainWindow::buildMenusAndToolbar() {
     toolbar->addWidget(new QLabel(tr("  Show: "), this));
     addLayerToggle(tr("Vehicles"), "setVehiclesVisible", "setVehiclesVisible");
     addLayerToggle(tr("Persons"),  "setAgentsVisible",   "setAgentsVisible");
-    addLayerToggle(tr("TLS"),      "setTLSVisible",      "setTLSVisible");
+    addLayerToggle(tr("Signals & stop lines"), "setTLSVisible", "setTLSVisible");
     addLayerToggle(tr("EdgeData"), "setEdgeDataVisible", "setEdgeDataVisible");
 
     toolbar->addSeparator();

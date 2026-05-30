@@ -261,6 +261,12 @@ Rendering:
 
 ### Phase 3 — Full layer parity ✅
 - Persons, TLS heads, stop lines, stopping places, polygons, detectors.
+  - **Stop-line parity gap**: the qt_cpp builder used to push a stopline
+    bar for every TLS-controlled link, which made signals render as two
+    overlapping bars. That duplicate push has been removed; TLS bars now
+    stand alone. Real stop-lines for uncontrolled minor approaches
+    (`m`/`s`/`w`/`=` link states, like ecal_deck's `lane_has_stopline`)
+    are still TODO in `NetworkGeometry::build`.
 - Rails with sleepers (port logic from `NetworkLayer.ts` carefully — see
   checkpoint 017 for the inverted-tram trick and sleeper sizing).
 - Edge attribute selector + `EdgeDataLayer` with viewport culling and color
@@ -312,11 +318,14 @@ Picking / info:
 UI controls (already in toolbar: play/pause/step/delay/edge color mode):
 - [x] Vehicle shape combo.
 - [x] Vehicle color mode combo.
-- [x] Layer visibility checkboxes — Vehicles / Persons / TLS / EdgeData live
-      in the toolbar. Each toggle drives both `NetworkView::set*Visible`
-      (gates the GPU draw) and `SimWorker::set*Visible` (gates the
-      corresponding `Batch::fill*` so hidden layers cost zero on extraction
-      too). Remaining toggles (junctions, polygons, POIs, detectors, stops)
+- [x] Layer visibility checkboxes — Vehicles / Persons / Signals & stop
+      lines / EdgeData live in the toolbar. The "Signals & stop lines"
+      toggle gates both the dynamic TLS bars and the static stop-line bars
+      under one switch (matches the merged `LaneBarsLayer` in ecal_deck).
+      Each toggle drives both `NetworkView::set*Visible` (gates the GPU
+      draw) and `SimWorker::set*Visible` (gates the corresponding
+      `Batch::fill*` so hidden layers cost zero on extraction too).
+      Remaining toggles (junctions, polygons, POIs, detectors, stops)
       are static/decoration layers; add when needed.
 - [x] Reset view button — toolbar action + `Ctrl+0` shortcut, calls
       `NetworkView::resetView()`.

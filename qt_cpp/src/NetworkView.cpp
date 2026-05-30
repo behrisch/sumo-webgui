@@ -244,7 +244,7 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
     m_stoppingPlace.render(cb, m_passTris);
     m_detector.render(cb, m_passTris);
     if (m_tlsLayer && m_layerTLSVisible) m_tlsLayer->render(cb);
-    m_stopLine.render(cb, m_passTris);
+    if (m_layerTLSVisible) m_stopLine.render(cb, m_passTris);
     if (m_vehicleLayer && m_layerVehiclesVisible) m_vehicleLayer->render(cb);
     if (m_personLayer && m_layerAgentsVisible)    m_personLayer ->render(cb);
 
