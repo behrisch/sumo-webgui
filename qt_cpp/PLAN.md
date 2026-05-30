@@ -1,4 +1,4 @@
-# qt_cpp — Qt6 + OpenGL SUMO GUI (C++)
+# qt_cpp — Qt6 + RHI SUMO GUI (C++)
 
 A native desktop reimplementation of the `ecal_deck` web GUI for direct
 comparison. Same visual functionality and look-and-feel, but no browser, no
@@ -12,9 +12,11 @@ in-process.
 - **Direct libsumo coupling** — embed libsumo as a C++ library, step the
   simulation from the GUI thread or a worker thread, read state via the libsumo
   C++ API (no TraCI socket, no eCAL, no protobuf).
-- **Qt6 Widgets + QOpenGLWidget** with modern OpenGL (3.3 core profile) for
+- **Qt6 Widgets + QRhiWidget** with Qt's RHI (Vulkan/Metal/D3D/OpenGL) for
   rendering. No QtQuick/QML — keep dependencies minimal and rendering paths
-  explicit, mirroring how deck.gl layers are structured.
+  explicit, mirroring how deck.gl layers are structured. On Qt 6.4-6.6 a
+  ~150-line in-tree `RhiHostWidget` backport stands in for `QRhiWidget`; on
+  Qt 6.7+ the native widget is used.
 - **Benchmark target**: feed the same `doe/view.sumocfg` scenario and compare
   FPS, CPU, and memory against the eCAL+browser stack documented in
   `ecal_deck/BENCHMARKING.md`.
@@ -35,8 +37,8 @@ Single-process, two main threads:
 +----------------- main / GUI thread -----------------+
 |  Qt event loop                                       |
 |  MainWindow (toolbar, file menu, status bar)         |
-|  NetworkView : QOpenGLWidget                         |
-|    - paintGL() draws layers using cached GPU buffers |
+|  NetworkView : QRhiWidget                            |
+|    - render(cb) draws layers using cached RHI buffers|
 |    - mouse/keys -> Camera (pan/zoom/reset)           |
 |  ScaleBarOverlay, LegendOverlay, LogPanel            |
 +------------------------------------------------------+
@@ -77,38 +79,44 @@ qt_cpp/
   src/
     main.cpp
     MainWindow.{h,cpp}              # menus, toolbar, status bar
-    NetworkView.{h,cpp}             # QOpenGLWidget host, Camera, picking
+    NetworkView.{h,cpp}             # QRhiWidget host, Camera, picking
+    NetworkOverlayWidget.{h,cpp}    # transparent child for QPainter overlays
+                                    # (scale bar, legend, pick info box)
     Camera.{h,cpp}                  # pan/zoom/reset, view+proj matrices,
                                     # geo<->screen helpers (MapView equiv)
-    overlays/
-      ScaleBarOverlay.{h,cpp}       # QPainter overlay = ScaleBar.tsx
-      LegendOverlay.{h,cpp}         # colormap legend for edge data
-      LogPanel.{h,cpp}              # QDockWidget with log messages
     sim/
       SimWorker.{h,cpp}             # QThread owning libsumo
       SimSnapshot.{h,cpp}           # double-buffered state struct
       NetworkGeometry.{h,cpp}       # built once from libsumo network
       EdgeColorizer.{h,cpp}         # vehicle/edge attribute -> color
     layers/                         # one class per deck.gl layer
-      Layer.h                       # abstract: initGL / upload / draw
-      NetworkLayer.{h,cpp}          # roads, rails (with sleepers),
-                                    # walking areas, crossings
-      EdgeDataLayer.{h,cpp}         # live attribute coloring
-      TLSLayer.{h,cpp}              # traffic light heads
-      StopLineLayer.{h,cpp}
-      StoppingPlaceLayer.{h,cpp}    # bus stops etc.
-      PolygonLayer.{h,cpp}          # buildings, etc.
-      DetectorLayer.{h,cpp}
-      VehicleLayer.{h,cpp}          # instanced triangles per vehicle class
-      PersonLayer.{h,cpp}
-    gl/
-      Shader.{h,cpp}                # GLSL load/compile/link helpers
-      Buffer.{h,cpp}                # VBO/VAO RAII wrappers
-      shaders/                      # *.vert / *.frag
+      VehicleLayerRhi.{h,cpp}       # instanced rotated quads per vehicle
+      PersonLayerRhi.{h,cpp}        # instanced quads
+      POILayerRhi.{h,cpp}           # instanced discs
+      TLSLayerRhi.{h,cpp}           # instanced oriented bars + state colour
+      LayerBuilders.{h,cpp}         # build*Verts(NetworkGeometry&) free
+                                    # functions for the 8 static sub-layers
+                                    # (Detector, StoppingPlace, StopLine,
+                                    # PedArea, Rail, Polygon, Network,
+                                    # EdgeColor) — all share two pipelines
+                                    # (Triangles + TriangleStrip).
+    rhi_compat/                     # Qt 6.4 backport + shared RHI helpers
+      rhi_compat.h                  # picks public-or-private QRhi includes
+      RhiWidgetBase.h               # alias: QRhiWidget on 6.7+, else shim
+      RhiHostWidget.{h,cpp}         # ~150-line backport for Qt 6.4-6.6
+                                    # (TU is empty on Qt 6.7+ via #if guard)
+      RhiLayerCommon.h              # loadShader, ensureCapacity, alphaBlend
+      TrisPasses.h                  # TrisColorInterleavedPass + vertex helpers
+      StaticTrisRhi.h               # generic CPU-staged vertex container
+    shaders/                        # GLSL 440 source compiled by qsb to .qsb
+      tris_color.{vert,frag}        # shared per-vertex-rgba pass
+      poi.{vert,frag}               # instanced disc
+      tls.{vert,frag}               # instanced oriented bar
+      vehicle.{vert,frag}           # instanced rotated quad
+      person.{vert,frag}            # instanced quad
   resources/
     qt_cpp.qrc                      # shaders, icons
     icons/...
-  third_party/                      # only headers / submodules if needed
 ```
 
 ## Build system
@@ -169,23 +177,28 @@ nets with non-zero netOffset) must be preserved — copy the logic from
 
 ## Rendering
 
-- **OpenGL 3.3 core**. One `QOpenGLWidget` for the map; per-layer `QOpenGLBuffer`
-  / `QOpenGLVertexArrayObject` resources owned by each `Layer` subclass.
+- **Qt RHI** (Vulkan / Metal / D3D / OpenGL backend, auto-selected). One
+  `QRhiWidget` (or its Qt 6.4-6.6 backport) for the map; static layers share
+  two pipelines (Triangles + TriangleStrip) over a single shared
+  `TrisColorInterleavedPass`; dynamic instanced layers (Vehicle, Person, POI,
+  TLS) each own their own pipeline.
 - Camera in either:
   - geo mode → equirectangular projection of lon/lat with a Mercator scale
     correction per latitude, identical formula to `MapView` defaults; or
   - non-geo mode → straight orthographic in SUMO XY (meters).
 - Layer render order (must match `ecal_deck`):
-  junctions → road network → rails → edge-data coloring →
-  stop lines → stopping places → polygons → detectors → TLS heads →
-  vehicles/persons/containers.
-- Vehicles drawn with **instanced rendering** (`glDrawArraysInstanced`): one
-  per-vClass triangle/quad mesh as the base geometry, one instance buffer with
-  `[x, y, cos_angle, sin_angle, r, g, b, a, scale]` per vehicle. Buffer is
+  junctions → road network → edge-data coloring → ped areas → rails →
+  polygons → POIs → stopping places → detectors → TLS heads → stop lines →
+  vehicles → persons.
+- Vehicles drawn with **instanced rendering**: one base 2-triangle quad mesh
+  + per-instance buffer `[x, y, cos_angle, sin_angle, r, g, b, a]`. Buffer is
   re-uploaded once per SimSnapshot swap, mirroring deck.gl's `ScatterplotLayer`
   attribute updates.
-- Picking via off-screen FBO with per-instance ID color, read back on click.
-- Optional MSAA 4x in the framebuffer format.
+- Picking is CPU-side using the current `SimSnapshot` + `NetworkGeometry`
+  (no GPU read-back). Pick info is drawn by `NetworkOverlayWidget` via
+  QPainter on top of the RHI surface.
+- MSAA currently 1 sample (can be raised via `setSampleCount()` on the host
+  widget if needed).
 
 ## Feature parity checklist
 
@@ -222,7 +235,7 @@ Rendering:
 ## Phasing
 
 ### Phase 0 — Skeleton ✅
-- CMake project, `MainWindow` with empty `QOpenGLWidget`, clears to dark grey.
+- CMake project, `MainWindow` with empty `QRhiWidget`, clears to dark grey.
 - `FindLibsumo.cmake` and a "hello libsumo" call (`Simulation::start({...})`,
   one step, `Simulation::close()`).
 
@@ -240,14 +253,20 @@ Rendering:
 - Play/pause/step controls with shortcuts (Space / S).
 - FPS counter in the status bar.
 
-### Phase 3 — Full layer parity (≈ 3 days)
+### Phase 3 — Full layer parity ✅
 - Persons, TLS heads, stop lines, stopping places, polygons, detectors.
 - Rails with sleepers (port logic from `NetworkLayer.ts` carefully — see
   checkpoint 017 for the inverted-tram trick and sleeper sizing).
 - Edge attribute selector + `EdgeDataLayer` with viewport culling and color
   scale legend.
 
-### Phase 4 — Polish & parity QA (≈ 2 days)
+### Phase 4 — Qt RHI migration ✅
+- All 12 layers ported off `QOpenGLWidget` onto `QRhiWidget` (Qt 6.7+) /
+  `rhi_compat::RhiHostWidget` backport (Qt 6.4-6.6).
+- Old OpenGL layer classes and base class deleted.
+- See "Graphics API choice — Qt RHI migration" section for details.
+
+### Phase 5 — Polish & parity QA
 - Picking / vehicle tooltip.
 - Log panel.
 - Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.
@@ -255,7 +274,7 @@ Rendering:
   `qt_cpp/BENCHMARKING.md`) with FPS / CPU / RSS numbers for the same scenario,
   same step delay, same window size.
 
-### Phase 5 — Optional extras
+### Phase 6 — Optional extras
 - MSAA toggle.
 - Basemap tiles in geo mode.
 - Tauri-equivalent packaging (AppImage / .deb).
@@ -320,39 +339,71 @@ remove it. Long-term we need a portable, future-proof backend.
   RHI loads at runtime.
 - **No extra runtime deps** — RHI ships with Qt.
 
-### Migration plan (layer by layer)
+### Migration status — **COMPLETE (2026-05)**
 
-We migrate layer-by-layer rather than in one big bang. Each layer becomes a
-`QRhi`-based renderer using its own pipeline + per-instance buffers. The
-`SimSnapshot` byte columns we just landed (zero-copy from libsumo Batch) are the
-exact same shape RHI wants for `QRhiBuffer::uploadStaticBuffer`.
+All 12 layers run on RHI. The old `QOpenGLWidget`-based `NetworkView` and the
+12 per-layer OpenGL classes have been removed from the tree.
 
-Order:
+What landed:
 
-1. **VehicleLayer** — first migration, proves the pattern (instanced 2D quads,
-   per-instance position + angle + rgba). **Validated end-to-end** as
-   `src/layers/VehicleLayerRhi.{h,cpp}` plus a standalone driver
-   `qt_cpp_rhi_spike` that hosts it on `rhi_compat::RhiWidgetBase`. Runs against
-   both system Qt 6.4 (via `RhiHostWidget` shim, OpenGLES2 backend) and aqt 6.8
-   (via native `QRhiWidget`). Shaders live in `src/shaders/vehicle.{vert,frag}`
-   and are baked to `.qsb` files via `qt6_add_shaders` at build time. Confirmed
-   visually with the doe scenario: vehicles render at the correct world
-   positions, pan and zoom respond, snapshot uploads happen on the render
-   thread, swapchain resizes properly. Note: vehicle quads are 5 m × 2 m, so
-   at a scenario-fit zoom (ppu ≈ 0.2) they are sub-pixel — this is expected and
-   matches the OpenGL `VehicleLayer` behaviour.
-2. **PersonLayer** — same pattern, no rotation.
-3. **TLSLayer** — same pattern, per-instance state byte.
-4. **EdgeNetworkLayer** / **EdgeDataLayer** — line/triangle batches.
-5. **JunctionLayer**, **PolygonLayer**, **PoiLayer**, **StopLineLayer** —
-   straightforward once the pipeline scaffolding exists.
-6. Switch `NetworkView` from `QOpenGLWidget` to `QRhiWidget` (Qt 6.7+) once all
-   layers are ported, then drop the OpenGL-specific code.
+- **`NetworkView`** inherits `rhi_compat::RhiWidgetBase` (= `QRhiWidget` on
+  Qt 6.7+, `RhiHostWidget` on Qt 6.4-6.6). Single `render(cb)` issues a single
+  render pass with the layers in deck.gl order: junctions → lanes → edge-color
+  overlay → ped → rails → polygons → POIs → stopping places → detectors → TLS
+  → stop lines → vehicles → persons.
+- **Two shared pipelines** in `NetworkView` cover the 8 static sub-layers:
+  `m_passTris` (Triangles) and `m_passStrip` (TriangleStrip). Each sub-layer is
+  a `StaticTrisRhi` (CPU-staged interleaved {x,y,r,g,b,a} vertex buffer) built
+  by a free `build*Verts(NetworkGeometry&)` function in
+  `layers/LayerBuilders.{h,cpp}`.
+- **Dynamic layers** (Vehicle, Person, POI, TLS) each own their own pipeline
+  (instanced quad/disc/bar variants) — they need per-instance attributes that
+  don't fit the shared layout.
+- **Edge-color overlay** uses the lane TriangleStrip with per-vertex rgba
+  mutated in place each frame (`m_laneFirst`/`m_laneCount` index the strip);
+  bridge vertices between adjacent lanes get α=0 so the discard shader culls
+  them.
+- **QPainter overlays** (scale bar, legend, pick info box) live on a
+  transparent child `NetworkOverlayWidget` (sibling to the RHI surface) since
+  QPainter-on-QRhiWidget is unverified on the Qt 6.4 backport.
+- **Shaders** are GLSL 440 → `qsb` baked at build time via
+  `qt6_add_shaders`. Five pairs: `tris_color`, `poi`, `tls`, `vehicle`,
+  `person`.
 
-During the transition the OpenGL backend is kept compiling: each layer gets a
-sibling `*Rhi.cpp` and `NetworkView` chooses the implementation based on a
-build flag. Once all layers are migrated and validated visually, the OpenGL
-implementations are deleted.
+Visual deltas from the OpenGL version:
+
+- **Polygon outlines** are now world-space triangle strips of fixed half-width
+  0.35 m (QRhi has no `glLineWidth`). At very low zoom outlines are still
+  visible; at very high zoom they look slightly thicker than the GL line
+  version did.
+- **Polygon / junction fans** are CPU-expanded to triangle lists (no
+  TRIANGLE_FAN topology in QRhi/Vulkan).
+- **Multidraw paths** (StopLine, StoppingPlace, Detector, …) collapsed to
+  single draws over stitched buffers.
+
+Build prerequisites and toolchain selection are unchanged — see
+"Build prerequisites" below.
+
+### Migration plan (historical, layer by layer)
+
+Originally planned as a per-layer incremental migration with both OpenGL and
+RHI implementations coexisting. In practice the per-layer spike (VehicleLayer)
+validated the pattern; the remaining 11 layers + `NetworkView` were then
+migrated together. The OpenGL backend was deleted in one commit once the RHI
+version reached visual parity on the doe scenario.
+
+1. ✅ **VehicleLayerRhi** — instanced rotated quads. Validated end-to-end first
+   via the standalone `qt_cpp_rhi_spike` driver against both Qt 6.4 and 6.8.
+2. ✅ **PersonLayerRhi** — instanced quads.
+3. ✅ **POILayerRhi** — instanced discs.
+4. ✅ **TLSLayerRhi** — instanced oriented bar with state colour.
+5. ✅ **Static sub-layers** (Network lanes, Network junctions, EdgeColor
+   overlay, PedArea sidewalk+walk, Rail sleepers+rails, Polygon fills+outlines,
+   StopLine, StoppingPlace, Detector) — all 11 routed through the shared
+   `TrisColorInterleavedPass` + `StaticTrisRhi` via `LayerBuilders.cpp`.
+6. ✅ `NetworkView` ported from `QOpenGLWidget` to `RhiWidgetBase`; QPainter
+   overlays moved to `NetworkOverlayWidget`.
+7. ✅ Old OpenGL layers + base class deleted.
 
 ### Precision caveat
 
