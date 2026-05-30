@@ -427,6 +427,82 @@ Benchmark / QA:
 - Benchmarks recorded for FPS, CPU, RSS at three zoom levels matching the
   existing `BENCHMARKING.md` setup.
 
+## Shared `.pb` network cache + early-render (planned)
+
+**Goal**: cut first-pixel-of-network latency on large nets (Berlin: ~23 s of
+`libsumo::Simulation::start` → ~1 s for cached geometry). Reuse the
+existing `NetworkGeometry` proto cache the ecal_deck publisher writes so
+neither side reimplements the extraction.
+
+### Why protobuf (decision)
+
+Considered raw POD, FlatBuffers, custom binary. Chose protobuf-lite:
+
+- The Python publisher already writes this format; both halves stay in
+  sync via `npm run generate`. A custom format would mean hand-written
+  readers/writers in every language plus reinvented versioning.
+- `libprotobuf-lite` is ~600 KB, already in Ubuntu/Fedora/Homebrew.
+  Trivial vs. the ~60 MB of Qt + libsumocpp qt_cpp already pulls in.
+- All heavy payloads (`lane_points`, `tls_positions`, …) are `bytes`
+  fields wrapping typed arrays. C++ gets them as `const std::string&`
+  whose `.data()` is reinterpret_cast'able to `const float*` —
+  effectively zero-copy. "Parsing" is reading a handful of headers.
+- `Protobuf_USE_STATIC_LIBS` + lite runtime keeps the binary small.
+
+### Plan
+
+1. **CMake**
+   - `find_package(Protobuf REQUIRED)`.
+   - Use `protobuf_generate(LANGUAGE cpp PROTOS ../ecal_deck/proto/sumo.proto OUT_VAR PROTO_SRCS)`
+     to emit `sumo.pb.cc/.h` into `${CMAKE_BINARY_DIR}/proto/`.
+   - Link `qt_cpp` and `qt_cpp_rhi_spike` against `protobuf::libprotobuf-lite`.
+2. **Cache lookup** (new file `src/sim/NetworkCache.{h,cpp}`)
+   - `std::filesystem::path cachePathFor(const std::string& netFile)`
+     mirrors Python's `_cache_path` (same `__ecaldeck__/<base>.net.v<N>.bin`
+     layout so both halves share the same file).
+   - `std::shared_ptr<NetworkGeometry> tryLoadCache(const std::string& sumocfg)`:
+     parses sumocfg → resolves `net-file`, returns `nullptr` on stale /
+     missing / version mismatch. On hit, deserialises the proto and
+     converts to the existing in-memory `NetworkGeometry` struct
+     **without copying** the typed-array `bytes` payloads (use
+     `reinterpret_cast<const float*>(pb.lane_points().data())` and copy
+     into the existing `std::vector<float>` since the struct outlives
+     the parsed message — or refactor the struct to hold the parsed
+     message and views over it for true zero-copy).
+3. **SimWorker startup reflow**
+   - `loadScenario` runs in two phases on the worker thread:
+     - **Phase 1 (fast)**: `tryLoadCache(sumocfg)` → if hit, `emit networkReady(ng)` immediately. UI shows the network and "Loading simulation…" badge; play/pause/step disabled.
+     - **Phase 2 (slow)**: `libsumo::Simulation::start(cmd)` runs as before. On success, if Phase 1 missed, build geometry via the existing libsumo path and `emit networkReady`. Either way, `emit scenarioLoaded` enables controls.
+   - Cache-miss path stays identical to today.
+4. **MainWindow / NetworkView UX**
+   - New `simReady` signal from SimWorker (true after libsumo start).
+   - Disable Play/Pause/Step toolbar actions until `simReady`.
+   - Status-bar message "Loading simulation…" between Phase 1 and
+     Phase 2 completion.
+5. **Cache writer (optional, follow-up)**: a `--bake-network-cache`
+   command-line flag on the Python publisher and/or a tiny standalone
+   `bake_network_cache.py` so users can pre-warm caches without
+   starting the full eCAL stack. Qt side stays read-only.
+
+### Side benefits
+
+- **Stop-line parity for free**: the `.pb` carries `lane_has_stopline`
+  (per-connection link-state rule). Replaces the still-TODO porting of
+  `_STOPLINE_LINK_STATES` from the publisher into `NetworkGeometry::build`.
+- Same for crossings / walking-areas / lane permission classes /
+  sidewalk distinction once that lands in the proto.
+- One fewer place to fix geometry extraction bugs.
+
+### Risks
+
+- First-ever load of a scenario doesn't benefit (no cache yet). Could
+  mitigate by warming the cache in the background after Phase 2.
+- Vehicle picking / edge data don't work until libsumo is up — needs
+  the "Loading simulation…" UI hint to set expectations.
+- Field-layout coupling: any proto change must bump
+  `NetworkGeometry::version` (already enforced) and both readers
+  re-generated.
+
 ## Graphics API choice — Qt RHI migration
 
 ### Background
