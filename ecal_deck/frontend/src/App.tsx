@@ -9,11 +9,10 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { useSimSocket } from './hooks/useSimSocket';
 import { usePerfStats } from './hooks/usePerfStats';
 import { buildNetworkLayer, buildMarkingLayer, buildArrowLayer, buildCrossingLayer, buildWalkingAreaLayer, buildRailLayer } from './layers/NetworkLayer';
-import { buildStopLineLayer } from './layers/StopLineLayer';
+import { buildLaneBarsGeometry, buildLaneBarsLayer, BAR_KIND_TLS, BAR_KIND_STOPLINE } from './layers/LaneBarsLayer';
 import { buildVehicleLayer } from './layers/VehicleLayer';
 import { VEHICLE_SHAPES, type VehicleShape } from './layers/vehicleShapes';
 import { buildAgentLayer } from './layers/PersonLayer';
-import { buildTLSLayer } from './layers/TLSLayer';
 import { buildEdgeDataLayer } from './layers/EdgeDataLayer';
 import { parsePolygonData, buildPolygonLayers, buildPOILayer } from './layers/PolygonLayer';
 import type { ParsedPolygonSource } from './layers/PolygonLayer';
@@ -532,12 +531,15 @@ export default function App() {
     if (!parsed) return null;
     return buildArrowLayer(parsed);
   }, [parsed]);
-  const stopLineResult = useMemo(() => {
+  // Combined "perpendicular bars at lane ends" geometry.  TLS signal bars
+  // and stop-line bars are the same primitive — kept in one layer so we
+  // pay a single draw + picking call for both.  Geometry is static per
+  // parsed network; colour/visibility re-renders happen inside the layers
+  // useMemo below.
+  const laneBarsGeometry = useMemo(() => {
     if (!parsed) return null;
-    return buildStopLineLayer(parsed);
+    return buildLaneBarsGeometry(parsed);
   }, [parsed]);
-  const stopLineLayer    = stopLineResult?.layer ?? null;
-  const stopLineLaneIdx  = stopLineResult?.laneIndices ?? null;
 
   const walkingAreaResult = useMemo(() => {
     if (!parsed) return null;
@@ -635,9 +637,18 @@ export default function App() {
         const subtype = parsed?.laneFunction?.[li] === 1 ? 'internal' : undefined;
         setSelectedObject({ type: 'edge', id, ...(subtype && { subtype }) });
       }
-    } else if (layerId === 'stop-lines' && stopLineLaneIdx) {
-      const id = laneIndexToEdgeId(stopLineLaneIdx[info.index]);
-      if (id) setSelectedObject({ type: 'edge', id });
+    } else if (layerId === 'lane-bars' && laneBarsGeometry) {
+      // Route the pick based on the per-bar kind discriminator.
+      const gi = info.index;
+      const kind = laneBarsGeometry.kinds[gi];
+      const meta = laneBarsGeometry.meta[gi];
+      if (kind === BAR_KIND_TLS) {
+        const entry = parsed?.tlsEntries[meta];
+        if (entry) setSelectedObject({ type: 'tls', id: entry.tls, tlIndex: entry.tl_index });
+      } else if (kind === BAR_KIND_STOPLINE) {
+        const id = laneIndexToEdgeId(meta);
+        if (id) setSelectedObject({ type: 'edge', id });
+      }
     } else if (layerId === 'walking-areas' && walkingAreaLaneIdx) {
       const id = laneIndexToEdgeId(walkingAreaLaneIdx[info.index]);
       if (id) setSelectedObject({ type: 'edge', id, subtype: 'walkingarea' });
@@ -653,9 +664,6 @@ export default function App() {
     } else if (layerId === 'junctions') {
       const id = parsed?.junctionIds[info.index];
       if (id) setSelectedObject({ type: 'junction', id });
-    } else if (layerId === 'tls') {
-      const entry = parsed?.tlsEntries[info.index];
-      if (entry) setSelectedObject({ type: 'tls', id: entry.tls, tlIndex: entry.tl_index });
     } else if (layerId?.startsWith('polygons-fill-') || layerId?.startsWith('polygons-outline-')) {
       // layerId pattern: polygons-(fill|outline)-<sourceIdx>
       const isFill = layerId.startsWith('polygons-fill-');
@@ -725,7 +733,7 @@ export default function App() {
     } else {
       setSelectedObject(null);
     }
-  }, [vehicleSnapshot, parsed, laneIndexMap, stopLineLaneIdx, walkingAreaLaneIdx, crossingLaneIdx, railSleeperIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources, stoppingPlaceSources, detectorSources]);
+  }, [vehicleSnapshot, parsed, laneIndexMap, laneBarsGeometry, walkingAreaLaneIdx, crossingLaneIdx, railSleeperIdx, laneIndexToEdgeId, polygonLayerResults, polygonSources, stoppingPlaceSources, detectorSources]);
 
   // Edge data layer — only lanes whose bounding box intersects the current viewport are
   // rendered. activeView is read from the closure (not a dep): viewport is sampled at the
@@ -763,10 +771,17 @@ export default function App() {
     for (const ml of markingLayers) result.push(ml.clone({ visible: visibility.edges }));
     if (edgeDataLayer) result.push(edgeDataLayer);
     if (arrowLayer)    result.push(arrowLayer.clone({ visible: visibility.edges }));
-    if (stopLineLayer) result.push(stopLineLayer.clone({ visible: visibility.edges }));
     if (crossingLayer) result.push(crossingLayer.clone({ visible: visibility.edges }));
-    if (visibility.tls)
-      result.push(buildTLSLayer(parsed.tlsEntries, parsed.tlsPositions, tlsUpdate?.lights ?? []));
+    // Single combined "lane bars" layer (TLS signals + stop lines), driven
+    // by the unified `tls` toggle.  Re-built on every TLS phase update.
+    if (laneBarsGeometry && visibility.tls) {
+      const lb = buildLaneBarsLayer({
+        geometry: laneBarsGeometry,
+        lights: tlsUpdate?.lights ?? [],
+        tlsEntries: parsed.tlsEntries,
+      });
+      if (lb) result.push(lb);
+    }
     // Stopping places — above road network so they're clearly visible, but
     // below vehicles so vehicles parked in them remain on top.
     for (const r of stoppingPlaceLayerResults) {
@@ -802,7 +817,7 @@ export default function App() {
     performance.mark('layers-build-end');
     performance.measure('layers-build', 'layers-build-start', 'layers-build-end');
     return result;
-  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, stopLineLayer, walkingAreaLayer, crossingLayer, railLayers, edgeDataLayer, polygonLayerResults, poiLayerResults, stoppingPlaceLayerResults, detectorLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
+  }, [edgeLayer, junctionLayer, markingLayers, arrowLayer, laneBarsGeometry, walkingAreaLayer, crossingLayer, railLayers, edgeDataLayer, polygonLayerResults, poiLayerResults, stoppingPlaceLayerResults, detectorLayerResults, parsed, vehicleSnapshot, vehicleTypeTable, tlsUpdate, visibility, attributeConfig, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel]);
 
   if (!parsed || !activeView) {
     return (

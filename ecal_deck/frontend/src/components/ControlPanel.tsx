@@ -134,7 +134,7 @@ export function ControlPanel(p: Props) {
           ['vehicles',   'Vehicles'],
           ['persons',    'Persons'],
           ['containers', 'Containers'],
-          ['tls',        'Traffic lights'],
+          ['tls',        'Signals & stop lines'],
           ...(p.edgeKeys.length ? [['edgeData', 'Edge data']] : []),
           ['polygons',   'Polygons'],
           ['pois',       'POIs'],
