@@ -8,18 +8,37 @@ See `PLAN.md` for the full design and phasing.
 ## Build (Linux)
 
 Requires:
-- Qt6 (`qt6-base-dev`, `libqt6openglwidgets6t64`, headers shipped via
-  `qt6-base-dev-tools` on Ubuntu 24.04)
+- **Qt 6.4+** (Ubuntu noble's `qt6-base-dev` works; we transparently use
+  the in-tree `RhiHostWidget` shim on Qt < 6.7 and `QRhiWidget` on Qt ≥
+  6.7). Components: Widgets, OpenGLWidgets, ShaderTools.
+  - On Qt < 6.6 also install `qt6-base-private-dev` (provides
+    `<QtGui/private/qrhi_p.h>`).
 - CMake ≥ 3.20, a C++20 compiler
 - A built SUMO source tree containing `libsumocpp.so`
-  (e.g. `/home/ubuntu/sumo/cmclaude/src/fmi/sumo-fmi2/binaries/linux64/`)
+  (e.g. `/home/ubuntu/sumo/bin/`)
+- `libxkbcommon-dev` (Qt6Gui's FindXKB hard-requires the headers).
 
 ```bash
+# Apt-only path (Ubuntu noble, system Qt 6.4):
+sudo apt install qt6-base-dev qt6-base-private-dev qt6-shadertools-dev \
+                 libxkbcommon-dev
+cmake -S qt_cpp -B qt_cpp/build -DSUMO_HOME=/home/ubuntu/sumo
+cmake --build qt_cpp/build -j
+
+# Or with a newer Qt from aqtinstall:
 cmake -S qt_cpp -B qt_cpp/build \
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64 \
       -DSUMO_HOME=/home/ubuntu/sumo
 cmake --build qt_cpp/build -j
 ```
+
+Two executables are produced:
+
+- `qt_cpp` — the full OpenGL GUI (production path, all layers).
+- `qt_cpp_rhi_spike` — standalone QRhi feasibility driver that renders only
+  the vehicle layer via `VehicleLayerRhi`. Hosted on `QRhiWidget` (Qt 6.7+)
+  or `rhi_compat::RhiHostWidget` (Qt 6.4–6.6). Validates the Qt RHI
+  migration path described in `PLAN.md`.
 
 ## Run
 

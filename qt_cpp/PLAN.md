@@ -284,3 +284,138 @@ Rendering:
   same scenario at the same zoom level — checked via overlay screenshot diff.
 - Benchmarks recorded for FPS, CPU, RSS at three zoom levels matching the
   existing `BENCHMARKING.md` setup.
+
+## Graphics API choice — Qt RHI migration
+
+### Background
+
+The initial implementation targets **OpenGL 3.3 core profile** via `QOpenGLWidget`
+and `QOpenGLFunctions_3_3_Core`. This was the fastest path to get pixels on screen
+with the existing Qt6 dependency, but OpenGL is deprecated on macOS (frozen at
+4.1, no compute, no SSBOs, no `glVertexAttribLPointer`) and Apple will eventually
+remove it. Long-term we need a portable, future-proof backend.
+
+### Options considered
+
+1. **Qt RHI** (Rendering Hardware Interface) — Qt's own thin abstraction over
+   Vulkan / Metal / D3D12 / OpenGL, public API since Qt 6.6. This is what Qt
+   Quick uses internally. **Chosen.**
+2. **WebGPU via Dawn / wgpu-native** — same shader (WGSL) and API for native
+   and browser; attractive if we ever want to unify the C++ renderer with the
+   web frontend. Downsides today: extra heavy dep to vendor, Qt integration is
+   DIY (render into a `QWindow`, present manually), still maturing on Linux.
+3. **Raw Vulkan + MoltenVK on macOS** — maximum control but ~10× the boilerplate
+   of our current code for the same 2D visuals. Not justified.
+
+### Why Qt RHI wins for us
+
+- **macOS** problem solved: the RHI backend auto-selects Metal there.
+- **Lowest migration cost** from the current OpenGL code path. The
+  `SimWorker → SimSnapshot → buffer.allocate()` data path is unchanged; only the
+  buffer/pipeline/draw objects swap (`QRhiBuffer` for `QOpenGLBuffer`,
+  `QRhiGraphicsPipeline` for the `glProgram`, `QRhiCommandBuffer` for the draw
+  loop).
+- **Shader story is clean**: write GLSL once, `qsb` cross-compiles to SPIR-V /
+  MSL / HLSL / OpenGL GLSL at build time and packages them in a `.qsb` file the
+  RHI loads at runtime.
+- **No extra runtime deps** — RHI ships with Qt.
+
+### Migration plan (layer by layer)
+
+We migrate layer-by-layer rather than in one big bang. Each layer becomes a
+`QRhi`-based renderer using its own pipeline + per-instance buffers. The
+`SimSnapshot` byte columns we just landed (zero-copy from libsumo Batch) are the
+exact same shape RHI wants for `QRhiBuffer::uploadStaticBuffer`.
+
+Order:
+
+1. **VehicleLayer** — first migration, proves the pattern (instanced 2D quads,
+   per-instance position + angle + rgba). **Validated end-to-end** as
+   `src/layers/VehicleLayerRhi.{h,cpp}` plus a standalone driver
+   `qt_cpp_rhi_spike` that hosts it on `rhi_compat::RhiWidgetBase`. Runs against
+   both system Qt 6.4 (via `RhiHostWidget` shim, OpenGLES2 backend) and aqt 6.8
+   (via native `QRhiWidget`). Shaders live in `src/shaders/vehicle.{vert,frag}`
+   and are baked to `.qsb` files via `qt6_add_shaders` at build time. Confirmed
+   visually with the doe scenario: vehicles render at the correct world
+   positions, pan and zoom respond, snapshot uploads happen on the render
+   thread, swapchain resizes properly. Note: vehicle quads are 5 m × 2 m, so
+   at a scenario-fit zoom (ppu ≈ 0.2) they are sub-pixel — this is expected and
+   matches the OpenGL `VehicleLayer` behaviour.
+2. **PersonLayer** — same pattern, no rotation.
+3. **TLSLayer** — same pattern, per-instance state byte.
+4. **EdgeNetworkLayer** / **EdgeDataLayer** — line/triangle batches.
+5. **JunctionLayer**, **PolygonLayer**, **PoiLayer**, **StopLineLayer** —
+   straightforward once the pipeline scaffolding exists.
+6. Switch `NetworkView` from `QOpenGLWidget` to `QRhiWidget` (Qt 6.7+) once all
+   layers are ported, then drop the OpenGL-specific code.
+
+During the transition the OpenGL backend is kept compiling: each layer gets a
+sibling `*Rhi.cpp` and `NetworkView` chooses the implementation based on a
+build flag. Once all layers are migrated and validated visually, the OpenGL
+implementations are deleted.
+
+### Precision caveat
+
+QRhi has no `Double2` vertex-attribute format — none of the modern native APIs
+(Metal, Vulkan, D3D12) accept double-precision vertex attributes. The zero-copy
+GL trick of binding `veh_positions` as `GL_DOUBLE` with `vec2` shader input
+(and letting the driver narrow) does **not** survive the migration. The RHI
+layer narrows `veh_positions` to `float32` in `setSnapshot()`. For SUMO
+scenarios with coordinates < ~1e6 m this preserves ~mm precision; geo-projected
+scenarios with very large origins should subtract a per-scenario offset upstream.
+
+### Build prerequisites
+
+Two supported toolchains. The CMake build picks automatically based on what
+`find_package(Qt6 6.4 ...)` resolves; the in-tree `RhiHostWidget` only
+compiles in when `QRhiWidget` is missing.
+
+**A. Stock Ubuntu noble (24.04) — apt-only, no aqtinstall:**
+
+```bash
+sudo apt install qt6-base-dev qt6-base-private-dev qt6-shadertools-dev \
+                 libqt6opengl6t64 libxkbcommon-dev
+```
+
+This pulls Qt 6.4.2. We use the *private* QRhi headers
+(`<QtGui/private/qrhi_p.h>`, linked via `Qt6::GuiPrivate`) and the in-tree
+`rhi_compat::RhiHostWidget` — a ~150-line `QWidget` that wraps a `QWindow`,
+owns the `QRhi`/`QRhiSwapChain`, and exposes the same
+`initialize(cb)`/`render(cb)`/`releaseResources()` virtuals as
+`QRhiWidget`. The compat shim `rhi_compat/rhi_compat.h` resolves the
+include path; `rhi_compat/RhiWidgetBase.h` resolves the base class. No
+source changes in `RhiSpikeWidget` between the two toolchains.
+
+Tradeoffs: pure private headers (Qt makes no API stability promises across
+patch releases), no D3D12 backend (only D3D11 on Windows), no built-in
+`QRhiWidget`.
+
+**B. Qt 6.7+ from aqtinstall / official installer:**
+
+```bash
+pip install --user aqtinstall
+aqt install-qt linux desktop 6.8.3 linux_gcc_64 --outputdir ~/Qt \
+    --modules qtshadertools
+sudo apt install libxkbcommon-dev
+cmake -DCMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64 ...
+```
+
+Inherits directly from `QRhiWidget`, all backends available, API is
+limited-compat public.
+
+To force toolchain B's source to fall back to `RhiHostWidget` (useful when
+sanity-checking the fallback path on a dev box without a second Qt install):
+
+```bash
+cmake -S qt_cpp -B qt_cpp/build -DCMAKE_CXX_FLAGS=-DRHI_COMPAT_FORCE_FALLBACK ...
+```
+
+**Common: `libxkbcommon-dev`** — Qt6Gui's `FindXKB.cmake` requires both the
+library and headers. On Debian/Ubuntu: `sudo apt install libxkbcommon-dev`.
+
+### Out of scope
+
+- Migrating the eCAL/web rendering — `ecal_deck/frontend` keeps deck.gl
+  (WebGL2/WebGPU is a deck.gl-side decision).
+- Compute shaders or modern GPU-driven rendering; the workload is small enough
+  that a straightforward instanced draw per layer is fine.
