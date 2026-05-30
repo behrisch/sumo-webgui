@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QtGlobal>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -19,6 +20,20 @@ public:
     explicit SimWorker(QObject* parent = nullptr);
     ~SimWorker() override;
 
+    // Shared "render-pending" flag.  The view stores 0 here when it has
+    // consumed the latest snapshot; the worker stores 1 each time it emits
+    // a fresh snapshot.  When non-zero, stepOnce() advances the simulation
+    // but skips the per-step extraction work (Batch::fillVehicles + the
+    // viridis loops + memcpy) — that's how we keep the libsumo step rate
+    // comparable to the ecal_deck publisher under back-pressure.
+    std::shared_ptr<std::atomic<int>> renderPendingFlag() const { return m_renderPending; }
+    // Cumulative count of simulation steps where extraction was skipped due
+    // to back-pressure since the current scenario was loaded.  Atomic so the
+    // GUI thread can poll it without locking.
+    qint64 skippedSnapshots() const {
+        return m_skippedSnapshots.load(std::memory_order_relaxed);
+    }
+
 public slots:
     void loadScenario(const QString& sumocfgPath);
     void stepOnce();
@@ -27,6 +42,15 @@ public slots:
     void setDelayMs(int ms);
     void setColorMode(int mode);  // 0=None, 1=Speed, 2=Occupancy, 3=Halting
     void setVehicleColorMode(int mode);  // 0=Type, 1=Speed, 2=Waiting, 3=CO2, 4=Fuel
+    void setBackpressure(bool on);       // skip extraction when render hasn't caught up
+    // Section-level visibility gates. When a layer is hidden (or the whole
+    // window isn't visible) the worker skips the corresponding Batch::fill*
+    // call — same idea as sumo-gui only asking libsumo for what it draws.
+    void setWindowVisible(bool on);
+    void setVehiclesVisible(bool on);
+    void setAgentsVisible(bool on);
+    void setTLSVisible(bool on);
+    void setEdgeDataVisible(bool on);    // per-lane color overlay (the colorMode loop)
     void shutdown();
 
 signals:
@@ -57,5 +81,13 @@ private:
     qint64  m_stepCount  = 0;
     int     m_colorMode  = 0;
     int     m_vehicleColorMode = 0;
+    bool    m_backpressure = true;
+    bool    m_windowVisible   = true;
+    bool    m_vehiclesVisible = true;
+    bool    m_agentsVisible   = true;
+    bool    m_tlsVisible      = true;
+    bool    m_edgeDataVisible = true;
+    std::atomic<qint64> m_skippedSnapshots{0};
+    std::shared_ptr<std::atomic<int>> m_renderPending = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<NetworkGeometry> m_ng;
 };

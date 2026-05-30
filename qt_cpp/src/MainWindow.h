@@ -30,6 +30,11 @@ private slots:
     void onStep();
     void onDelayChanged(int ms);
 
+protected:
+    void showEvent(QShowEvent* e) override;
+    void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* e) override;
+
 private:
     void buildMenusAndToolbar();
     void buildStatusBar();

@@ -2,6 +2,7 @@
 
 #include <QtCore/QPoint>
 #include <QtCore/QString>
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -34,6 +35,14 @@ public slots:
     void setFollowSelected();
     void clearFollow();
     void setVehicleShape(int shape);  // 0=Rect, 1=Triangle, 2=Car, 3=Circle
+
+    // Hand the view the worker's render-pending flag. The view stores 0 here
+    // each time it consumes a snapshot in render(), so the worker can detect
+    // back-pressure and skip extraction for steps the GUI would otherwise
+    // drop on the floor.
+    void setRenderPendingFlag(std::shared_ptr<std::atomic<int>> flag) {
+        m_renderPendingFlag = std::move(flag);
+    }
 
 signals:
     void fpsUpdated(double fps);
@@ -120,6 +129,8 @@ private:
     double m_minX = 0, m_minY = 0, m_maxX = 0, m_maxY = 0;
 
     QString m_followId;
+
+    std::shared_ptr<std::atomic<int>> m_renderPendingFlag;
 
     qint64 m_fpsWindowStartMs = 0;
     int    m_fpsFrames        = 0;

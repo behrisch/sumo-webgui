@@ -2,12 +2,15 @@
 
 #include <QAction>
 #include <QComboBox>
+#include <QEvent>
 #include <QFileDialog>
+#include <QHideEvent>
 #include <QLabel>
 #include <QMenuBar>
 #include <QPainter>
 #include <QPixmap>
 #include <QPolygonF>
+#include <QShowEvent>
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
@@ -34,6 +37,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_sim, &SimWorker::networkReady, m_view, &NetworkView::setNetwork);
     connect(m_sim, &SimWorker::snapshotReady, m_view, &NetworkView::setSnapshot);
     connect(m_view, &NetworkView::fpsUpdated, this, &MainWindow::onFps);
+    m_view->setRenderPendingFlag(m_sim->renderPendingFlag());
     m_simThread->start();
 }
 
@@ -223,4 +227,29 @@ void MainWindow::onSimError(const QString& message) {
 
 void MainWindow::onFps(double fps) {
     m_fpsLbl->setText(tr("%1 fps").arg(fps, 0, 'f', 1));
+}
+
+// ---- window visibility -> worker extraction gating ------------------------
+// Tells the worker to skip Batch::fill* when nothing on screen needs them.
+// Mirrors sumo-gui only asking libsumo for what it draws.
+void MainWindow::showEvent(QShowEvent* e) {
+    QMainWindow::showEvent(e);
+    if (m_sim) QMetaObject::invokeMethod(
+        m_sim, "setWindowVisible", Qt::QueuedConnection, Q_ARG(bool, true));
+}
+
+void MainWindow::hideEvent(QHideEvent* e) {
+    QMainWindow::hideEvent(e);
+    if (m_sim) QMetaObject::invokeMethod(
+        m_sim, "setWindowVisible", Qt::QueuedConnection, Q_ARG(bool, false));
+}
+
+void MainWindow::changeEvent(QEvent* e) {
+    QMainWindow::changeEvent(e);
+    if (e->type() == QEvent::WindowStateChange && m_sim) {
+        const bool visible = !(windowState() & Qt::WindowMinimized);
+        QMetaObject::invokeMethod(
+            m_sim, "setWindowVisible", Qt::QueuedConnection,
+            Q_ARG(bool, visible));
+    }
 }

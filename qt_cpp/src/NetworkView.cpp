@@ -175,6 +175,9 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
         if (m_tlsLayer)     m_tlsLayer    ->setSnapshot(m_snap);
         uploadEdgeColors();
         m_snapDirty = false;
+        // Signal the worker that the GUI is ready for the next frame.
+        if (m_renderPendingFlag)
+            m_renderPendingFlag->store(0, std::memory_order_release);
     }
 
     // Stage uploads.

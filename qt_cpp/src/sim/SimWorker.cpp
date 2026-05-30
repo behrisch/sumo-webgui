@@ -58,6 +58,8 @@ void SimWorker::loadScenario(const QString& sumocfgPath) {
         libsumo::Simulation::start(cmd);
         m_open = true;
         m_stepCount = 0;
+        m_skippedSnapshots.store(0, std::memory_order_release);
+        m_renderPending->store(0, std::memory_order_release);
         m_typeColors.clear();  // fresh per-scenario type registry
         emit scenarioLoaded(sumocfgPath);
         m_ng = buildNetworkGeometry();
@@ -88,9 +90,15 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
             default: break;
         }
         libsumo::Batch::beginStep();
-        libsumo::Batch::fillVehicles(vehAttrs, /*geoReferenced=*/false);
-        libsumo::Batch::fillAgents(/*geoReferenced=*/false);
-        libsumo::Batch::fillTLS();
+        if (m_vehiclesVisible) {
+            libsumo::Batch::fillVehicles(vehAttrs, /*geoReferenced=*/false);
+        }
+        if (m_agentsVisible) {
+            libsumo::Batch::fillAgents(/*geoReferenced=*/false);
+        }
+        if (m_tlsVisible) {
+            libsumo::Batch::fillTLS();
+        }
         const libsumo::BatchBuffers& buf = libsumo::Batch::buffers();
 
         // Grow color cache to cover any newly registered types.  Lazy fill on
@@ -239,7 +247,7 @@ SimSnapshotPtr SimWorker::buildSnapshot() {
 
         // Edge attribute coloring (per-lane). Skipped when mode==None to
         // keep step cost low on big networks.
-        if (m_colorMode != 0 && m_ng) {
+        if (m_colorMode != 0 && m_edgeDataVisible && m_ng) {
             const std::size_t nLanes = m_ng->lane_count();
             snap->lane_attr_rgba.assign(nLanes * 4, 0);
             auto setCol = [&](std::size_t i, float r, float g, float b) {
@@ -302,7 +310,23 @@ void SimWorker::stepOnce() {
     try {
         libsumo::Simulation::step();
         ++m_stepCount;
-        emit snapshotReady(buildSnapshot());
+        // Skip extraction if either (a) the GUI hasn't consumed the previous
+        // snapshot yet, or (b) nothing visual is currently active — same idea
+        // as sumo-gui only asking libsumo for what it draws.  The simulation
+        // step itself still runs so wall-time progress matches the ecal_deck
+        // publisher under the same conditions.
+        const bool anyLayer = m_vehiclesVisible || m_agentsVisible
+                           || m_tlsVisible || m_edgeDataVisible;
+        const bool needData = m_windowVisible && anyLayer;
+        const bool pending  = m_backpressure
+            && m_renderPending->load(std::memory_order_acquire) != 0;
+        if (!needData || pending) {
+            ++m_skippedSnapshots;
+        } else {
+            auto snap = buildSnapshot();
+            m_renderPending->store(1, std::memory_order_release);
+            emit snapshotReady(std::move(snap));
+        }
         emit stepReady(m_stepCount, libsumo::Simulation::getTime());
     } catch (const std::exception& e) {
         emit errorOccurred(QString::fromUtf8(e.what()));
@@ -337,6 +361,17 @@ void SimWorker::setColorMode(int mode) {
 void SimWorker::setVehicleColorMode(int mode) {
     m_vehicleColorMode = mode;
 }
+
+void SimWorker::setBackpressure(bool on) {
+    m_backpressure = on;
+    if (!on) m_renderPending->store(0, std::memory_order_release);
+}
+
+void SimWorker::setWindowVisible(bool on)   { m_windowVisible   = on; }
+void SimWorker::setVehiclesVisible(bool on) { m_vehiclesVisible = on; }
+void SimWorker::setAgentsVisible(bool on)   { m_agentsVisible   = on; }
+void SimWorker::setTLSVisible(bool on)      { m_tlsVisible      = on; }
+void SimWorker::setEdgeDataVisible(bool on) { m_edgeDataVisible = on; }
 
 void SimWorker::shutdown() {
     closeIfOpen();
