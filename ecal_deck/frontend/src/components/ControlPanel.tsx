@@ -50,6 +50,9 @@ interface Props {
   autotune: boolean;
   intervalCurrent: number;
   onStepConfig: (autotune: boolean) => void;
+  // 0 = publisher default (MAX_PUBLISH_FPS); >0 = cap to fps; <0 = uncapped
+  maxPublishFps: number;
+  onMaxPublishFps: (v: number) => void;
   perf: PerfStats;
   watchMs: number | null;      // null = not started; number = elapsed ms (ticking or frozen)
   watchRunning: boolean;       // true while ticking, false when frozen at sim end
@@ -200,6 +203,24 @@ export function ControlPanel(p: Props) {
         <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 11 }}>
           now: {p.intervalCurrent}
         </span>
+      </div>
+      <div style={row}>
+        <span style={{ whiteSpace: 'nowrap' }}>Max fps</span>
+        <select
+          value={String(p.maxPublishFps)}
+          onChange={(e) => p.onMaxPublishFps(Number(e.target.value))}
+          style={sel}
+          title="Cap the publish rate (fps). Mirrors qt_cpp's Max-fps cap so the perf comparison can pin both stacks to the same frame budget."
+        >
+          <option value="0">default (20)</option>
+          <option value="-1">uncapped</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="20">20</option>
+          <option value="30">30</option>
+          <option value="60">60</option>
+          <option value="120">120</option>
+        </select>
       </div>
 
       {/* perf stats (enable with ?perf=1 in the URL) */}

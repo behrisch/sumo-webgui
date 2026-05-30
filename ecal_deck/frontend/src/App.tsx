@@ -515,8 +515,13 @@ export default function App() {
 
   const [autotune, setAutotune] = useState(true);
   const [intervalCurrent, setIntervalCurrent] = useState(1);
-  const sendStepConfig = (tune: boolean) =>
-    sendCommand('set_step_config', { autotune: tune });
+  // Runtime override for the publisher's MAX_PUBLISH_FPS clamp.
+  //   0  = use publisher default (current behaviour, MAX_PUBLISH_FPS=20)
+  //  > 0 = cap to this fps
+  //  < 0 = disable the cap entirely
+  const [maxPublishFps, setMaxPublishFps] = useState<number>(0);
+  const sendStepConfig = (tune: boolean, maxFps: number = maxPublishFps) =>
+    sendCommand('set_step_config', { autotune: tune, max_publish_fps: maxFps });
 
   // Lane markings and turning arrows — also static, memoized on parsed.
   const markingLayers = useMemo(() => {
@@ -850,6 +855,8 @@ export default function App() {
       autotune={autotune}
       intervalCurrent={intervalCurrent}
       onStepConfig={(tune) => { setAutotune(tune); sendStepConfig(tune); }}
+      maxPublishFps={maxPublishFps}
+      onMaxPublishFps={(v) => { setMaxPublishFps(v); sendStepConfig(autotune, v); }}
       cfgPath={cfgPath} onBrowse={() => setShowBrowser(true)}
       onReload={() => handleLoad(cfgPath)}
       autostart={autostart} onAutostart={handleAutostart}

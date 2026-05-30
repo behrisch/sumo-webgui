@@ -344,7 +344,10 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
 #                     and bridge can't usefully consume more than ~20 fps without
 #                     measurable per-publish cost inflation (see BENCHMARKING.md
 #                     "Browser CPU contention" finding). Enforced as an interval
-#                     lower bound.
+#                     lower bound. The frontend can override this at runtime via
+#                     set_step_config(max_publish_fps=…) so the qt_cpp ↔ ecal_deck
+#                     perf comparison can pin both stacks to the same fps cap;
+#                     these constants are the startup defaults only.
 #   MIN_PUBLISH_FPS:  soft floor for perceived smoothness. Enforced as an interval
 #                     upper bound; this may push collection overhead above the
 #                     1.5× no-GUI target if the simulation is very fast.
@@ -1074,6 +1077,12 @@ def main():
         # Rolling render-aware autotune inputs (smoothed EMA). 0 = no signal yet.
         "frontend_rolling_frame_ms":  0.0,
         "frontend_rolling_skip_rate": 0.0,
+        # Runtime-configurable publish-rate bounds; default to the constants
+        # defined at module top so existing benchmarks keep their baseline.
+        # The frontend can override via set_step_config so the qt_cpp ↔
+        # ecal_deck perf comparison can pin both stacks to the same cap.
+        "max_publish_fps":            MAX_PUBLISH_FPS,
+        "min_publish_fps":            MIN_PUBLISH_FPS,
     }
 
     # per-simulation state (replaced on each load)
@@ -1373,8 +1382,15 @@ def main():
                         steps_per_wall_sec = steps_since / elapsed_window
                         step_wall_ms = 1000.0 / steps_per_wall_sec if steps_per_wall_sec > 0 else 0.0
 
-                        max_fps_lower = max(1, int(math.ceil(steps_per_wall_sec / MAX_PUBLISH_FPS)))
-                        min_fps_upper = max(max_fps_lower, int(math.ceil(steps_per_wall_sec / MIN_PUBLISH_FPS)))
+                        # Read runtime-configurable caps (defaults to the module
+                        # constants on startup). Setting either to <= 0 disables
+                        # that bound for the current report window.
+                        cur_max_fps = ctrl.get("max_publish_fps", MAX_PUBLISH_FPS) or 0.0
+                        cur_min_fps = ctrl.get("min_publish_fps", MIN_PUBLISH_FPS) or 0.0
+                        max_fps_lower = (max(1, int(math.ceil(steps_per_wall_sec / cur_max_fps)))
+                                         if cur_max_fps > 0 else 1)
+                        min_fps_upper = (max(max_fps_lower, int(math.ceil(steps_per_wall_sec / cur_min_fps)))
+                                         if cur_min_fps > 0 else 10**9)
 
                         frontend_lower = 1
                         fr_ms = ctrl.get("frontend_rolling_frame_ms", 0.0)
@@ -1773,6 +1789,17 @@ def main():
             ctrl["autotune"] = req.autotune
             if not ctrl["autotune"]:
                 ctrl["interval_current"] = 1
+            # 0 (default for unset proto3 doubles) means "leave unchanged".
+            # Negative values disable the corresponding bound entirely
+            # (treated as 0 internally; see _step_loop autotune branch).
+            if req.max_publish_fps > 0:
+                ctrl["max_publish_fps"] = float(req.max_publish_fps)
+            elif req.max_publish_fps < 0:
+                ctrl["max_publish_fps"] = 0.0
+            if req.min_publish_fps > 0:
+                ctrl["min_publish_fps"] = float(req.min_publish_fps)
+            elif req.min_publish_fps < 0:
+                ctrl["min_publish_fps"] = 0.0
             return _ack()
         except Exception as e:
             return _ack(False, str(e))

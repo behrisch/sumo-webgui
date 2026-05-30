@@ -194,6 +194,12 @@ message SetStepConfigRequest {
   int32 interval_min = 1;  // minimum steps between publishes (default 1)
   int32 interval_max = 2;  // maximum steps (default 10)
   bool  autotune     = 3;  // auto-tune within [min, max] to keep overhead <= 1.5× no-GUI baseline (≤ 33% of step time)
+  // Runtime overrides for the publish-rate clamps.  Both default to 0 on
+  // unset proto3 doubles which means "leave the current value alone".
+  //   > 0  → use this value (frames per wall second).
+  //   < 0  → disable the bound entirely (no cap / no floor).
+  double max_publish_fps = 4;
+  double min_publish_fps = 5;
 }
 
 message LoadRequest { string sumocfg_path = 1; }

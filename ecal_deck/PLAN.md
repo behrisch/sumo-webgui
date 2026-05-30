@@ -445,7 +445,12 @@ step → frame time = 3 × per-render cost. Publisher flooding faster than brows
 **Status: implemented.** The publisher now enforces a 10–30 fps publish-rate
 band on top of the existing 1.5× overhead budget, and consumes rolling rAF
 frame times from the frontend to avoid publishing faster than the browser can
-render. See `MAX_PUBLISH_FPS` / `MIN_PUBLISH_FPS` in `sumo_ecal_publisher.py`.
+render. See `MAX_PUBLISH_FPS` / `MIN_PUBLISH_FPS` in `sumo_ecal_publisher.py`
+— these are now only startup defaults; the frontend can override them at
+runtime through `set_step_config` (`max_publish_fps` / `min_publish_fps`
+fields).  The "Max fps" select in `ControlPanel.tsx` exposes the override so
+the qt_cpp ↔ ecal_deck perf comparison can pin both stacks to the same fps
+cap (0 keeps the publisher default, –1 disables the cap entirely).
 
 Policy (applied inside the existing autotune block, every published step):
 
