@@ -12,20 +12,46 @@ const out    = join('src', 'generated');
 mkdirSync(out, { recursive: true });
 
 // Canonical source of truth is SUMO's src/libsumo/sumo_ecal.proto — the same
-// file that libsumocpp.so embeds.  When SUMO_HOME is set we sync the local
-// proto/sumo.proto from there so the schema cannot drift; the local copy is
-// kept git-tracked as a fallback for environments without SUMO checked out
-// (e.g. Windows boxes that only build the frontend).
+// file that libsumocpp.so embeds.  When SUMO_HOME is set we compare it against
+// the local proto/sumo.proto.  The local copy stays git-tracked (fallback for
+// Windows boxes that build only the frontend, and to bootstrap a fresh clone).
+//
+// Behavior on mismatch:
+//   - local missing       → copy from upstream
+//   - identical           → no-op
+//   - differ              → ERROR with diff-summary, telling the user either
+//                           to update their SUMO clone (if upstream is stale)
+//                           or rerun with SYNC_SUMO_PROTO=1 to overwrite local.
+// This prevents silent downgrades when SUMO_HOME points at an out-of-date
+// SUMO checkout that hasn't pulled the latest sumo_ecal.proto.
 const sumoHome   = process.env.SUMO_HOME;
 const localProto = join(proto, 'sumo.proto');
 if (sumoHome) {
   const upstream = join(sumoHome, 'src', 'libsumo', 'sumo_ecal.proto');
   if (existsSync(upstream)) {
     const a = readFileSync(upstream);
-    const b = existsSync(localProto) ? readFileSync(localProto) : Buffer.alloc(0);
-    if (!a.equals(b)) {
-      console.log(`syncing ${localProto} <- ${upstream}`);
+    const haveLocal = existsSync(localProto);
+    const b = haveLocal ? readFileSync(localProto) : Buffer.alloc(0);
+    if (!haveLocal) {
+      console.log(`syncing ${localProto} <- ${upstream} (local missing)`);
       copyFileSync(upstream, localProto);
+    } else if (!a.equals(b)) {
+      if (process.env.SYNC_SUMO_PROTO === '1') {
+        console.log(`syncing ${localProto} <- ${upstream} (SYNC_SUMO_PROTO=1)`);
+        copyFileSync(upstream, localProto);
+      } else {
+        console.error(
+          `\nERROR: ${localProto} differs from ${upstream}\n` +
+          `  Local  : ${b.length} bytes\n` +
+          `  Upstream: ${a.length} bytes\n\n` +
+          `The canonical schema lives in SUMO at src/libsumo/sumo_ecal.proto.\n` +
+          `Either:\n` +
+          `  (a) Update your SUMO clone (git pull in ${sumoHome}) if upstream is stale, or\n` +
+          `  (b) Rerun with SYNC_SUMO_PROTO=1 to overwrite the local copy from upstream.\n` +
+          `Refusing to silently overwrite ${localProto}.\n`
+        );
+        process.exit(1);
+      }
     }
   }
 }
