@@ -63,7 +63,7 @@ void SimWorker::closeIfOpen() noexcept {
 void SimWorker::loadScenario(const QString& sumocfgPath) {
     closeIfOpen();
     // Best-effort early render from the shared ecal_deck network cache.
-    // If `__ecaldeck__/<base>.net.vN.bin` exists next to the .net.xml and
+    // If `__sumocache__/<base>.net.vN.bin` exists next to the .net.xml and
     // is up-to-date, fire networkReady BEFORE Simulation::start() so the
     // user sees the road network during the (often multi-second) libsumo
     // load.  Cache miss / version mismatch / geo-referenced net all

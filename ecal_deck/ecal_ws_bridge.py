@@ -30,6 +30,88 @@ import websockets
 import ecal.nanobind_core as ecal_core
 import sumo_pb2
 from google.protobuf.json_format import MessageToDict, ParseDict
+import array as _array
+import struct as _struct
+
+
+# Per-cache (proj_str, ox, oy) → pyproj.Transformer cache for the cache→wire
+# conversion. Computed lazily because pyproj is heavy to import at startup.
+_proj_cache = {}
+_pyproj_mod = None
+
+
+def _get_transformer(proj_str):
+    """Return a pyproj.Transformer that maps SUMO XY (in target CRS metres) →
+    WGS84 lon/lat. Memoised by proj_str.
+    """
+    global _pyproj_mod
+    if _pyproj_mod is None:
+        import pyproj as _pp
+        _pyproj_mod = _pp
+    t = _proj_cache.get(proj_str)
+    if t is None:
+        t = _pyproj_mod.Transformer.from_crs(proj_str, "EPSG:4326", always_xy=True)
+        _proj_cache[proj_str] = t
+    return t
+
+
+def _cache_to_wire(ng_bytes):
+    """Convert a v2 network-cache file (positions = f32 cartesian SUMO XY) to
+    the on-wire NetworkGeometry bytes (positions = f64 lonlat for geo nets,
+    f64 cartesian otherwise). Older v1 caches (already f64 lonlat) are
+    returned unchanged so a mid-upgrade publisher↔bridge pair still works.
+    """
+    ng = sumo_pb2.NetworkGeometry()
+    ng.ParseFromString(ng_bytes)
+    # v1 caches already match the wire format; nothing to do.
+    if ng.version < 2:
+        return ng_bytes
+
+    # Apply netOffset (the inverse of what GeoConvHelper does in
+    # cartesian2geo): wire-coordinates = projection_forward(XY - netOffsetBase)
+    # For non-geo nets we skip the projection but still upcast f32 → f64 so
+    # the frontend (which reads Float64Array unconditionally) stays simple.
+    geo = ng.geo_referenced
+    proj_str = ng.proj_parameter or ""
+    ox = oy = 0.0
+    if ng.net_offset:
+        try:
+            sx, sy = ng.net_offset.split(",", 1)
+            ox = float(sx); oy = float(sy)
+        except ValueError:
+            pass
+
+    transformer = _get_transformer(proj_str) if geo and proj_str and proj_str != "!" else None
+
+    def _convert(buf):
+        if not buf:
+            return buf
+        n = len(buf) // 4  # f32 count
+        # Unpack as f32 in one shot, then convert.
+        xy = _array.array('f')
+        xy.frombytes(buf)
+        if transformer is not None:
+            xs = [xy[i] - ox for i in range(0, n, 2)]
+            ys = [xy[i] - oy for i in range(1, n, 2)]
+            lons, lats = transformer.transform(xs, ys)
+            out = _array.array('d')
+            out.extend([0.0] * n)
+            for k in range(n // 2):
+                out[k * 2]     = lons[k]
+                out[k * 2 + 1] = lats[k]
+            return out.tobytes()
+        # Non-geo: just upcast f32 → f64 (no offset; matches v1 non-geo).
+        out = _array.array('d')
+        out.extend(xy)
+        return out.tobytes()
+
+    ng.lane_positions             = _convert(ng.lane_positions)
+    ng.junction_positions         = _convert(ng.junction_positions)
+    ng.tls_positions              = _convert(ng.tls_positions)
+    ng.solid_marking_positions    = _convert(ng.solid_marking_positions)
+    ng.dashed_marking_positions   = _convert(ng.dashed_marking_positions)
+    return ng.SerializeToString()
+
 
 SERVICE_NAME = "sumo_control"
 
@@ -137,6 +219,7 @@ def _make_callback(topic: str, type_byte: int):
                 if nd.cache_path:
                     with open(nd.cache_path, 'rb') as f:
                         ng_bytes = f.read()
+                    ng_bytes = _cache_to_wire(ng_bytes)
                     frame = bytes([_TYPE_NETWORK]) + ng_bytes
                     _network_frame = frame
                     if _loop is not None:
@@ -250,6 +333,7 @@ async def _network_poller() -> None:
         try:
             with open(cache_path, 'rb') as f:
                 ng_bytes = f.read()
+            ng_bytes = _cache_to_wire(ng_bytes)
             frame = bytes([_TYPE_NETWORK]) + ng_bytes
             _network_frame = frame
             _reliable_send_bytes(frame)
@@ -305,7 +389,8 @@ async def _send_initial_state(websocket) -> None:
             if cache_path:
                 try:
                     with open(cache_path, 'rb') as f:
-                        net_frame = bytes([_TYPE_NETWORK]) + f.read()
+                        ng_bytes = f.read()
+                    net_frame = bytes([_TYPE_NETWORK]) + _cache_to_wire(ng_bytes)
                 except OSError:
                     net_frame = None
 

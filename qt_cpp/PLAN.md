@@ -479,7 +479,7 @@ to qt_cpp (via libsumocpp rebuild) and ecal_deck (via `npm run generate`).
      code referenced from the generated header at link time).
 2. **Cache lookup** (new file `src/sim/NetworkCache.{h,cpp}`)
    - `std::filesystem::path cachePathFor(const std::string& netFile)`
-     mirrors Python's `_cache_path` (same `__ecaldeck__/<base>.net.v<N>.bin`
+     mirrors Python's `_cache_path` (same `__sumocache__/<base>.net.v<N>.bin`
      layout so both halves share the same file).
    - `std::shared_ptr<NetworkGeometry> tryLoadCache(const std::string& sumocfg)`:
      parses sumocfg → resolves `net-file`, returns `nullptr` on stale /

@@ -13,7 +13,7 @@ namespace network_cache {
 std::string resolveNetFile(const std::string& sumocfgPath);
 
 // Cache path for `netFile`, matching `_cache_path(net_file, 'net')` in
-// `ecal_deck/sumo_ecal_publisher.py` (`__ecaldeck__/<base>.net.v<N>.bin`).
+// `ecal_deck/sumo_ecal_publisher.py` (`__sumocache__/<base>.net.v<N>.bin`).
 // Returns empty if `netFile` is empty.
 std::string cachePathFor(const std::string& netFile);
 

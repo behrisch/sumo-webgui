@@ -1408,7 +1408,7 @@ scenario_dir/
   net.xml.gz
   shapes.poly.xml
   busstops.add.xml
-  __ecaldeck__/
+  __sumocache__/
     net.xml.gz.v8.bin               # NetworkGeometry, version stamped in filename
     shapes.poly.xml.poly.v1.bin     # PolygonData
     busstops.add.xml.stops.v1.bin   # StoppingPlaceData
@@ -1416,7 +1416,7 @@ scenario_dir/
 ```
 
 Rules:
-- Cache dir = `os.path.join(os.path.dirname(source_file), '__ecaldeck__')`.
+- Cache dir = `os.path.join(os.path.dirname(source_file), '__sumocache__')`.
 - Filename = `<basename(source)>.<family>.v<VERSION>.bin`. Family tag lets one
   additional file produce up to one cache per family. A **single
   `_CACHE_VERSION`** constant (the same one already used by `NetworkGeometry`)
@@ -1553,7 +1553,7 @@ Notes:
    - Optional CLI flags `--poly-file PATH`, `--additional-file PATH`
      (repeatable) augment the sumocfg list.
 3. For each (file, family) pair with at least one element: cache-check
-   (`__ecaldeck__/<base>.<family>.v<N>.bin`), and on miss call the
+   (`__sumocache__/<base>.<family>.v<N>.bin`), and on miss call the
    appropriate builder:
    - **`_build_polygon_binary(elements, net)`** — `sumolib.shapes.polygon`
      and `.poi` already provide typed `.shape` / `.color` / etc. Pack with
@@ -1569,7 +1569,7 @@ Notes:
      point at `pos`), angle = lane direction at that pos. E2: same as a
      stopping-place rectangle. E3: emit one bar per `<detEntry>` / `<detExit>`
      child.
-4. Write each cache under `__ecaldeck__/`, return path.
+4. Write each cache under `__sumocache__/`, return path.
 5. Publish an `AdditionalsNotice` per cache on `sumo/additionals`. Multiple
    files → multiple notices, each carrying its own `cache_path` and family.
 6. Wire-up mirrors the network cache: publisher resolves and publishes
@@ -1683,7 +1683,7 @@ but not 2) out of the first slice.
 
 #### Status (as of commits ff15802 → HEAD)
 
-- [x] **Step 1** — Cache-dir refactor (`__ecaldeck__/` + `.gitignore`,
+- [x] **Step 1** — Cache-dir refactor (`__sumocache__/` + `.gitignore`,
   version-in-filename, `_cache_path(source, family)` helper). Commit `ff15802`.
 - [x] **Step 2** — `PolygonData` + `AdditionalsNotice` proto, publisher
   builder, CLI `--additional-file`. Commit `c135fc2`.

@@ -80,20 +80,24 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 1  # increment on any incompatible cache format change (network or additionals)
+_CACHE_VERSION = 2  # increment on any incompatible cache format change (network or additionals)
 
 
 def _cache_path(source_file: str, family: str) -> str:
     """Return the binary cache path for `source_file` and `family` under a
-    `__ecaldeck__/` sibling directory. Filename is
+    `__sumocache__/` sibling directory. Filename is
     `<basename(source)>.<family>.v<VERSION>.bin` so stale caches can be
     rejected by listing the dir (no need to open them).
 
     The directory is created lazily and given a `.gitignore` containing `*`
     so users don't accidentally commit caches.
+
+    Historical note: the dir used to be `__ecaldeck__/` when only the
+    ecal_deck publisher wrote here, but qt_cpp now reads the same files,
+    so the name was generalized.
     """
     src_dir  = os.path.dirname(os.path.abspath(source_file))
-    cache_dir = os.path.join(src_dir, '__ecaldeck__')
+    cache_dir = os.path.join(src_dir, '__sumocache__')
     if not os.path.isdir(cache_dir):
         try:
             os.makedirs(cache_dir, exist_ok=True)
@@ -116,26 +120,28 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
 
     geo_ref = net.hasGeoProj()
 
-    def _xy(x, y):
-        return net.convertXY2LonLat(x, y) if geo_ref else (x, y)
+    # Cache v2: positions are stored as raw SUMO XY (f32). Any lonlat
+    # conversion is done by the bridge at publish time using the cached
+    # proj_parameter + net_offset. This keeps qt_cpp PROJ-free and halves
+    # cache size vs v1's f64 lonlat.
 
     # lanes + TLS in a single pass over edges
     edge_ids    = []
     lane_starts = _array.array('I')  # uint32 LE
-    lane_pos    = _array.array('d')  # float64 LE
+    lane_pos    = _array.array('f')  # float32 LE — cartesian XY
     lane_widths = _array.array('f')  # float32 LE
     lane_edge_idx = _array.array('I')  # uint32 LE
     lane_ids    = []
     lane_cur    = 0
-    tls_pos     = _array.array('d')
+    tls_pos     = _array.array('f')  # float32 LE — cartesian XY
     tls_entries = []
 
     # lane markings: solid outer edges + dashed dividers between adjacent lanes
     solid_mark_starts = _array.array('I')  # uint32 LE
-    solid_mark_pos    = _array.array('d')  # float64 LE
+    solid_mark_pos    = _array.array('f')  # float32 LE — cartesian XY
     solid_cur         = 0
     dashed_mark_starts = _array.array('I')  # uint32 LE
-    dashed_mark_pos    = _array.array('d')  # float64 LE
+    dashed_mark_pos    = _array.array('f')  # float32 LE — cartesian XY
     dashed_cur         = 0
 
     # turning arrows: one byte per lane, bitmask of allowed directions
@@ -177,16 +183,15 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
             lane_starts.append(lane_cur)
             shape = lane.getShape()
             for x, y in shape:
-                lx, ly = _xy(x, y)
-                lane_pos.append(lx)
-                lane_pos.append(ly)
+                lane_pos.append(x)
+                lane_pos.append(y)
             lane_cur += len(shape)
 
             # --- lane markings (skip internal junction edges) ---
             if not is_internal and len(shape) >= 2:
                 # Right boundary of rightmost lane → solid outer edge
                 if li == 0:
-                    rb = [(_xy(x, y)) for x, y in gh.move2side(shape, w / 2)]
+                    rb = gh.move2side(shape, w / 2)
                     if len(rb) >= 2:
                         solid_mark_starts.append(solid_cur)
                         for x, y in rb:
@@ -194,7 +199,7 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                             solid_mark_pos.append(y)
                         solid_cur += len(rb)
                 # Left boundary of each lane
-                lb = [(_xy(x, y)) for x, y in gh.move2side(shape, -w / 2)]
+                lb = gh.move2side(shape, -w / 2)
                 if len(lb) >= 2:
                     if li == n_lanes - 1:
                         # Leftmost lane → solid outer edge
@@ -258,9 +263,7 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
                         prev, end = shape[-2:]
                         p1 = gh.add(end, gh.sideOffset(prev, end, off))
                         p2 = gh.add(end, gh.sideOffset(prev, end, off + bar))
-                        x1, y1 = _xy(*p1)
-                        x2, y2 = _xy(*p2)
-                        tls_pos.extend([x1, y1, x2, y2])
+                        tls_pos.extend([p1[0], p1[1], p2[0], p2[1]])
                         tls_entries.append(sumo_pb2.TlsEntry(
                             id="%s_%s" % (con.getJunction().getID(), con.getJunctionIndex()),
                             tls=con.getTLSID(),
@@ -272,7 +275,7 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
 
     # junctions — full polygon vertices
     junc_starts = _array.array('I')  # uint32 LE
-    junc_pos    = _array.array('d')  # float64 LE
+    junc_pos    = _array.array('f')  # float32 LE — cartesian XY
     junc_ids    = []
     junc_cur    = 0
     for junction in net.getNodes():
@@ -282,9 +285,8 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
         junc_ids.append(junction.getID())
         junc_starts.append(junc_cur)
         for x, y in shape:
-            lx, ly = _xy(x, y)
-            junc_pos.append(lx)
-            junc_pos.append(ly)
+            junc_pos.append(x)
+            junc_pos.append(y)
         junc_cur += len(shape)
     junc_starts.append(junc_cur)  # sentinel
 
@@ -317,6 +319,7 @@ def _build_network_binary(net, net_file: str, include_tls: bool) -> tuple:
         lane_perm_class=lane_perm_cls.tobytes(),
         lane_has_stopline=lane_has_stopline.tobytes(),
         lane_function=lane_function.tobytes(),
+        has_z=False,  # XY-only for now; future 3D nets will bump version.
     )
     data = ng.SerializeToString()
     with open(cache_path, 'wb') as f:
