@@ -19,10 +19,13 @@ done
 
 cleanup() {
     echo "Shutting down..."
-    [ -n "${BRIDGE_PID:-}"    ] && kill "$BRIDGE_PID"    2>/dev/null; true
-    [ -n "${PUBLISHER_PID:-}" ] && kill "$PUBLISHER_PID" 2>/dev/null; true
-    [ -n "${BRIDGE_PID:-}"    ] && wait "$BRIDGE_PID"    2>/dev/null; true
-    [ -n "${PUBLISHER_PID:-}" ] && wait "$PUBLISHER_PID" 2>/dev/null; true
+    for pid in "${BRIDGE_PID:-}" "${PUBLISHER_PID:-}"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    pkill -TERM -P $$ 2>/dev/null || true
+    for pid in "${BRIDGE_PID:-}" "${PUBLISHER_PID:-}"; do
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
 }
 trap cleanup EXIT INT TERM
 

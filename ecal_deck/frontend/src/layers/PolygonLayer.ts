@@ -2,6 +2,12 @@ import { SolidPolygonLayer, PathLayer, ScatterplotLayer, IconLayer } from '@deck
 import type { PolygonData } from '../generated/sumo';
 
 // Bytes → typed-array views; copy when alignment would be wrong.
+function f64(u8: Uint8Array): Float64Array {
+  if (u8.byteOffset % 8 === 0)
+    return new Float64Array(u8.buffer, u8.byteOffset, u8.byteLength / 8);
+  const a = new Uint8Array(u8.byteLength); a.set(u8);
+  return new Float64Array(a.buffer, 0, u8.byteLength / 8);
+}
 function f32(u8: Uint8Array): Float32Array {
   if (u8.byteOffset % 4 === 0)
     return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
@@ -18,7 +24,7 @@ function u32(u8: Uint8Array): Uint32Array {
 export interface ParsedPolygons {
   count: number;
   starts: Uint32Array;        // length count+1, vertex offsets into xy
-  xy: Float32Array;           // interleaved [x,y,...]
+  xy: Float64Array;           // interleaved [x,y,...] — lonlat for geo, XY otherwise
   rgba: Uint8Array;           // 4 bytes per poly
   flags: Uint8Array;          // bit0 = fill
   ids: string[];
@@ -27,7 +33,7 @@ export interface ParsedPolygons {
 
 export interface ParsedPOIs {
   count: number;
-  xy: Float32Array;           // interleaved
+  xy: Float64Array;           // interleaved
   rgba: Uint8Array;
   width: Float32Array;        // metres; 0 = use default
   ids: string[];
@@ -47,7 +53,7 @@ export function parsePolygonData(pd: PolygonData): ParsedPolygonSource {
     polygons: {
       count: pd.poly_count,
       starts: u32(pd.poly_starts),
-      xy:     f32(pd.poly_xy),
+      xy:     f64(pd.poly_xy),
       rgba:   pd.poly_rgba instanceof Uint8Array ? pd.poly_rgba : new Uint8Array(pd.poly_rgba),
       flags:  pd.poly_flags instanceof Uint8Array ? pd.poly_flags : new Uint8Array(pd.poly_flags),
       ids:    pd.poly_ids,
@@ -55,7 +61,7 @@ export function parsePolygonData(pd: PolygonData): ParsedPolygonSource {
     },
     pois: {
       count: pd.poi_count,
-      xy:    f32(pd.poi_xy),
+      xy:    f64(pd.poi_xy),
       rgba:  pd.poi_rgba instanceof Uint8Array ? pd.poi_rgba : new Uint8Array(pd.poi_rgba),
       width: f32(pd.poi_width),
       ids:   pd.poi_ids,
@@ -89,7 +95,7 @@ export function buildPolygonLayers(
     let pts = 0;
     for (const i of group) pts += p.starts[i + 1] - p.starts[i];
     const starts        = new Uint32Array(group.length + 1);
-    const positions     = new Float32Array(pts * 2);
+    const positions     = new Float64Array(pts * 2);
     const rgba          = new Uint8Array(group.length * 4);
     // Per-vertex copy of the colors; SolidPolygonLayer's auto-detection of
     // per-feature vs per-vertex binary color attributes is unreliable, so we
@@ -125,14 +131,44 @@ export function buildPolygonLayers(
   // Filled polygons (e.g. parks, building footprints set fill="true").
   const fs = slice(fillIdx);
   if (fs) {
+    // Pre-close every ring (duplicate first vertex at the end if not already).
+    // deck.gl's `_normalize: true` step otherwise appends a closing vertex per
+    // ring at render time, which makes the per-vertex color buffer one entry
+    // short and leaves one corner with a stray colour. With rings pre-closed,
+    // normalize is a no-op so the buffers stay aligned. We keep
+    // `_normalize: true` so the tessellator still fixes winding order — SUMO
+    // polygons are not guaranteed to be CCW.
+    const closedStarts: number[] = [0];
+    const closedPos: number[] = [];
+    const closedRgba: number[] = [];
+    for (let g = 0; g < fillIdx.length; g++) {
+      const s = fs.starts[g], e = fs.starts[g + 1];
+      const r  = fs.rgba[g * 4    ];
+      const gC = fs.rgba[g * 4 + 1];
+      const b  = fs.rgba[g * 4 + 2];
+      const a  = fs.rgba[g * 4 + 3];
+      for (let v = s; v < e; v++) {
+        closedPos.push(fs.positions[v * 2], fs.positions[v * 2 + 1]);
+        closedRgba.push(r, gC, b, a);
+      }
+      if (e - s > 1) {
+        const fx = fs.positions[s * 2],       fy = fs.positions[s * 2 + 1];
+        const lx = fs.positions[(e - 1) * 2], ly = fs.positions[(e - 1) * 2 + 1];
+        if (fx !== lx || fy !== ly) {
+          closedPos.push(fx, fy);
+          closedRgba.push(r, gC, b, a);
+        }
+      }
+      closedStarts.push(closedPos.length / 2);
+    }
     layers.push(new SolidPolygonLayer({
       id: `polygons-fill-${layerIdSuffix}`,
       data: {
         length: fillIdx.length,
-        startIndices: fs.starts,
+        startIndices: new Uint32Array(closedStarts),
         attributes: {
-          getPolygon: { value: fs.positions, size: 2 },
-          getFillColor: { value: fs.rgbaPerVertex, size: 4, normalized: true },
+          getPolygon: { value: new Float64Array(closedPos), size: 2 },
+          getFillColor: { value: new Uint8Array(closedRgba), size: 4, normalized: true },
         },
       },
       _normalize: true,
@@ -167,7 +203,7 @@ export function buildPolygonLayers(
         length: lineIdx.length,
         startIndices: new Uint32Array(closedStarts),
         attributes: {
-          getPath: { value: new Float32Array(closedPos), size: 2 },
+          getPath: { value: new Float64Array(closedPos), size: 2 },
           getColor: { value: ls.rgba, size: 4, normalized: true },
         },
       },
@@ -199,9 +235,9 @@ export function buildPOILayer(
   const p = source.pois;
   if (p.count === 0) return null;
 
-  // ScatterplotLayer uses 64-bit positions; we need to upcast f32 -> f64 once.
-  const pos64 = new Float64Array(p.count * 2);
-  for (let i = 0; i < p.count * 2; i++) pos64[i] = p.xy[i];
+  // ScatterplotLayer wants 64-bit positions; p.xy is already f64 — copy it
+  // so we own the buffer (parent Uint8Array may be reused by protobuf).
+  const pos64 = new Float64Array(p.xy);
 
   // Per-POI radius (metres) — fall back to a small default when width=0.
   const radius = new Float32Array(p.count);

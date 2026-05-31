@@ -524,6 +524,35 @@ to qt_cpp (via libsumocpp rebuild) and ecal_deck (via `npm run generate`).
   `NetworkGeometry::version` (already enforced) and both readers
   re-generated.
 
+### Status — implemented (cache v2, f32 cartesian)
+
+The cache reader landed and is now at **format version 2**. Key choices
+relative to the original v1 design:
+
+- **Positions are stored as f32 SUMO XY (cartesian) on disk**, not f64
+  lon/lat as v1 was. The wire format (eCAL / WebSocket) is unchanged —
+  the frontend still receives f64 lon/lat for geo nets and f64 cartesian
+  otherwise — because **the bridge converts on the fly** in
+  `ecal_ws_bridge._cache_to_wire()` using pyproj.
+- Trade-off: roughly halves cache file size (e.g. Berlin ~232 MB → ~116 MB)
+  and **drops the PROJ dependency from qt_cpp entirely**: the qt reader
+  consumes raw SUMO XY and never needs to reverse-project. The cost is
+  one extra projection pass in the bridge per scenario load.
+- f32 cartesian is precise enough: ~7 significant digits ≈ 1 cm over
+  100 km, which comfortably covers any SUMO net. f32 lon/lat would be
+  ~1 m precision at 5–6 decimal degrees, which is why the f32-vs-f64
+  and cartesian-vs-geo decisions are coupled.
+- The proto carries a new `has_z` flag (currently hardcoded `false`).
+  When a layer eventually needs Z, set `has_z=true` and bump the buffer
+  stride from 2×f32 to 3×f32 on both sides; the format is forward-
+  compatible.
+- `NetworkCache.cpp` no longer includes `<proj.h>` or carries a
+  `GeoInverter` class. `CMakeLists.txt` no longer calls `find_package(PROJ)`
+  or links `PROJ::proj`.
+
+The cache directory was also renamed `__ecaldeck__` → `__sumocache__`
+across publisher, qt_cpp and docs (it is no longer ecal-deck specific).
+
 ## Graphics API choice — Qt RHI migration
 
 ### Background

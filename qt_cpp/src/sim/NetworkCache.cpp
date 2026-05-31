@@ -46,7 +46,7 @@ namespace {
 // Cache layout version. MUST match _CACHE_VERSION in
 // ecal_deck/sumo_ecal_publisher.py.  Bump in lockstep with any
 // incompatible NetworkGeometry change on either side.
-constexpr int kCacheVersion = 2;
+constexpr int kCacheVersion = 3;
 
 // Read entire file as bytes. Returns empty on any error.
 std::string slurp(const fs::path& p) {

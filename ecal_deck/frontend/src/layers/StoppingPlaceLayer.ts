@@ -1,11 +1,11 @@
 import { SolidPolygonLayer } from '@deck.gl/layers';
 import type { StoppingPlaceData } from '../generated/sumo';
 
-function f32(u8: Uint8Array): Float32Array {
-  if (u8.byteOffset % 4 === 0)
-    return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
+function f64(u8: Uint8Array): Float64Array {
+  if (u8.byteOffset % 8 === 0)
+    return new Float64Array(u8.buffer, u8.byteOffset, u8.byteLength / 8);
   const a = new Uint8Array(u8.byteLength); a.set(u8);
-  return new Float32Array(a.buffer, 0, u8.byteLength / 4);
+  return new Float64Array(a.buffer, 0, u8.byteLength / 8);
 }
 function u32(u8: Uint8Array): Uint32Array {
   if (u8.byteOffset % 4 === 0)
@@ -20,9 +20,9 @@ export interface ParsedStops {
   count: number;
   kind: Uint8Array;
   starts: Uint32Array;
-  xy: Float32Array;
+  xy: Float64Array;
   rgba: Uint8Array;
-  labelXy: Float32Array;
+  labelXy: Float64Array;
   ids: string[];
   names: string[];
   lines: string[];
@@ -33,9 +33,9 @@ export function parseStoppingPlaceData(sd: StoppingPlaceData): ParsedStops {
     count:  sd.count,
     kind:   sd.kind instanceof Uint8Array ? sd.kind : new Uint8Array(sd.kind),
     starts: u32(sd.xy_starts),
-    xy:     f32(sd.xy),
+    xy:     f64(sd.xy),
     rgba:   sd.rgba instanceof Uint8Array ? sd.rgba : new Uint8Array(sd.rgba),
-    labelXy: f32(sd.label_xy),
+    labelXy: f64(sd.label_xy),
     ids: sd.ids, names: sd.names, lines: sd.lines,
   };
 }

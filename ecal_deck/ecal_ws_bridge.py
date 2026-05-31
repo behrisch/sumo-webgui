@@ -19,11 +19,13 @@ Usage:
 
 import argparse
 import asyncio
+import faulthandler
 import json
 import os
 import sys
 import threading
 import uuid
+faulthandler.enable()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "proto"))
 
 import websockets
@@ -32,27 +34,99 @@ import sumo_pb2
 from google.protobuf.json_format import MessageToDict, ParseDict
 import array as _array
 import struct as _struct
+# Eagerly import pyproj on the main thread. Lazy-importing it inside an eCAL
+# callback (which runs on a C++ background thread) can segfault because PROJ's
+# C-extension initialisation registers thread-local state that must be set up
+# on the main thread.
+import pyproj as _pyproj
+# Defensive: PROJ may try to fetch grid shifts from cdn.proj.org on first use
+# of certain CRSes. The bridge has no need for that and a network call from
+# inside an eCAL callback would block the dispatcher.
+try:
+    _pyproj.network.set_network_enabled(False)
+except Exception:
+    pass
+# Pre-warm PROJ's thread-local state on the main thread by constructing a
+# throw-away transformer. Constructing the first Transformer inside an eCAL
+# callback (background thread) has been observed to segfault.
+try:
+    _pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4326", always_xy=True)
+except Exception:
+    pass
+
+
+# Latest network projection context (set by _cache_to_wire when a network
+# cache is processed; reused by the additionals converters since polygon /
+# stop / detector caches do not carry proj_parameter / net_offset of their
+# own).
+_active_proj_str = ""
+_active_offset_x = 0.0
+_active_offset_y = 0.0
+_active_geo = False
 
 
 # Per-cache (proj_str, ox, oy) → pyproj.Transformer cache for the cache→wire
-# conversion. Computed lazily because pyproj is heavy to import at startup.
+# conversion. ALL pyproj work happens on a single dedicated worker thread —
+# pyproj/PROJ has both per-instance thread affinity AND shared global state
+# (CRS database) that crashes when accessed from multiple threads at once.
+# Pinning everything to one thread sidesteps both problems.
+import concurrent.futures as _futures
 _proj_cache = {}
-_pyproj_mod = None
+_proj_executor = _futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="pyproj-worker")
 
 
-def _get_transformer(proj_str):
-    """Return a pyproj.Transformer that maps SUMO XY (in target CRS metres) →
-    WGS84 lon/lat. Memoised by proj_str.
-    """
-    global _pyproj_mod
-    if _pyproj_mod is None:
-        import pyproj as _pp
-        _pyproj_mod = _pp
+def _get_transformer_unsafe(proj_str):
     t = _proj_cache.get(proj_str)
     if t is None:
-        t = _pyproj_mod.Transformer.from_crs(proj_str, "EPSG:4326", always_xy=True)
+        t = _pyproj.Transformer.from_crs(proj_str, "EPSG:4326", always_xy=True)
         _proj_cache[proj_str] = t
     return t
+
+
+def _proj_run(fn, *args):
+    """Submit *fn(*args)* to the dedicated pyproj worker thread and block
+    for its result. Re-raises any exception."""
+    return _proj_executor.submit(fn, *args).result()
+
+
+def _xy_f32_to_lonlat_f64(buf, proj_str, ox, oy):
+    """Convert a packed f32 [x,y,x,y,...] SUMO XY buffer to packed f64
+    [lon,lat,lon,lat,...] WGS84. If proj_str is empty/"!" or None, just
+    upcast f32→f64 (non-geo nets — bytes still need to widen so the
+    frontend can use Float64Array unconditionally).
+    """
+    if not buf:
+        return buf
+    n = len(buf) // 4  # f32 count
+    xy = _array.array('f')
+    xy.frombytes(buf)
+    if proj_str and proj_str != "!":
+        def _do():
+            transformer = _get_transformer_unsafe(proj_str)
+            xs = [xy[i] - ox for i in range(0, n, 2)]
+            ys = [xy[i] - oy for i in range(1, n, 2)]
+            return transformer.transform(xs, ys)
+        lons, lats = _proj_run(_do)
+        out = _array.array('d')
+        out.extend([0.0] * n)
+        for k in range(n // 2):
+            out[k * 2]     = lons[k]
+            out[k * 2 + 1] = lats[k]
+        return out.tobytes()
+    out = _array.array('d')
+    out.extend(xy)
+    return out.tobytes()
+
+
+def _active_proj_args():
+    """Resolve the (proj_str, ox, oy) tuple for the most recently seen
+    network cache. proj_str is "" for non-geo nets.
+    """
+    if (_active_geo and _active_proj_str
+            and _active_proj_str != "!"):
+        return _active_proj_str, _active_offset_x, _active_offset_y
+    return "", 0.0, 0.0
 
 
 def _cache_to_wire(ng_bytes):
@@ -60,19 +134,19 @@ def _cache_to_wire(ng_bytes):
     the on-wire NetworkGeometry bytes (positions = f64 lonlat for geo nets,
     f64 cartesian otherwise). Older v1 caches (already f64 lonlat) are
     returned unchanged so a mid-upgrade publisher↔bridge pair still works.
+
+    Also captures the network's projection context for subsequent additionals
+    conversion.
     """
+    global _active_proj_str, _active_offset_x, _active_offset_y, _active_geo
     ng = sumo_pb2.NetworkGeometry()
     ng.ParseFromString(ng_bytes)
     # v1 caches already match the wire format; nothing to do.
     if ng.version < 2:
         return ng_bytes
 
-    # Apply netOffset (the inverse of what GeoConvHelper does in
-    # cartesian2geo): wire-coordinates = projection_forward(XY - netOffsetBase)
-    # For non-geo nets we skip the projection but still upcast f32 → f64 so
-    # the frontend (which reads Float64Array unconditionally) stays simple.
-    geo = ng.geo_referenced
-    proj_str = ng.proj_parameter or ""
+    _active_geo = ng.geo_referenced
+    _active_proj_str = ng.proj_parameter or ""
     ox = oy = 0.0
     if ng.net_offset:
         try:
@@ -80,37 +154,62 @@ def _cache_to_wire(ng_bytes):
             ox = float(sx); oy = float(sy)
         except ValueError:
             pass
+    _active_offset_x = ox
+    _active_offset_y = oy
 
-    transformer = _get_transformer(proj_str) if geo and proj_str and proj_str != "!" else None
+    proj = _active_proj_str if _active_geo and _active_proj_str and _active_proj_str != "!" else ""
 
-    def _convert(buf):
-        if not buf:
-            return buf
-        n = len(buf) // 4  # f32 count
-        # Unpack as f32 in one shot, then convert.
-        xy = _array.array('f')
-        xy.frombytes(buf)
-        if transformer is not None:
-            xs = [xy[i] - ox for i in range(0, n, 2)]
-            ys = [xy[i] - oy for i in range(1, n, 2)]
-            lons, lats = transformer.transform(xs, ys)
-            out = _array.array('d')
-            out.extend([0.0] * n)
-            for k in range(n // 2):
-                out[k * 2]     = lons[k]
-                out[k * 2 + 1] = lats[k]
-            return out.tobytes()
-        # Non-geo: just upcast f32 → f64 (no offset; matches v1 non-geo).
-        out = _array.array('d')
-        out.extend(xy)
-        return out.tobytes()
-
-    ng.lane_positions             = _convert(ng.lane_positions)
-    ng.junction_positions         = _convert(ng.junction_positions)
-    ng.tls_positions              = _convert(ng.tls_positions)
-    ng.solid_marking_positions    = _convert(ng.solid_marking_positions)
-    ng.dashed_marking_positions   = _convert(ng.dashed_marking_positions)
+    ng.lane_positions             = _xy_f32_to_lonlat_f64(ng.lane_positions,             proj, ox, oy)
+    ng.junction_positions         = _xy_f32_to_lonlat_f64(ng.junction_positions,         proj, ox, oy)
+    ng.tls_positions              = _xy_f32_to_lonlat_f64(ng.tls_positions,              proj, ox, oy)
+    ng.solid_marking_positions    = _xy_f32_to_lonlat_f64(ng.solid_marking_positions,    proj, ox, oy)
+    ng.dashed_marking_positions   = _xy_f32_to_lonlat_f64(ng.dashed_marking_positions,   proj, ox, oy)
     return ng.SerializeToString()
+
+
+def _polygon_cache_to_wire(buf):
+    """Convert a v3 PolygonData cache (f32 SUMO XY) to wire format
+    (f64 lonlat for geo, f64 cartesian otherwise). v<3 passes through."""
+    pd = sumo_pb2.PolygonData()
+    pd.ParseFromString(buf)
+    if pd.version < 3:
+        return buf
+    proj, ox, oy = _active_proj_args()
+    if not pd.geo_referenced:
+        proj = ""
+    pd.poly_xy = _xy_f32_to_lonlat_f64(pd.poly_xy, proj, ox, oy)
+    pd.poi_xy  = _xy_f32_to_lonlat_f64(pd.poi_xy,  proj, ox, oy)
+    return pd.SerializeToString()
+
+
+def _stops_cache_to_wire(buf):
+    sd = sumo_pb2.StoppingPlaceData()
+    sd.ParseFromString(buf)
+    if sd.version < 3:
+        return buf
+    proj, ox, oy = _active_proj_args()
+    if not sd.geo_referenced:
+        proj = ""
+    sd.xy       = _xy_f32_to_lonlat_f64(sd.xy,       proj, ox, oy)
+    sd.label_xy = _xy_f32_to_lonlat_f64(sd.label_xy, proj, ox, oy)
+    return sd.SerializeToString()
+
+
+def _detectors_cache_to_wire(buf):
+    dd = sumo_pb2.DetectorData()
+    dd.ParseFromString(buf)
+    if dd.version < 3:
+        return buf
+    proj, ox, oy = _active_proj_args()
+    if not dd.geo_referenced:
+        proj = ""
+    dd.e1_xy     = _xy_f32_to_lonlat_f64(dd.e1_xy,     proj, ox, oy)
+    dd.e2_xy     = _xy_f32_to_lonlat_f64(dd.e2_xy,     proj, ox, oy)
+    dd.e3_bar_xy = _xy_f32_to_lonlat_f64(dd.e3_bar_xy, proj, ox, oy)
+    return dd.SerializeToString()
+
+
+_ADDITIONALS_CONVERTER_BY_TYPE = {}  # populated after _TYPE_* constants exist
 
 
 SERVICE_NAME = "sumo_control"
@@ -164,6 +263,13 @@ _ADDITIONALS_TYPE_BY_FAMILY = {
     sumo_pb2.AdditionalsNotice.DETECTORS: _TYPE_DETECTORS,
 }
 
+# Per-type cache→wire converters for additionals. None means pass-through.
+_ADDITIONALS_CONVERTER_BY_TYPE.update({
+    _TYPE_POLYGONS:  _polygon_cache_to_wire,
+    _TYPE_STOPS:     _stops_cache_to_wire,
+    _TYPE_DETECTORS: _detectors_cache_to_wire,
+})
+
 # ---------------------------------------------------------------------------
 # shared state
 # ---------------------------------------------------------------------------
@@ -205,6 +311,14 @@ def _make_callback(topic: str, type_byte: int):
                     print("bridge: failed to read additionals cache %r: %s"
                           % (notice.cache_path, exc))
                     return
+                conv = _ADDITIONALS_CONVERTER_BY_TYPE.get(tb)
+                if conv is not None:
+                    try:
+                        payload = conv(payload)
+                    except Exception as exc:
+                        print("bridge: additionals conversion failed for %r: %s"
+                              % (notice.cache_path, exc))
+                        return
                 addl_frame = bytes([tb]) + payload
                 _additionals_frames[(notice.source_path, notice.family)] = addl_frame
                 if _loop is not None:

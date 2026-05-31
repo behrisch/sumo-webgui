@@ -1701,6 +1701,23 @@ but not 2) out of the first slice.
   `test_polygons.add.xml` exercises polygon + POI + busStop + E1 + E2 in one
   file. End-to-end verified: bridge emits type-9/10/11 frames; frontend
   decodes + renders.
+- [x] **Cache format v2 → v3 (all caches aligned)** — positions across all
+  cache families (network, polygons, stopping places, detectors) are now
+  stored as **f32 cartesian SUMO XY** on disk (v1 used f64 lonlat for the
+  network and f32 lonlat for the others). The wire format is unchanged for
+  consumers: the bridge converts each cache's position buffers to f64 lonlat
+  for geo nets (or f64 cartesian otherwise) via `_cache_to_wire()` /
+  `_polygon_cache_to_wire()` / `_stops_cache_to_wire()` /
+  `_detectors_cache_to_wire()` using pyproj. Benefits:
+    - Network cache files roughly halve in size (Berlin ~232 MB → ~116 MB).
+    - qt_cpp no longer depends on PROJ — the qt reader consumes raw SUMO XY.
+    - Polygon/stop/detector positions on the wire are now full **f64**
+      precision; previously they were f32 lonlat (~1 m accuracy).
+  f32 cartesian is precise to ~1 cm over 100 km, sufficient for any SUMO
+  net; f32 lonlat would only be ~1 m precise, hence the coupled
+  f32+cartesian decision. A new `has_z` proto flag is reserved (currently
+  hardcoded `false`); when Z is needed, switch the position buffer stride
+  from 2×f32 to 3×f32 on both publisher and bridge.
 
 Out-of-scope items below remain deferred.
 

@@ -1,6 +1,12 @@
 import { SolidPolygonLayer, PathLayer } from '@deck.gl/layers';
 import type { DetectorData } from '../generated/sumo';
 
+function f64(u8: Uint8Array): Float64Array {
+  if (u8.byteOffset % 8 === 0)
+    return new Float64Array(u8.buffer, u8.byteOffset, u8.byteLength / 8);
+  const a = new Uint8Array(u8.byteLength); a.set(u8);
+  return new Float64Array(a.buffer, 0, u8.byteLength / 8);
+}
 function f32(u8: Uint8Array): Float32Array {
   if (u8.byteOffset % 4 === 0)
     return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
@@ -18,7 +24,7 @@ export interface ParsedDetectors {
   geoReferenced: boolean;
   e1: {
     count: number;
-    xy: Float32Array;          // [x,y,...]
+    xy: Float64Array;          // [x,y,...] — lonlat for geo, XY otherwise
     angle: Float32Array;       // radians
     rgba: Uint8Array;
     ids: string[];
@@ -26,13 +32,13 @@ export interface ParsedDetectors {
   e2: {
     count: number;
     starts: Uint32Array;
-    xy: Float32Array;
+    xy: Float64Array;
     rgba: Uint8Array;
     ids: string[];
   };
   e3: {
     count: number;             // bar count, not E3-detector count
-    xy: Float32Array;
+    xy: Float64Array;
     angle: Float32Array;
     rgba: Uint8Array;
     kind: Uint8Array;          // 0=entry 1=exit
@@ -45,7 +51,7 @@ export function parseDetectorData(dd: DetectorData): ParsedDetectors {
     geoReferenced: dd.geo_referenced,
     e1: {
       count: dd.e1_count,
-      xy:    f32(dd.e1_xy),
+      xy:    f64(dd.e1_xy),
       angle: f32(dd.e1_angle),
       rgba:  dd.e1_rgba instanceof Uint8Array ? dd.e1_rgba : new Uint8Array(dd.e1_rgba),
       ids:   dd.e1_ids,
@@ -53,13 +59,13 @@ export function parseDetectorData(dd: DetectorData): ParsedDetectors {
     e2: {
       count:  dd.e2_count,
       starts: u32(dd.e2_xy_starts),
-      xy:     f32(dd.e2_xy),
+      xy:     f64(dd.e2_xy),
       rgba:   dd.e2_rgba instanceof Uint8Array ? dd.e2_rgba : new Uint8Array(dd.e2_rgba),
       ids:    dd.e2_ids,
     },
     e3: {
       count: dd.e3_bar_count,
-      xy:    f32(dd.e3_bar_xy),
+      xy:    f64(dd.e3_bar_xy),
       angle: f32(dd.e3_bar_angle),
       rgba:  dd.e3_bar_rgba instanceof Uint8Array ? dd.e3_bar_rgba : new Uint8Array(dd.e3_bar_rgba),
       kind:  dd.e3_bar_kind instanceof Uint8Array ? dd.e3_bar_kind : new Uint8Array(dd.e3_bar_kind),
@@ -73,13 +79,13 @@ export function parseDetectorData(dd: DetectorData): ParsedDetectors {
 // conversion uses the StopLineLayer recipe (÷ 111000, ÷ cos(lat) for lon).
 function buildBarPaths(
   count: number,
-  xy: Float32Array,
+  xy: Float64Array,
   angle: Float32Array,
   geo: boolean,
   halfMetres: number,
-): { starts: Uint32Array; positions: Float32Array } {
+): { starts: Uint32Array; positions: Float64Array } {
   const starts    = new Uint32Array(count + 1);
-  const positions = new Float32Array(count * 2 * 2); // 2 points per bar, 2 coords each
+  const positions = new Float64Array(count * 2 * 2); // 2 points per bar, 2 coords each
   for (let i = 0; i < count; i++) {
     const cx = xy[i * 2];
     const cy = xy[i * 2 + 1];

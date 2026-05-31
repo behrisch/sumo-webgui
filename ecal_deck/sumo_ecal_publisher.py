@@ -80,7 +80,7 @@ def _make_geo_converter(proj_parameter: str, net_offset: str):
 
 
 
-_CACHE_VERSION = 2  # increment on any incompatible cache format change (network or additionals)
+_CACHE_VERSION = 3  # increment on any incompatible cache format change (network or additionals)
 
 
 def _cache_path(source_file: str, family: str) -> str:
@@ -399,17 +399,12 @@ def _classify_additional_file(xml_path: str) -> set[str]:
 
 
 def _build_polygon_binary(xml_path: str, net) -> str | None:
-    """Parse <poly> and <poi> elements from `xml_path`, project to geo when
-    the network is geo-referenced, pack as typed arrays, write the binary
-    cache and return its path. Returns None if nothing was emitted.
+    """Parse <poly> and <poi> elements from `xml_path`, pack as f32 SUMO XY
+    typed arrays (cartesian — bridge projects to lon/lat on the wire for geo
+    nets), write the binary cache and return its path. Returns None if
+    nothing was emitted.
     """
     geo_ref = net is not None and net.hasGeoProj()
-
-    def _to_world(x: float, y: float) -> tuple[float, float]:
-        if geo_ref:
-            lon, lat = net.convertXY2LonLat(x, y)
-            return lon, lat
-        return x, y
 
     poly_starts = _array.array('I', [0])
     poly_xy     = _array.array('f')
@@ -459,8 +454,7 @@ def _build_polygon_binary(xml_path: str, net) -> str | None:
                             x = float(coords[0]); y = float(coords[1])
                         except ValueError:
                             continue
-                        wx, wy = _to_world(x, y)
-                        pts.append((wx, wy))
+                        pts.append((x, y))
                 if not pts:
                     el.clear()
                     continue
@@ -480,21 +474,21 @@ def _build_polygon_binary(xml_path: str, net) -> str | None:
                 # Two coordinate forms: (x,y) on net, or (lon,lat) absolute.
                 lon = el.get('lon'); lat = el.get('lat')
                 if lon is not None and lat is not None:
-                    try:
-                        wx = float(lon); wy = float(lat)
-                    except ValueError:
-                        el.clear(); continue
-                    # If we have a geo network we can use directly; for a
-                    # non-geo net there's no sensible mapping, skip the POI.
+                    # If we have a geo network we can map back to SUMO XY; for
+                    # a non-geo net there's no sensible mapping, skip the POI.
                     if not geo_ref:
                         el.clear(); continue
-                else:
                     try:
-                        x = float(el.get('x') or '0')
-                        y = float(el.get('y') or '0')
+                        flon = float(lon); flat = float(lat)
                     except ValueError:
                         el.clear(); continue
-                    wx, wy = _to_world(x, y)
+                    wx, wy = net.convertLonLat2XY(flon, flat)
+                else:
+                    try:
+                        wx = float(el.get('x') or '0')
+                        wy = float(el.get('y') or '0')
+                    except ValueError:
+                        el.clear(); continue
                 poi_xy.append(wx); poi_xy.append(wy)
                 poi_rgba.extend(_parse_color(el.get('color'), default=(255, 0, 0, 255)))
                 try:
@@ -658,17 +652,13 @@ def _lane_segment_rectangle(lane, start_pos: float, end_pos: float, half_width: 
 
 def _build_stops_binary(xml_path: str, net) -> str | None:
     """Pack every stopping-place element found in `xml_path` into a
-    StoppingPlaceData binary cache. Returns the cache path or None.
+    StoppingPlaceData binary cache. Positions are f32 SUMO XY (cartesian);
+    the bridge projects to lon/lat on the wire for geo nets.
+    Returns the cache path or None.
     """
     if net is None:
         return None
     geo_ref = net.hasGeoProj()
-
-    def _to_world(x: float, y: float) -> tuple[float, float]:
-        if geo_ref:
-            lon, lat = net.convertXY2LonLat(x, y)
-            return lon, lat
-        return x, y
 
     kinds      = _array.array('B')
     xy_starts  = _array.array('I', [0])
@@ -711,8 +701,7 @@ def _build_stops_binary(xml_path: str, net) -> str | None:
 
             kinds.append(kind_num)
             for (x, y) in ring:
-                wx, wy = _to_world(x, y)
-                xy.append(wx); xy.append(wy)
+                xy.append(x); xy.append(y)
             xy_starts.append(len(xy) // 2)
             rgba.extend(_parse_color_tuple(el.get('color'), default_color))
             # Mid-point along the segment for label placement.
@@ -726,8 +715,7 @@ def _build_stops_binary(xml_path: str, net) -> str | None:
                 # Fallback: midpoint of ring's left side.
                 hp = ring[len(ring) // 4]
                 mx, my = hp[0], hp[1]
-            wx, wy = _to_world(mx, my)
-            label_xy.append(wx); label_xy.append(wy)
+            label_xy.append(mx); label_xy.append(my)
             ids.append(el.get('id') or '')
             names.append(el.get('name') or '')
             lines.append(el.get('lines') or '')
@@ -760,17 +748,12 @@ def _build_stops_binary(xml_path: str, net) -> str | None:
 
 def _build_detectors_binary(xml_path: str, net) -> str | None:
     """Pack every detector (E1/E2/E3) found in `xml_path` into a DetectorData
-    binary cache. Returns the cache path or None.
+    binary cache. Positions are f32 SUMO XY (cartesian); the bridge projects
+    to lon/lat on the wire for geo nets. Returns the cache path or None.
     """
     if net is None:
         return None
     geo_ref = net.hasGeoProj()
-
-    def _to_world(x: float, y: float) -> tuple[float, float]:
-        if geo_ref:
-            lon, lat = net.convertXY2LonLat(x, y)
-            return lon, lat
-        return x, y
 
     def _lane_point_and_angle(lane, pos: float) -> tuple[float, float, float] | None:
         """Return (x, y, angle_rad) at `pos` metres along `lane`."""
@@ -836,8 +819,7 @@ def _build_detectors_binary(xml_path: str, net) -> str | None:
                 if pa is None:
                     el.clear(); continue
                 x, y, ang = pa
-                wx, wy = _to_world(x, y)
-                e1_xy.append(wx); e1_xy.append(wy)
+                e1_xy.append(x); e1_xy.append(y)
                 e1_angle.append(ang)
                 e1_rgba.extend(_parse_color_tuple(el.get('color'), DEFAULT_E1))
                 e1_ids.append(el.get('id') or '')
@@ -861,8 +843,7 @@ def _build_detectors_binary(xml_path: str, net) -> str | None:
                 if not ring:
                     el.clear(); continue
                 for (x, y) in ring:
-                    wx, wy = _to_world(x, y)
-                    e2_xy.append(wx); e2_xy.append(wy)
+                    e2_xy.append(x); e2_xy.append(y)
                 e2_starts.append(len(e2_xy) // 2)
                 e2_rgba.extend(_parse_color_tuple(el.get('color'), DEFAULT_E2))
                 e2_ids.append(el.get('id') or '')
@@ -888,8 +869,7 @@ def _build_detectors_binary(xml_path: str, net) -> str | None:
                     if pa is None:
                         continue
                     x, y, ang = pa
-                    wx, wy = _to_world(x, y)
-                    e3_xy.append(wx); e3_xy.append(wy)
+                    e3_xy.append(x); e3_xy.append(y)
                     e3_angle.append(ang)
                     is_exit = (ctag == 'detExit')
                     e3_kind.append(1 if is_exit else 0)
