@@ -32,13 +32,12 @@ cmake -S qt_cpp -B qt_cpp/build \
 cmake --build qt_cpp/build -j
 ```
 
-Two executables are produced:
+Single executable is produced:
 
-- `qt_cpp` — the full OpenGL GUI (production path, all layers).
-- `qt_cpp_rhi_spike` — standalone QRhi feasibility driver that renders only
-  the vehicle layer via `VehicleLayerRhi`. Hosted on `QRhiWidget` (Qt 6.7+)
-  or `rhi_compat::RhiHostWidget` (Qt 6.4–6.6). Validates the Qt RHI
-  migration path described in `PLAN.md`.
+- `qt_cpp` — the full Qt6 + QRhi GUI (all layers).
+
+(The historical `qt_cpp_rhi_spike` standalone feasibility driver was removed
+once the RHI migration completed and parity was confirmed in `qt_cpp` itself.)
 
 ## Run
 

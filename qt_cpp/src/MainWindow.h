@@ -21,6 +21,7 @@ public:
     ~MainWindow() override;
 
     void loadSumocfg(const QString& path);
+    SimWorker* simWorker() const { return m_sim; }
 
 private slots:
     void onOpenFile();

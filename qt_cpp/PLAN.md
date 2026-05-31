@@ -391,6 +391,21 @@ Diagnostics:
       `cmclaude/src`, `build/src`, `cmake-build-release/src`).
 
 Benchmark / QA:
+- [x] **Headless-ish `--benchmark` mode (2026-05-31)**: `qt_cpp --benchmark
+      -s view.sumocfg` auto-loads, forces delay=0, auto-plays, and exits with a
+      single-line cumulative summary the moment `Simulation::getMinExpectedNumber()
+      first reaches 0. Format:
+      `[benchmark] qt_cpp: steps=N sim_time=Ss wall=Ss steps/s=… snapshots/s=…
+      skip=…% avg_step=…ms avg_build=…ms`. Window is still shown so the full
+      QRhi render pipeline is exercised — matches ecal_deck's
+      `--benchmark-full` (the publisher+frontend variant) rather than the
+      publisher-only `--benchmark`. Implementation: SimWorker now keeps
+      whole-run cumulative counters in parallel with the 2 s rolling window
+      and emits a new `simulationEnded(...)` signal exactly once per scenario
+      (guarded by `m_endEmitted`). `main.cpp` connects that signal to a
+      lambda that prints the summary and calls `app.exit(0)`. A
+      `MainWindow::simWorker()` accessor exposes the sim worker so the
+      wiring can live in `main.cpp` instead of polluting MainWindow.
 - [ ] Side-by-side screenshot diff vs `ecal_deck` on `doe/view.sumocfg`.
 - [ ] Sibling `qt_cpp/BENCHMARKING.md` with FPS / CPU / RSS numbers,
       using the new `[bench]` log line as the primary data source.
@@ -426,6 +441,60 @@ Benchmark / QA:
   same scenario at the same zoom level — checked via overlay screenshot diff.
 - Benchmarks recorded for FPS, CPU, RSS at three zoom levels matching the
   existing `BENCHMARKING.md` setup.
+
+## Parity snapshot 2026-05-31
+
+Re-checked feature-by-feature against `ecal_deck` after the latest round of
+ecal_deck changes (cache v3, additionals v3, polygon fix, bridge segfault
+fix, multi-instance `--instance-id`).
+
+**At parity (both have it):**
+- Network rendering: roads + lane widths, junctions, rails with sleepers
+  (incl. embedded tram), internal lanes / crossings / walking areas,
+  polygons (filled + outline), POIs, stopping places, detectors, TLS
+  heads, vehicles + persons with vClass shapes, edge attribute coloring
+  with viewport culling, scale bar.
+- UI: File→Open, play/pause/step/reset, delay slider, sim-time + FPS,
+  edge attribute dropdown, color scale legend, reset view, log panel,
+  picking with vehicle/lane/junction/poly/POI/TLS info box, cursor
+  XY coords, layer-visibility toggles, vehicle shape combo, vehicle
+  color-by combo, max-FPS cap.
+- Performance plumbing: render-driven back-pressure, "ask only for what
+  we render" gating, end-of-sim handling, rolling benchmark report.
+- Network cache: both consume the shared v3 `__sumocache__/*.net.v3.bin`
+  (f32 cartesian, optional geo reprojection on the consumer side).
+
+**ecal_deck has but qt_cpp does not** (none of these are new since the
+last sweep; the recent ecal_deck work didn't widen the gap):
+- MapLibre basemap tiles in geo mode — explicit `Phase 6` deferral; qt
+  has no equivalent yet.
+- `--instance-id` multi-instance support — **not applicable to qt_cpp**:
+  each `qt_cpp` invocation is a fully self-contained process with its
+  own in-process libsumo and no eCAL surface, so launching it twice
+  already gives two fully isolated GUIs. No code change needed.
+- Tauri-equivalent packaging — listed as `Phase 6` future work for both.
+
+**qt_cpp gaps that pre-date this sweep** (carried over from earlier in
+this PLAN):
+- Lon/lat readout in status-bar cursor display for geo-referenced nets
+  (XY works; geo conversion still TODO).
+- Numeric min/max range labels on the edge-data color legend (gradient
+  bar is drawn; range needs to be threaded through `SimSnapshot`).
+- Picked-vehicle info: route, vClass, waiting-time fields not yet shown
+  (id / type / speed are).
+- Real stop-lines for uncontrolled minor approaches (`lane_has_stopline`
+  rule) — `NetworkGeometry::build` still misses these; TLS-controlled
+  links already render correctly via the deduplicated bar push.
+- Screenshot diff + `qt_cpp/BENCHMARKING.md` siblings.
+
+**ecal_deck gaps vs sumo-gui** (i.e. items ecal_deck deliberately
+defers; see "Out of scope" near the polygon section) — qt_cpp inherits
+the same deferrals: in-GUI editing, animated/dynamic POIs, live detector
+readings, 3D extrusion of polygons + stops, calibrators / rerouters / VSS.
+
+**Conclusion.** The Python-side `--instance-id` work does not introduce
+any new qt_cpp parity gap. Pre-existing gaps are the same items already
+tracked in Phase 5 / Phase 6 above.
 
 ## Shared `.pb` network cache + early-render (planned)
 
@@ -641,8 +710,9 @@ validated the pattern; the remaining 11 layers + `NetworkView` were then
 migrated together. The OpenGL backend was deleted in one commit once the RHI
 version reached visual parity on the doe scenario.
 
-1. ✅ **VehicleLayerRhi** — instanced rotated quads. Validated end-to-end first
-   via the standalone `qt_cpp_rhi_spike` driver against both Qt 6.4 and 6.8.
+1. ✅ **VehicleLayerRhi** — instanced rotated quads. Originally validated
+   end-to-end via a standalone `qt_cpp_rhi_spike` driver against both Qt 6.4
+   and 6.8; the spike was removed after the main `qt_cpp` reached RHI parity.
 2. ✅ **PersonLayerRhi** — instanced quads.
 3. ✅ **POILayerRhi** — instanced discs.
 4. ✅ **TLSLayerRhi** — instanced oriented bar with state colour.

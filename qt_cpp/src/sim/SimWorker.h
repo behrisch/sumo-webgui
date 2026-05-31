@@ -72,6 +72,14 @@ signals:
     void benchmarkReport(double stepsPerSec, double snapshotsPerSec,
                          double skipRate, double avgStepMs,
                          double avgBuildMs);
+    // Fired exactly once per scenario, when libsumo::Simulation::getMinExpectedNumber()
+    // first reaches 0 (configured end time hit, or all vehicles departed).
+    // Summary numbers are cumulative over the entire run (load → end), not the
+    // rolling 2 s window used by benchmarkReport.  Consumed by --benchmark mode
+    // to print a final summary and quit the application.
+    void simulationEnded(qint64 totalSteps, double simTime, double wallSec,
+                         double avgStepMs, double avgBuildMs,
+                         double snapshotsPerSec, double skipRate);
 
 private slots:
     void onTimerTick();
@@ -108,6 +116,16 @@ private:
     qint64 m_bmWindowSkipped    = 0;
     qint64 m_bmWindowStepNs     = 0;  // sum of Simulation::step() wall-time
     qint64 m_bmWindowBuildNs    = 0;  // sum of buildSnapshot() wall-time
+
+    // Cumulative (whole-run) benchmark accumulators. Reset by loadScenario;
+    // drained by the simulationEnded signal on first end-of-sim detection.
+    qint64 m_runStartNs       = 0;
+    qint64 m_runSteps         = 0;
+    qint64 m_runSnapshots     = 0;
+    qint64 m_runSkipped       = 0;
+    qint64 m_runStepNs        = 0;
+    qint64 m_runBuildNs       = 0;
+    bool   m_endEmitted       = false;
 
     std::shared_ptr<std::atomic<int>> m_renderPending = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<NetworkGeometry> m_ng;

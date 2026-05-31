@@ -89,6 +89,11 @@ void SimWorker::loadScenario(const QString& sumocfgPath) {
         m_renderPending->store(0, std::memory_order_release);
         m_bmWindowStartNs = m_bmWindowSteps = m_bmWindowSnapshots = 0;
         m_bmWindowSkipped = m_bmWindowStepNs = m_bmWindowBuildNs = 0;
+        m_runStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        m_runSteps = m_runSnapshots = m_runSkipped = 0;
+        m_runStepNs = m_runBuildNs = 0;
+        m_endEmitted = false;
         m_typeColors.clear();  // fresh per-scenario type registry
         emit scenarioLoaded(sumocfgPath);
         m_ng = buildNetworkGeometry();
@@ -378,6 +383,11 @@ void SimWorker::stepOnce() {
         if (built) ++m_bmWindowSnapshots; else ++m_bmWindowSkipped;
         m_bmWindowStepNs  += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
         m_bmWindowBuildNs += buildNs;
+        // Cumulative whole-run counters (consumed by simulationEnded summary).
+        ++m_runSteps;
+        if (built) ++m_runSnapshots; else ++m_runSkipped;
+        m_runStepNs  += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        m_runBuildNs += buildNs;
         constexpr qint64 kReportNs = 2'000'000'000;  // 2 s
         const qint64 dtNs = nowNs - m_bmWindowStartNs;
         if (dtNs >= kReportNs) {
@@ -406,18 +416,38 @@ void SimWorker::stepOnce() {
             m_bmWindowBuildNs   = 0;
         }
 
-        // Respect the scenario's end condition: when the configured end
-        // time is reached (or all vehicles have left and none are due to
-        // depart), libsumo reports zero expected vehicles.  Stop the play
-        // loop so we don't keep spinning Simulation::step() past the end.
-        if (libsumo::Simulation::getMinExpectedNumber() <= 0) {
-            if (m_playing) {
+        // Respect the scenario's end condition: either all expected vehicles
+        // are done, or the configured end time has been reached (vehicles
+        // may still be queued but libsumo will refuse to step further).
+        // Only check while playing — otherwise the initial step from
+        // loadScenario could trip a transient zero-vehicle window before
+        // routes have been built and prevent play from ever starting.
+        if (m_playing) {
+            const double endT = libsumo::Simulation::getEndTime();
+            const double nowT = libsumo::Simulation::getTime();
+            const bool atEnd  = libsumo::Simulation::getMinExpectedNumber() <= 0
+                             || (endT > 0 && nowT >= endT);
+            if (atEnd) {
                 pause();
                 std::fprintf(stderr,
                     "[sim] end of simulation reached at t=%.2f s (step %lld)\n",
-                    libsumo::Simulation::getTime(),
+                    nowT,
                     static_cast<long long>(m_stepCount));
                 std::fflush(stderr);
+                if (!m_endEmitted) {
+                    m_endEmitted = true;
+                    const qint64 wallNs = nowNs - m_runStartNs;
+                    const double wallSec  = wallNs > 0 ? wallNs / 1e9 : 0.0;
+                    const double avgStep  = m_runSteps > 0
+                        ? (m_runStepNs / 1e6) / double(m_runSteps) : 0.0;
+                    const double avgBuild = m_runSnapshots > 0
+                        ? (m_runBuildNs / 1e6) / double(m_runSnapshots) : 0.0;
+                    const double snapsPs  = wallSec > 0 ? m_runSnapshots / wallSec : 0.0;
+                    const double skipR    = m_runSteps > 0
+                        ? double(m_runSkipped) / double(m_runSteps) : 0.0;
+                    emit simulationEnded(m_runSteps, nowT,
+                                         wallSec, avgStep, avgBuild, snapsPs, skipR);
+                }
             }
         }
     } catch (const std::exception& e) {

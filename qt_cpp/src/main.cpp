@@ -1,8 +1,11 @@
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QObject>
 #include <clocale>
+#include <cstdio>
 
 #include "MainWindow.h"
+#include "sim/SimWorker.h"
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -25,6 +28,14 @@ int main(int argc, char** argv) {
         "Path to a .sumocfg file to open on startup.",
         "path");
     parser.addOption(sumocfgOpt);
+    QCommandLineOption benchOpt(
+        QStringList{"b", "benchmark"},
+        "Headless-ish benchmark mode: auto-load the .sumocfg, force delay=0, "
+        "start playing immediately and exit with a one-line summary as soon as "
+        "the simulation ends. Requires --sumocfg. The GUI window is still "
+        "shown so the full render pipeline is exercised (matches "
+        "ecal_deck's --benchmark-full behaviour rather than --benchmark).");
+    parser.addOption(benchOpt);
     parser.addPositionalArgument("sumocfg",
         "Path to a .sumocfg file to open on startup (positional alias for -s).",
         "[sumocfg]");
@@ -41,8 +52,47 @@ int main(int argc, char** argv) {
         const QStringList pos = parser.positionalArguments();
         if (!pos.isEmpty()) cfg = pos.first();
     }
+
+    const bool benchmark = parser.isSet(benchOpt);
+    if (benchmark && cfg.isEmpty()) {
+        std::fprintf(stderr,
+            "qt_cpp: --benchmark requires a .sumocfg path (use -s PATH or a "
+            "positional argument).\n");
+        return 2;
+    }
+
     if (!cfg.isEmpty()) {
         win.loadSumocfg(cfg);
+    }
+
+    if (benchmark) {
+        SimWorker* sim = win.simWorker();
+        // Force max-speed stepping and auto-start as soon as the scenario
+        // finishes loading. scenarioLoaded fires on the sim thread; queued
+        // connections marshal the play / setDelayMs calls onto the same.
+        QObject::connect(sim, &SimWorker::scenarioLoaded, sim,
+            [sim](const QString&) {
+                QMetaObject::invokeMethod(sim, "setDelayMs",
+                    Qt::QueuedConnection, Q_ARG(int, 0));
+                QMetaObject::invokeMethod(sim, "play",
+                    Qt::QueuedConnection);
+            });
+        // Whole-run summary, fired exactly once, then exit.
+        QObject::connect(sim, &SimWorker::simulationEnded, &app,
+            [&app](qint64 steps, double simTime, double wallSec,
+                   double avgStepMs, double avgBuildMs,
+                   double snapsPerSec, double skipRate) {
+                std::fprintf(stderr,
+                    "[benchmark] qt_cpp: steps=%lld sim_time=%.2fs "
+                    "wall=%.2fs steps/s=%.1f snapshots/s=%.1f skip=%.1f%% "
+                    "avg_step=%.3fms avg_build=%.3fms\n",
+                    static_cast<long long>(steps), simTime, wallSec,
+                    wallSec > 0 ? steps / wallSec : 0.0,
+                    snapsPerSec, skipRate * 100.0,
+                    avgStepMs, avgBuildMs);
+                std::fflush(stderr);
+                app.exit(0);
+            });
     }
 
     return app.exec();

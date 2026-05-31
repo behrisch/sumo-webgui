@@ -1319,6 +1319,63 @@ Starting with step 1 delivers 90% of the performance benefit with moderate C++ s
 
 ## Future
 
+### Multi-instance support (`--instance-id`) ✅ implemented 2026-05-31
+
+**Problem.** eCAL pub/sub is host-wide via shared memory + multicast. Running two
+`sumo_ecal_publisher` + `ecal_ws_bridge` pairs on one machine caused topic
+crosstalk (both bridges saw both publishers on `sumo/simstep`, etc.), and both
+service servers tried to register `sumo_control`. Result: garbled vehicle
+streams and undefined service-call routing.
+
+**Decision.** App-level namespace prefix, opt-in via `--instance-id`. Chosen
+over eCAL-domain isolation (per-instance `ECAL_DATA` + multicast group) because
+it needs no per-host config files, no env-var plumbing, and `ecal_mon` still
+sees every instance in one place for debugging.
+
+**What got prefixed.**
+- All five publisher topics: `sumo/{simstep,log,network,vehicletypes,additionals}`
+  → `{id}/sumo/...`
+- Service name: `sumo_control` → `{id}/sumo_control`
+- libsumo native fast-path: `_ecal_native.init(_ns("sumo/simstep"), _ns("sumo/vehicletypes"))`
+- `ecal_core.initialize(name)` process name suffixed `_{id}` so the eCAL
+  registry shows distinct entries.
+
+**Code touchpoints.**
+- `ecal_ws_bridge.py`: added `--instance-id`; lifted topic strings into
+  `TOPIC_*` constants; subscribe loop wraps each name in `_ns(id, topic)`;
+  `_make_callback` captures `is_additionals = (topic == TOPIC_ADDITIONALS)`
+  once so the runtime check stays a single boolean compare instead of a
+  string compare against a prefixed name.
+- `sumo_ecal_publisher.py`: added `--instance-id`; closure-local `_ns()` in
+  `main()` is used by the five `_make_publisher` calls, the `ServiceServer`
+  constructor, and the nested `_do_load`'s `_ecal_native.init`. Since
+  `_do_load` is defined inside `main`, the closure captures `_ns` and
+  `instance_id` naturally.
+- `run.sh`: accepts `--id` / `--instance-id` and `--ws-port`; forwards to
+  both processes; exports `VITE_WS_PORT` for the Vite dev server.
+- `frontend/src/App.tsx`: `WS_URL` resolved at runtime in priority order
+  `?ws=` → `?ws-port=` → `import.meta.env.VITE_WS_PORT` → `ws://<host>:8765`.
+  One bundle serves every instance; users just open a different tab.
+
+**Backward compatibility.** Empty `--instance-id` (default) renders every
+prefix call a no-op, so single-instance use stays byte-for-byte identical
+(`sumo/simstep`, service `sumo_control`, process name `sumo_publisher`).
+
+**Usage.**
+```bash
+./run.sh --id A --ws-port 8765 --sumo-cfg ../doe/view.sumocfg
+./run.sh --id B --ws-port 8766 --sumo-cfg ../other/view.sumocfg
+# browser tabs:
+#   http://localhost:5173/?ws-port=8765   (instance A)
+#   http://localhost:5174/?ws-port=8766   (instance B; Vite auto-picks next free port)
+```
+
+**Tauri tie-in (future).** A native shell can mint a uuid per window,
+pick a free port via `portpicker`, spawn the two sidecars with
+`--id <uuid> --ws-port <port>`, and load the embedded webview with
+`?ws-port=<port>`. The user never sees the id or the port. No further
+code changes needed in publisher / bridge / frontend.
+
 ### Screen recording to video
 **Feasibility**: High. deck.gl renders into a `<canvas>` element; `canvas.captureStream(30)` returns
 a `MediaStream` that can be fed directly to `MediaRecorder` with `video/webm` or `video/mp4` codec.
