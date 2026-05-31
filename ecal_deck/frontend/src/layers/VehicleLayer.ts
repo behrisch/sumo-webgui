@@ -31,7 +31,7 @@ export function buildVehicleLayer(
   typeTable: VehicleTypeTable | null,
   colorAttrIdx: number,
   colorAttrName: string,
-  shape: VehicleShape = 'triangle',
+  shape: VehicleShape = 'car',
   sizeMinPixels = 0,
   metersPerPixel = 1,
 ) {

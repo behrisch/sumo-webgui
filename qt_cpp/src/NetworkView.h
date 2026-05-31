@@ -157,7 +157,7 @@ private:
     int    m_fpsFrames        = 0;
 
     // Frame-rate cap for snapshot-driven updates.  0 = uncapped.
-    int    m_maxFps        = 0;
+    int    m_maxFps        = 20;
     qint64 m_lastUpdateMs  = 0;
     QTimer* m_fpsCapTimer  = nullptr;  // single-shot, fires the deferred update
 };

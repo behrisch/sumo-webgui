@@ -213,6 +213,10 @@ void MainWindow::buildMenusAndToolbar() {
         const int fps = fpsCombo->itemData(idx).toInt();
         m_view->setMaxFps(fps);
     });
+    // Default 20 fps, matching ecal_deck's MAX_PUBLISH_FPS so the headline
+    // qt_cpp vs ecal_deck comparison is apples-to-apples out of the box.
+    // Triggers currentIndexChanged so NetworkView picks the value up.
+    fpsCombo->setCurrentIndex(fpsCombo->findData(20));
 
     toolbar->addSeparator();
     toolbar->addAction(resetAct);

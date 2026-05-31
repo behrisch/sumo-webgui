@@ -484,7 +484,7 @@ export default function App() {
     setVisibility((v) => ({ ...v, ...patch }));
 
   const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
-  const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('triangle');
+  const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('car');
   const [vehicleMinPixels, setVehicleMinPixels] = useState(3);
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
 
