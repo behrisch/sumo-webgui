@@ -28,6 +28,21 @@ find_path(LIBSUMO_INCLUDE_DIR
     NO_DEFAULT_PATH
 )
 
+# Locate the generated sumo_ecal.pb.h that libsumocpp emits when built with
+# the eCAL extension.  Consumers (qt_cpp) need this header to deserialize the
+# shared ECal protobuf messages without regenerating them — regeneration
+# would crash protobuf's global descriptor pool with "Symbol name conflicts"
+# at startup, because libsumocpp.so already registers them.
+find_path(LIBSUMO_ECAL_PB_INCLUDE_DIR
+    NAMES sumo_ecal.pb.h
+    PATHS
+        "${SUMO_HOME}/cmclaude/src/libsumo"
+        "${SUMO_HOME}/build/src/libsumo"
+        "${SUMO_HOME}/cmake-build-release/src/libsumo"
+        "${SUMO_HOME}/cmake-build-debug/src/libsumo"
+    NO_DEFAULT_PATH
+)
+
 find_library(LIBSUMO_LIBRARY
     NAMES sumocpp libsumocpp
     PATHS
@@ -47,8 +62,12 @@ find_package_handle_standard_args(Libsumo
 if(LIBSUMO_FOUND AND NOT TARGET Libsumo::Libsumo)
     get_filename_component(LIBSUMO_LIBRARY_DIR "${LIBSUMO_LIBRARY}" DIRECTORY)
     add_library(Libsumo::Libsumo SHARED IMPORTED)
+    set(_libsumo_includes "${LIBSUMO_INCLUDE_DIR}")
+    if(LIBSUMO_ECAL_PB_INCLUDE_DIR)
+        list(APPEND _libsumo_includes "${LIBSUMO_ECAL_PB_INCLUDE_DIR}")
+    endif()
     set_target_properties(Libsumo::Libsumo PROPERTIES
         IMPORTED_LOCATION "${LIBSUMO_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${LIBSUMO_INCLUDE_DIR}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_libsumo_includes}"
     )
 endif()

@@ -436,26 +436,47 @@ neither side reimplements the extraction.
 
 ### Why protobuf (decision)
 
-Considered raw POD, FlatBuffers, custom binary. Chose protobuf-lite:
+Considered raw POD, FlatBuffers, custom binary. Chose protobuf:
 
 - The Python publisher already writes this format; both halves stay in
   sync via `npm run generate`. A custom format would mean hand-written
   readers/writers in every language plus reinvented versioning.
-- `libprotobuf-lite` is ~600 KB, already in Ubuntu/Fedora/Homebrew.
-  Trivial vs. the ~60 MB of Qt + libsumocpp qt_cpp already pulls in.
+- `libprotobuf` is already in Ubuntu/Fedora/Homebrew. Trivial vs. the
+  ~60 MB of Qt + libsumocpp qt_cpp already pulls in.
 - All heavy payloads (`lane_points`, `tls_positions`, …) are `bytes`
   fields wrapping typed arrays. C++ gets them as `const std::string&`
   whose `.data()` is reinterpret_cast'able to `const float*` —
   effectively zero-copy. "Parsing" is reading a handful of headers.
-- `Protobuf_USE_STATIC_LIBS` + lite runtime keeps the binary small.
+
+### Single source of truth: SUMO's `sumo_ecal.proto`
+
+To avoid the protobuf descriptor-pool collision that would otherwise
+fire ("Symbol name 'sumo.NetworkData' conflicts ..." at process start
+because `libsumocpp.so` statically embeds its own generated code for
+the same `package sumo`), qt_cpp does **not** regenerate the proto.
+Instead it consumes the canonical `sumo_ecal.pb.h` from libsumocpp's
+build tree via `FindLibsumo.cmake` (which appends
+`${SUMO_HOME}/cmclaude/src/libsumo/` to `Libsumo::Libsumo`'s include
+interface).  The generated symbols are exported by `libsumocpp.so`
+itself, so no duplicate descriptor registration happens.
+
+The schema lives upstream in `<SUMO_HOME>/src/libsumo/sumo_ecal.proto`.
+The ecal_deck side keeps a checked-in `ecal_deck/proto/sumo.proto` for
+fallback (Windows boxes without SUMO checked out), but `npm run
+generate` (`ecal_deck/frontend/generate.ts`) syncs that file from
+`$SUMO_HOME/src/libsumo/sumo_ecal.proto` whenever `SUMO_HOME` is set.
+Schema changes therefore happen in **one** place — SUMO — and propagate
+to qt_cpp (via libsumocpp rebuild) and ecal_deck (via `npm run generate`).
 
 ### Plan
 
 1. **CMake**
-   - `find_package(Protobuf REQUIRED)`.
-   - Use `protobuf_generate(LANGUAGE cpp PROTOS ../ecal_deck/proto/sumo.proto OUT_VAR PROTO_SRCS)`
-     to emit `sumo.pb.cc/.h` into `${CMAKE_BINARY_DIR}/proto/`.
-   - Link `qt_cpp` and `qt_cpp_rhi_spike` against `protobuf::libprotobuf-lite`.
+   - `find_package(Protobuf REQUIRED)` for the runtime library only.
+   - No local `protoc` invocation: `sumo_ecal.pb.h` comes from
+     libsumocpp's build tree, exposed via `FindLibsumo.cmake`. The
+     generated C++ symbols are exported by `libsumocpp.so`.
+   - Link `qt_cpp` against `protobuf::libprotobuf` (for the parser
+     code referenced from the generated header at link time).
 2. **Cache lookup** (new file `src/sim/NetworkCache.{h,cpp}`)
    - `std::filesystem::path cachePathFor(const std::string& netFile)`
      mirrors Python's `_cache_path` (same `__ecaldeck__/<base>.net.v<N>.bin`

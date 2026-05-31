@@ -15,29 +15,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets ShaderTools)
 find_package(Libsumo REQUIRED)
-# Used to read the shared `.pb` network cache the ecal_deck publisher
-# writes; the lite runtime is sufficient since we only deserialize
-# typed-array `bytes` payloads + a few scalars. See "Shared `.pb` network
-# cache + early-render" in PLAN.md for the design.
+# qt_cpp deserializes the shared eCAL network-geometry cache published by
+# ecal_deck/sumo_ecal_publisher.py.  The generated sumo_ecal.pb.h comes from
+# libsumocpp's build tree via FindLibsumo.cmake; we only need libprotobuf at
+# link time for the deserializer.  See "Shared `.pb` network cache +
+# early-render" in PLAN.md for the design.
 find_package(Protobuf REQUIRED)
-
-# Generate sumo.pb.{cc,h} from the shared proto so qt_cpp can deserialize
-# the network cache written by ecal_deck's Python publisher.
-set(SUMO_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/../ecal_deck/proto/sumo.proto")
-set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/proto")
-file(MAKE_DIRECTORY "${PROTO_GEN_DIR}")
-set(SUMO_PB_CC "${PROTO_GEN_DIR}/sumo.pb.cc")
-set(SUMO_PB_H  "${PROTO_GEN_DIR}/sumo.pb.h")
-add_custom_command(
-    OUTPUT "${SUMO_PB_CC}" "${SUMO_PB_H}"
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-            --cpp_out=${PROTO_GEN_DIR}
-            -I ${CMAKE_CURRENT_SOURCE_DIR}/../ecal_deck/proto
-            ${SUMO_PROTO}
-    DEPENDS "${SUMO_PROTO}"
-    COMMENT "Generating sumo.pb.{cc,h} from ${SUMO_PROTO}"
-    VERBATIM
-)
 
 # ---------------------------------------------------------------------------
 # Main viewer (RHI-based). All layers go through Qt RHI; the OpenGL-only
@@ -83,8 +66,6 @@ add_executable(qt_cpp
     src/sim/SimSnapshot.h
     src/sim/SimWorker.cpp
     src/sim/SimWorker.h
-    ${SUMO_PB_CC}
-    ${SUMO_PB_H}
 )
 
 qt6_add_shaders(qt_cpp "qt_cpp_shaders"
@@ -103,7 +84,7 @@ qt6_add_shaders(qt_cpp "qt_cpp_shaders"
         src/shaders/tris_color.frag
 )
 
-target_include_directories(qt_cpp PRIVATE src "${PROTO_GEN_DIR}")
+target_include_directories(qt_cpp PRIVATE src)
 # SUMO's <utils/iodevices/OutputDevice.h> #includes <config.h> from the SUMO
 # build tree.  Pull that directory in so LogCapture.cpp can subclass
 # OutputDevice without needing a dummy config.h.
