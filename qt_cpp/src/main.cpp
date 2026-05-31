@@ -43,7 +43,15 @@ int main(int argc, char** argv) {
 
     MainWindow win;
     win.resize(1280, 800);
-    win.show();
+    const bool benchmark = parser.isSet(benchOpt);
+    if (benchmark) {
+        // Show the window full-screen so the render workload matches the
+        // ecal_deck side of the comparison (the browser is run F11 / full
+        // viewport for benchmarks).
+        win.showFullScreen();
+    } else {
+        win.show();
+    }
 
     QString cfg;
     if (parser.isSet(sumocfgOpt)) {
@@ -53,7 +61,6 @@ int main(int argc, char** argv) {
         if (!pos.isEmpty()) cfg = pos.first();
     }
 
-    const bool benchmark = parser.isSet(benchOpt);
     if (benchmark && cfg.isEmpty()) {
         std::fprintf(stderr,
             "qt_cpp: --benchmark requires a .sumocfg path (use -s PATH or a "

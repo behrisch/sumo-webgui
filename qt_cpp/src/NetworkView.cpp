@@ -210,13 +210,13 @@ void NetworkView::render(QRhiCommandBuffer* cb) {
 
     if (m_vehicleLayer) {
         m_vehicleLayer->setProjection(pf);
-        // Mirror ecal `vehicleMinPixels` ≈ 6 px. Convert px → world meters
-        // via the camera's current pixels-per-meter. Width clamp is half as
-        // big as length so motorbikes/bikes don't get fattened too much.
+        // Convert the requested px → world meters via the camera's current
+        // pixels-per-meter. Apply the same floor to width and length to match
+        // ecal_deck's `vehicleMinPixels` semantics (both axes clamped equally;
+        // at low zoom the vehicle becomes a square `min²` patch).
         const double ppu = m_cam.pixelsPerUnit();
-        const float minLen = ppu > 1e-6 ? float(6.0 / ppu) : 0.f;
-        const float minWid = minLen * 0.5f;
-        m_vehicleLayer->setMinSize(minLen, minWid);
+        const float minM = ppu > 1e-6 ? float(double(m_vehicleMinPixels) / ppu) : 0.f;
+        m_vehicleLayer->setMinSize(minM, minM);
         m_vehicleLayer->resourceUpdate(batch);
     }
     if (m_personLayer)  { m_personLayer ->setProjection(pf); m_personLayer ->resourceUpdate(batch); }
@@ -343,6 +343,11 @@ void NetworkView::setVehiclesVisible(bool on)  { m_layerVehiclesVisible = on; up
 void NetworkView::setAgentsVisible  (bool on)  { m_layerAgentsVisible   = on; update(); }
 void NetworkView::setTLSVisible     (bool on)  { m_layerTLSVisible      = on; update(); }
 void NetworkView::setEdgeDataVisible(bool on)  { m_layerEdgeDataVisible = on; update(); }
+
+void NetworkView::setVehicleMinPixels(int px) {
+    m_vehicleMinPixels = std::max(0, px);
+    update();
+}
 
 void NetworkView::setVehicleShape(int shape) {
     using S = VehicleLayerRhi::Shape;

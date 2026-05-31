@@ -15,6 +15,7 @@
 #include <QPolygonF>
 #include <QShowEvent>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
 #include <QIcon>
@@ -191,6 +192,21 @@ void MainWindow::buildMenusAndToolbar() {
         QMetaObject::invokeMethod(
             m_sim, "setVehicleColorMode", Qt::QueuedConnection, Q_ARG(int, idx));
     });
+
+    toolbar->addWidget(new QLabel(tr("  Min px: "), this));
+    auto* minPxSpin = new QSpinBox(this);
+    minPxSpin->setRange(0, 50);
+    minPxSpin->setValue(3);  // matches ecal_deck's vehicleMinPixels default
+    minPxSpin->setToolTip(tr(
+        "Per-vehicle minimum on-screen size in pixels. Mirrors ecal_deck's "
+        "`vehicleMinPixels` so vehicles stay legible when zoomed out."));
+    toolbar->addWidget(minPxSpin);
+    connect(minPxSpin,
+            QOverload<int>::of(&QSpinBox::valueChanged),
+            m_view,
+            &NetworkView::setVehicleMinPixels);
+    // Push the default into the view before the first paint.
+    m_view->setVehicleMinPixels(minPxSpin->value());
 
     toolbar->addSeparator();
     toolbar->addWidget(new QLabel(tr("  Max fps: "), this));

@@ -52,6 +52,11 @@ public slots:
     // updates; user interaction (pan/zoom) is never deferred.
     void setMaxFps(int fps);
 
+    // Per-vehicle minimum on-screen size in pixels. Mirrors ecal_deck's
+    // `vehicleMinPixels` so vehicles stay legible when zoomed out. Converted
+    // to world meters each frame via the camera's current pixels-per-unit.
+    void setVehicleMinPixels(int px);
+
     // Hand the view the worker's render-pending flag. The view stores 0 here
     // each time it consumes a snapshot in render(), so the worker can detect
     // back-pressure and skip extraction for steps the GUI would otherwise
@@ -124,6 +129,7 @@ private:
     bool m_layerAgentsVisible   = true;
     bool m_layerTLSVisible      = true;
     bool m_layerEdgeDataVisible = true;
+    int  m_vehicleMinPixels     = 3;  // matches ecal_deck default
 
     // Full-class dynamic layers.
     std::unique_ptr<VehicleLayerRhi> m_vehicleLayer;
