@@ -960,6 +960,10 @@ def parse_args():
     p.add_argument("--additional-file", action="append", default=[], metavar="PATH",
                    help="Extra SUMO additional XML file(s) to scan for polygons / POIs / stops / "
                         "detectors. Repeatable. Augments any <additional-files> entry from the sumocfg.")
+    p.add_argument("--instance-id", default="",
+                   help="Optional instance id; prefixes every eCAL topic and the sumo_control "
+                        "service name (e.g. id 'A' -> 'A/sumo/simstep', service 'A/sumo_control'). "
+                        "Must match the bridge's --instance-id. Empty (default) = legacy unprefixed.")
     return p.parse_args()
 
 
@@ -970,14 +974,21 @@ def main():
         args.sumo_cfg = None
     sumo_bin = os.path.join(SUMO_HOME, "bin", "sumo")
 
-    # --- init eCAL and publishers ---
-    ecal_core.initialize("sumo_publisher")
+    instance_id = args.instance_id
 
-    pub_network      = _make_publisher("sumo/network",      "sumo.NetworkData")
-    pub_additionals  = _make_publisher("sumo/additionals",  "sumo.AdditionalsNotice")
-    pub_simstep      = _make_publisher("sumo/simstep",      "sumo.SimStepBin")
-    pub_vehicletypes = _make_publisher("sumo/vehicletypes", "sumo.VehicleTypeDict")
-    pub_log          = _make_publisher("sumo/log",          "sumo.LogMessage")
+    def _ns(name: str) -> str:
+        """Prefix an eCAL topic / service name with the instance id (no-op if empty)."""
+        return f"{instance_id}/{name}" if instance_id else name
+
+    # --- init eCAL and publishers ---
+    proc_name = "sumo_publisher" + (f"_{instance_id}" if instance_id else "")
+    ecal_core.initialize(proc_name)
+
+    pub_network      = _make_publisher(_ns("sumo/network"),      "sumo.NetworkData")
+    pub_additionals  = _make_publisher(_ns("sumo/additionals"),  "sumo.AdditionalsNotice")
+    pub_simstep      = _make_publisher(_ns("sumo/simstep"),      "sumo.SimStepBin")
+    pub_vehicletypes = _make_publisher(_ns("sumo/vehicletypes"), "sumo.VehicleTypeDict")
+    pub_log          = _make_publisher(_ns("sumo/log"),          "sumo.LogMessage")
 
     def _log(level: str, text: str) -> None:
         """Publish a log message to sumo/log and print to terminal."""
@@ -1638,7 +1649,7 @@ def main():
             ctrl["sumocfg_path"]   = sumocfg_path
             sim["use_native_ecal"] = bool(_has_native_ecal)
             if sim["use_native_ecal"]:
-                _ecal_native.init("sumo/simstep", "sumo/vehicletypes")
+                _ecal_native.init(_ns("sumo/simstep"), _ns("sumo/vehicletypes"))
                 _log("INFO", "Using native libsumo::Batch publisher (C++ fast-path%s)."
                      % (" + geo conversion" if ng.geo_referenced else ""))
             if sim["end_time_ms"] is not None:
@@ -1853,7 +1864,7 @@ def main():
             return d
         return ecal_core.ServiceMethodInformation(name, _dti(req_cls), _dti(resp_cls))
 
-    svc = ecal_core.ServiceServer("sumo_control")
+    svc = ecal_core.ServiceServer(_ns("sumo_control"))
     for name, req_cls, resp_cls, cb in [
         ("list_dir",       sumo_pb2.ListDirRequest,      sumo_pb2.ListDirResponse,       _on_list_dir),
         ("load",           sumo_pb2.LoadRequest,         sumo_pb2.CommandAck,            _on_load),

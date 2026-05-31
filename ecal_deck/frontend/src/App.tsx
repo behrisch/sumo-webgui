@@ -30,7 +30,30 @@ import type { PickingInfo } from '@deck.gl/core';
 import type { LayerVisibility } from './components/ControlPanel';
 import type { NetworkGeometry, TlsEntry } from './generated/sumo';
 
-const WS_URL = 'ws://localhost:8765';
+// WS endpoint resolution (in priority order):
+//   1. ?ws=ws://host:port query param  (full URL)
+//   2. ?ws-port=NNNN query param       (port only, host = current location.hostname)
+//   3. import.meta.env.VITE_WS_PORT    (build / dev-server env)
+//   4. default 8765 on localhost
+//
+// This lets one frontend bundle serve multiple bridge instances by varying the
+// query string per browser tab.
+function _resolveWsUrl(): string {
+  try {
+    const qs = new URLSearchParams(window.location.search);
+    const wsFull = qs.get('ws');
+    if (wsFull) return wsFull;
+    const host = window.location.hostname || 'localhost';
+    const portFromQs = qs.get('ws-port');
+    if (portFromQs) return `ws://${host}:${portFromQs}`;
+    const portFromEnv = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_WS_PORT;
+    if (portFromEnv) return `ws://${host}:${portFromEnv}`;
+    return `ws://${host}:8765`;
+  } catch {
+    return 'ws://localhost:8765';
+  }
+}
+const WS_URL = _resolveWsUrl();
 const BASEMAP_STYLES: Record<string, string> = {
   liberty:   'https://tiles.openfreemap.org/styles/liberty',
   bright:    'https://tiles.openfreemap.org/styles/bright',

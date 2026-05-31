@@ -212,7 +212,12 @@ def _detectors_cache_to_wire(buf):
 _ADDITIONALS_CONVERTER_BY_TYPE = {}  # populated after _TYPE_* constants exist
 
 
-SERVICE_NAME = "sumo_control"
+SERVICE_BASENAME = "sumo_control"
+
+
+def _ns(instance_id: str, name: str) -> str:
+    """Prefix an eCAL topic / service name with the instance id (no-op if empty)."""
+    return f"{instance_id}/{name}" if instance_id else name
 
 # Random instance id, regenerated each bridge process start. Sent to each new
 # client as a "hello" message. The frontend reloads the page if it ever sees a
@@ -248,12 +253,18 @@ _TYPE_POLYGONS      = 9
 _TYPE_STOPS         = 10
 _TYPE_DETECTORS     = 11
 
+TOPIC_SIMSTEP      = "sumo/simstep"
+TOPIC_LOG          = "sumo/log"
+TOPIC_NETWORK      = "sumo/network"
+TOPIC_VEHICLETYPES = "sumo/vehicletypes"
+TOPIC_ADDITIONALS  = "sumo/additionals"
+
 TOPICS = {
-    "sumo/simstep":      _TYPE_SIMSTEP,
-    "sumo/log":          _TYPE_LOG,
-    "sumo/network":      _TYPE_NETWORK,
-    "sumo/vehicletypes": _TYPE_VEHICLETYPES,
-    "sumo/additionals":  -1,   # placeholder: family-discriminated in callback
+    TOPIC_SIMSTEP:      _TYPE_SIMSTEP,
+    TOPIC_LOG:          _TYPE_LOG,
+    TOPIC_NETWORK:      _TYPE_NETWORK,
+    TOPIC_VEHICLETYPES: _TYPE_VEHICLETYPES,
+    TOPIC_ADDITIONALS:  -1,   # placeholder: family-discriminated in callback
 }
 
 # AdditionalsNotice.Family → binary type byte
@@ -293,12 +304,13 @@ _pending: dict[int, bytes] = {}  # type_byte -> latest frame bytes
 # eCAL callback (runs in eCAL thread — must not touch asyncio directly)
 # ---------------------------------------------------------------------------
 def _make_callback(topic: str, type_byte: int):
+    is_additionals = (topic == TOPIC_ADDITIONALS)
     def _cb(publisher_id, data_type_info, data):
         global _network_frame, _simstep_snapshot_frame, _vehicletypes_frame
         try:
             buf = bytes(data.buffer)
 
-            if topic == "sumo/additionals":
+            if is_additionals:
                 notice = sumo_pb2.AdditionalsNotice()
                 notice.ParseFromString(buf)
                 tb = _ADDITIONALS_TYPE_BY_FAMILY.get(notice.family)
@@ -579,16 +591,19 @@ async def _handler(websocket) -> None:
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-async def _run(ws_port: int, compress: bool) -> None:
+async def _run(ws_port: int, compress: bool, instance_id: str) -> None:
     global _loop, _svc_client, _poller_task
     _loop = asyncio.get_running_loop()
 
-    ecal_core.initialize("sumo_ecal_bridge")
-    _svc_client = ecal_core.ServiceClient(SERVICE_NAME)
+    proc_name = "sumo_ecal_bridge" + (f"_{instance_id}" if instance_id else "")
+    ecal_core.initialize(proc_name)
+    _svc_client = ecal_core.ServiceClient(_ns(instance_id, SERVICE_BASENAME))
 
     subscribers = []
     for topic, type_byte in TOPICS.items():
-        sub = ecal_core.Subscriber(topic)
+        ns_topic = _ns(instance_id, topic)
+        sub = ecal_core.Subscriber(ns_topic)
+        # Pass the un-prefixed topic to the callback so the additionals check stays simple.
         sub.set_receive_callback(_make_callback(topic, type_byte))
         subscribers.append(sub)
 
@@ -613,9 +628,14 @@ def main():
     p.add_argument("--ws-port", type=int, default=8765)
     p.add_argument("--compress", action="store_true",
                    help="Enable permessage-deflate WebSocket compression (not recommended: slow for large binary frames)")
+    p.add_argument("--instance-id", default="",
+                   help="Optional instance id; prefixes every eCAL topic and the sumo_control "
+                        "service name (e.g. id 'A' -> 'A/sumo/simstep', service 'A/sumo_control'). "
+                        "Lets multiple bridge+publisher pairs coexist on one host without crosstalk. "
+                        "Empty (default) keeps legacy unprefixed names.")
     args = p.parse_args()
     try:
-        asyncio.run(_run(args.ws_port, compress=args.compress))
+        asyncio.run(_run(args.ws_port, compress=args.compress, instance_id=args.instance_id))
     except KeyboardInterrupt:
         pass
     finally:
