@@ -21,6 +21,7 @@
 #pragma pop_macro("signals")
 
 #include "NetworkGeometry.h"
+#include "NetworkCache.h"
 #include "LogCapture.h"
 
 SimWorker::SimWorker(QObject* parent) : QObject(parent) {
@@ -61,6 +62,16 @@ void SimWorker::closeIfOpen() noexcept {
 
 void SimWorker::loadScenario(const QString& sumocfgPath) {
     closeIfOpen();
+    // Best-effort early render from the shared ecal_deck network cache.
+    // If `__ecaldeck__/<base>.net.vN.bin` exists next to the .net.xml and
+    // is up-to-date, fire networkReady BEFORE Simulation::start() so the
+    // user sees the road network during the (often multi-second) libsumo
+    // load.  Cache miss / version mismatch / geo-referenced net all
+    // silently fall through to the libsumo path, which then emits a full
+    // ng (with polygons, POIs, stops, detectors) that supersedes this one.
+    if (auto cached = network_cache::tryLoadCache(sumocfgPath.toStdString())) {
+        emit networkReady(cached);
+    }
     try {
         // --no-warnings is intentionally NOT set: warnings + errors are now
         // surfaced in the dockable "Log" panel (see MainWindow + LogCapture).

@@ -24,13 +24,19 @@ std::string cachePathFor(const std::string& netFile);
 //   - cache older than the net file (stale)
 //   - proto version mismatch
 //   - protobuf parse failure
-// On hit, the returned struct owns its arrays (copied out of the parsed
-// proto). A later refactor may switch to zero-copy views into a
-// long-lived parsed-message holder.
+//   - geo-referenced network with missing/invalid PROJ string or net offset
 //
-// THIS IS A STUB. The implementation is intentionally a no-op until the
-// caller side (SimWorker phase-split) is in place; see "Shared `.pb`
-// network cache + early-render" in PLAN.md.
+// Geo-referenced caches are supported: cached lon/lat is inverted to
+// SUMO XY via PROJ + the cached proj_parameter and net_offset, so the
+// qt renderer (XY-only) sees the same coordinate frame whether the data
+// came from the cache or from a live libsumo extraction.
+//
+// On hit, the returned struct owns its arrays (copied out of the parsed
+// proto) and contains lanes + junctions + TLS bars + bbox + lane_kind.
+// Polygons / POIs / stopping places / detectors are NOT populated — those
+// live in separate cache families (`*.poly.vN.bin`, `*.stops.vN.bin`,
+// `*.det.vN.bin`) and still come from the libsumo extraction in
+// buildNetworkGeometry(). A future iteration can plug them in.
 std::shared_ptr<NetworkGeometry> tryLoadCache(const std::string& sumocfgPath);
 
 }  // namespace network_cache

@@ -21,6 +21,21 @@ find_package(Libsumo REQUIRED)
 # link time for the deserializer.  See "Shared `.pb` network cache +
 # early-render" in PLAN.md for the design.
 find_package(Protobuf REQUIRED)
+# PROJ is used by NetworkCache to invert lon/lat (cached for geo-referenced
+# networks by ecal_deck) back to SUMO XY so the qt renderer (XY-only) can
+# consume cached geometry without spinning up libsumo first.
+find_package(PROJ QUIET)
+if(NOT PROJ_FOUND)
+    # System without a CMake config for PROJ — fall back to pkg-config /
+    # raw -lproj. libproj.so + proj.h are both expected from libproj-dev.
+    find_library(PROJ_LIBRARY proj REQUIRED)
+    find_path(PROJ_INCLUDE_DIR proj.h REQUIRED)
+    add_library(PROJ::proj UNKNOWN IMPORTED)
+    set_target_properties(PROJ::proj PROPERTIES
+        IMPORTED_LOCATION "${PROJ_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PROJ_INCLUDE_DIR}"
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Main viewer (RHI-based). All layers go through Qt RHI; the OpenGL-only
@@ -101,6 +116,7 @@ target_link_libraries(qt_cpp PRIVATE
     Qt6::GuiPrivate
     Libsumo::Libsumo
     protobuf::libprotobuf
+    PROJ::proj
 )
 
 set_target_properties(qt_cpp PROPERTIES
