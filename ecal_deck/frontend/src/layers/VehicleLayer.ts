@@ -54,8 +54,15 @@ export function buildVehicleLayer(
   const scales      = new Float32Array(N * 3);  // [width, length, 1] per vehicle
 
   for (let i = 0; i < N; i++) {
-    let r: number, g: number, b: number;
-    if (attrVals && colorAttrName !== 'speed') {
+    let r: number, g: number, b: number, a = 220;
+    if (colorAttrName === 'type' && typeTable) {
+      const ti = typeIndices[i];
+      const off = ti * 4;
+      r = typeTable.colors[off];
+      g = typeTable.colors[off + 1];
+      b = typeTable.colors[off + 2];
+      a = typeTable.colors[off + 3];
+    } else if (attrVals && colorAttrName !== 'speed') {
       const val = attrVals[i];
       const [lo, hi] = ATTR_RANGES[colorAttrName] ?? [0, 1];
       const [cr, cg, cb] = colormap(Math.max(0, Math.min(1, (val - lo) / (hi - lo || 1))));
@@ -66,7 +73,7 @@ export function buildVehicleLayer(
     colors[i * 4]     = r;
     colors[i * 4 + 1] = g;
     colors[i * 4 + 2] = b;
-    colors[i * 4 + 3] = 220;
+    colors[i * 4 + 3] = a;
 
     // SUMO angle: 0=north, CW. deck.gl yaw: CCW-from-north. Negate to convert.
     orientations[i * 3 + 1] = -angles[i];

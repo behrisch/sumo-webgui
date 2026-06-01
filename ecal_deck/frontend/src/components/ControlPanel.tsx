@@ -166,6 +166,7 @@ export function ControlPanel(p: Props) {
       <div style={row}>
         <span style={{ whiteSpace: 'nowrap' }}>Vehicle color</span>
         <select value={p.vehicleColorAttr} onChange={(e) => p.onVehicleColorAttr(e.target.value)} style={sel}>
+          <option value="type">type</option>
           <option value="speed">speed</option>
           {p.vehicleKeys.map((k) => <option key={k} value={k}>{k}</option>)}
         </select>

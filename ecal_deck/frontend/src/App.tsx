@@ -483,7 +483,7 @@ export default function App() {
   const patchVisibility = (patch: Partial<LayerVisibility>) =>
     setVisibility((v) => ({ ...v, ...patch }));
 
-  const [vehicleColorAttr, setVehicleColorAttr] = useState('speed');
+  const [vehicleColorAttr, setVehicleColorAttr] = useState('type');
   const [vehicleShape, setVehicleShape]         = useState<VehicleShape>('car');
   const [vehicleMinPixels, setVehicleMinPixels] = useState(3);
   const [edgeColorAttr, setEdgeColorAttr]       = useState('');
@@ -817,7 +817,7 @@ export default function App() {
       for (const dl of r.layers) result.push(dl.clone({ visible: visibility.detectors }));
     }
     if (visibility.vehicles) {
-      const colorAttrIdx = vehicleColorAttr === 'speed'
+      const colorAttrIdx = (vehicleColorAttr === 'speed' || vehicleColorAttr === 'type')
         ? -1
         : (attributeConfig?.vehicle_enabled.indexOf(vehicleColorAttr) ?? -1);
       const vl = buildVehicleLayer(vehicleSnapshot, vehicleTypeTable, colorAttrIdx, vehicleColorAttr, vehicleShape, vehicleMinPixels, metersPerPixel);

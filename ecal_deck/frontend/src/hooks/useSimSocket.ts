@@ -34,6 +34,7 @@ export interface VehicleTypeTable {
   widths: Float32Array;
   shapes: string[];
   classes: Uint8Array;  // 0=vehicle, 1=person, 2=container
+  colors: Uint8Array;   // type_count*4 RGBA from VehicleType::getColor (yellow fallback)
 }
 
 export interface VehicleSnapshot {
@@ -234,7 +235,24 @@ export function useSimSocket(url: string): SimState {
             const classes = vtd.type_classes instanceof Uint8Array
               ? vtd.type_classes
               : new Uint8Array(vtd.type_classes);
-            const table: VehicleTypeTable = { ids, lengths, widths, shapes, classes };
+            const rawColors = vtd.type_colors instanceof Uint8Array
+              ? vtd.type_colors
+              : new Uint8Array(vtd.type_colors ?? 0);
+            // Fall back to yellow (qt_cpp parity) if the publisher is older and
+            // didn't emit type_colors, so the 'type' color mode still renders.
+            const colors = rawColors.length >= ids.length * 4
+              ? rawColors
+              : (() => {
+                  const fb = new Uint8Array(ids.length * 4);
+                  for (let i = 0; i < ids.length; i++) {
+                    fb[i * 4]     = 255;
+                    fb[i * 4 + 1] = 255;
+                    fb[i * 4 + 2] = 0;
+                    fb[i * 4 + 3] = 255;
+                  }
+                  return fb;
+                })();
+            const table: VehicleTypeTable = { ids, lengths, widths, shapes, classes, colors };
             vehicleTypeTableRef.current = table;
             setVehicleTypeTable(table);
             break;

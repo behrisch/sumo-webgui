@@ -1083,11 +1083,11 @@ def main():
     sim = {"converter": None, "geo_referenced": False, "all_edges": [], "has_tls": False,
            "edge_id_to_idx": {}, "end_time_ms": None}
 
-    # type-level property cache: type_id → (length, width, gui_shape)
+    # type-level property cache: type_id → (length, width, gui_shape, rgba_bytes)
     # cleared on each load so stale type data from a previous simulation doesn't leak
-    _type_cache: dict[str, tuple[float, float, str]] = {}
+    _type_cache: dict[str, tuple[float, float, str, bytes]] = {}
 
-    def _get_type_props(type_id: str) -> tuple[float, float, str]:
+    def _get_type_props(type_id: str) -> tuple[float, float, str, bytes]:
         if type_id not in _type_cache:
             try:
                 length    = traci.vehicletype.getLength(type_id)
@@ -1095,21 +1095,29 @@ def main():
                 gui_shape = traci.vehicletype.getShapeClass(type_id)
             except Exception:
                 length, width, gui_shape = 5.0, 1.8, "passenger"
-            _type_cache[type_id] = (length, width, gui_shape)
+            try:
+                # TraCI returns (r, g, b, a) each in 0..255
+                c = traci.vehicletype.getColor(type_id)
+                rgba = bytes((int(c[0]) & 0xFF, int(c[1]) & 0xFF,
+                              int(c[2]) & 0xFF, int(c[3]) & 0xFF))
+            except Exception:
+                # qt_cpp fallback is yellow; mirror it for visual parity.
+                rgba = b'\xff\xff\x00\xff'
+            _type_cache[type_id] = (length, width, gui_shape, rgba)
         return _type_cache[type_id]
 
     # --- stable type registry (per load, cleared in _do_load) ---
     _type_id_to_idx: dict[str, int] = {}   # type_id → stable index (insertion order)
-    _type_table: list = []                  # list of (id, length, width, shape, class_byte)
+    _type_table: list = []                  # list of (id, length, width, shape, class_byte, rgba_bytes)
 
     def _register_type(type_id: str, length: float, width: float, shape: str,
-                       class_byte: int) -> tuple[int, bool]:
+                       class_byte: int, rgba: bytes) -> tuple[int, bool]:
         """Return (index, is_new). Inserts on first encounter."""
         if type_id in _type_id_to_idx:
             return _type_id_to_idx[type_id], False
         idx = len(_type_table)
         _type_id_to_idx[type_id] = idx
-        _type_table.append((type_id, length, width, shape, class_byte))
+        _type_table.append((type_id, length, width, shape, class_byte, rgba))
         return idx, True
 
     _step_event = threading.Event()
@@ -1168,8 +1176,8 @@ def main():
             veh_spd.append(traci.vehicle.getSpeed(vid))
             veh_ang.append(traci.vehicle.getAngle(vid))
             tid = traci.vehicle.getTypeID(vid)
-            l, w, shp = _get_type_props(tid)
-            idx, is_new = _register_type(tid, l, w, shp, 0)  # 0=vehicle
+            l, w, shp, rgba = _get_type_props(tid)
+            idx, is_new = _register_type(tid, l, w, shp, 0, rgba)  # 0=vehicle
             if is_new:
                 new_types = True
             veh_type_idx.append(idx)
@@ -1198,8 +1206,8 @@ def main():
             pers_pos.append(x); pers_pos.append(y); pers_pos.append(0.0)
             pers_ang.append(traci.person.getAngle(pid))
             tid = traci.person.getTypeID(pid)
-            l, w, shp = _get_type_props(tid)
-            idx, is_new = _register_type(tid, l, w, shp, 1)  # 1=person
+            l, w, shp, rgba = _get_type_props(tid)
+            idx, is_new = _register_type(tid, l, w, shp, 1, rgba)  # 1=person
             if is_new:
                 new_types = True
             pers_type_idx.append(idx)
@@ -1213,6 +1221,7 @@ def main():
                 type_widths=_array.array('f', (row[2] for row in _type_table)).tobytes(),
                 type_shapes=b''.join(row[3].encode() + b'\x00' for row in _type_table),
                 type_classes=_array.array('B', (row[4] for row in _type_table)).tobytes(),
+                type_colors=b''.join(row[5] for row in _type_table),
             ).SerializeToString())
 
         # --- edge section (empty when no edge attrs configured) ---
