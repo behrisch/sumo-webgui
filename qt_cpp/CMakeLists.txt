@@ -11,16 +11,35 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+# for windows install QT via
+# > winget install miurahr.aqtinstall
+# > mkdir %SUMO_LIBRARIES%\Qt6; cd %SUMO_LIBRARIES%\Qt6
+# > aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 --modules qtshadertools
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets ShaderTools)
-find_package(Libsumo REQUIRED)
 # qt_cpp deserializes the shared eCAL network-geometry cache published by
 # ecal_deck/sumo_ecal_publisher.py.  The generated sumo_ecal.pb.h comes from
 # libsumocpp's build tree via FindLibsumo.cmake; we only need libprotobuf at
 # link time for the deserializer.  See "Shared `.pb` network cache +
 # early-render" in PLAN.md for the design.
-find_package(Protobuf REQUIRED)
+
+# Check if libraries have to be found, depending on SUMO_LIBRARIES
+set(SUMO_LIBRARIES "$ENV{SUMO_LIBRARIES}" CACHE PATH "Location of SUMOLibraries dependencies")
+
+# some user place SUMOLibraries in the same SUMO folder
+if (NOT SUMO_LIBRARIES AND EXISTS "${CMAKE_SOURCE_DIR}/../../SUMOLibraries")
+    set(SUMO_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/../../SUMOLibraries")
+endif ()
+if (SUMO_LIBRARIES AND WIN32)
+    file(GLOB ECAL_PATH "${SUMO_LIBRARIES}/eCAL*")
+    file(GLOB QT6_PATH "${SUMO_LIBRARIES}/Qt*/*/msvc*")
+    set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};${ECAL_PATH};${QT6_PATH}")
+endif()
+find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets ShaderTools)
+find_package(eCAL QUIET CONFIG)
+find_package(Protobuf QUIET)
+
+list(APPEND CMAKE_PREFIX_PATH "$ENV{SUMO_HOME}/cmvs/Release")
+find_package(SUMO)
 
 # ---------------------------------------------------------------------------
 # Main viewer (RHI-based). All layers go through Qt RHI; the OpenGL-only
@@ -88,18 +107,20 @@ target_include_directories(qt_cpp PRIVATE src)
 # SUMO's <utils/iodevices/OutputDevice.h> #includes <config.h> from the SUMO
 # build tree.  Pull that directory in so LogCapture.cpp can subclass
 # OutputDevice without needing a dummy config.h.
-if(EXISTS "${SUMO_HOME}/cmclaude/src/config.h")
-    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/cmclaude/src")
-elseif(EXISTS "${SUMO_HOME}/build/src/config.h")
-    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/build/src")
-elseif(EXISTS "${SUMO_HOME}/cmake-build-release/src/config.h")
-    target_include_directories(qt_cpp PRIVATE "${SUMO_HOME}/cmake-build-release/src")
+if (NOT WIN32)
+    if(EXISTS "$ENV{SUMO_HOME}/cmclaude/src/config.h")
+        target_include_directories(qt_cpp PRIVATE "$ENV{SUMO_HOME}/cmclaude/src")
+    elseif(EXISTS "$ENV{SUMO_HOME}/build/src/config.h")
+        target_include_directories(qt_cpp PRIVATE "$ENV{SUMO_HOME}/build/src")
+    elseif(EXISTS "$ENV{SUMO_HOME}/cmvs/Release/src/config.h")
+        target_include_directories(qt_cpp PRIVATE "$ENV{SUMO_HOME}/cmvs/Release/src")
+    endif()
 endif()
 target_link_libraries(qt_cpp PRIVATE
     Qt6::Widgets
     Qt6::WidgetsPrivate
     Qt6::GuiPrivate
-    Libsumo::Libsumo
+    SUMO::libsumocpp
     protobuf::libprotobuf
 )
 

@@ -1,6 +1,7 @@
 #include "LogCapture.h"
 
 #include <sstream>
+#if __has_include(<config.h>)
 
 // Qt defines `signals` as a macro; SUMO headers use `signals` as an
 // identifier.  Save / restore around the SUMO includes.
@@ -13,8 +14,8 @@
 #include <utils/common/MsgHandler.h>
 #include <utils/iodevices/OutputDevice.h>
 #pragma pop_macro("signals")
-
 namespace {
+
 
 class LogCapture : public OutputDevice {
 public:
@@ -61,6 +62,8 @@ struct LogCaptureSet::Impl {
     std::unique_ptr<LogCapture> err;
 };
 
+#endif
+
 LogCaptureSet::LogCaptureSet() = default;
 LogCaptureSet::~LogCaptureSet() = default;
 LogCaptureSet::LogCaptureSet(LogCaptureSet&&) noexcept = default;
@@ -68,6 +71,7 @@ LogCaptureSet& LogCaptureSet::operator=(LogCaptureSet&&) noexcept = default;
 
 LogCaptureSet installLogCaptures(LogRouter* router) {
     LogCaptureSet set;
+#if __has_include(<config.h>)
     set.impl = std::make_unique<LogCaptureSet::Impl>();
     set.impl->info = std::make_unique<LogCapture>(router, 0);
     set.impl->warn = std::make_unique<LogCapture>(router, 1);
@@ -75,5 +79,6 @@ LogCaptureSet installLogCaptures(LogRouter* router) {
     MsgHandler::getMessageInstance()->addRetriever(set.impl->info.get());
     MsgHandler::getWarningInstance()->addRetriever(set.impl->warn.get());
     MsgHandler::getErrorInstance()->addRetriever(set.impl->err.get());
+#endif
     return set;
 }

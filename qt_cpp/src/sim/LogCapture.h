@@ -36,8 +36,10 @@ struct LogCaptureSet {
     LogCaptureSet(const LogCaptureSet&) = delete;
     LogCaptureSet& operator=(const LogCaptureSet&) = delete;
 
+#if __has_include(<config.h>)
     struct Impl;
     std::unique_ptr<Impl> impl;
+#endif
 };
 
 // Create + register three captures (Info/Warning/Error) on libsumo's
